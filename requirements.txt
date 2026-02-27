@@ -1,0 +1,6 @@
+streamlit
+pandas
+plotly
+Pillow
+streamlit-paste-button
+pymongo[srv]
