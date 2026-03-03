@@ -50,6 +50,52 @@ def resolve_alias_project(name, project_alias_map):
         return name
     return project_alias_map.get(n, name)
 
+def get_visible_projects(db_obj, current_pm):
+    """按负责人过滤 + 别名去重：若A被映射到已存在的B，则默认隐藏A。"""
+    alias_map = db_obj.get("系统配置", {}).get("项目别名", {})
+    raw = [p for p, d in db_obj.items()
+           if p != "系统配置" and
+           (current_pm == "所有人" or str(d.get('负责人', '')).strip() == current_pm)]
+    out = []
+    for p in raw:
+        canonical = resolve_alias_project(p, alias_map)
+        if canonical != p and canonical in db_obj:
+            continue
+        out.append(p)
+
+    def _latest_log_date(proj_name):
+        latest = datetime.date.min
+        for comp in db_obj.get(proj_name, {}).get("部件列表", {}).values():
+            for lg in comp.get("日志流", []):
+                if is_hidden_system_log(lg):
+                    continue
+                try:
+                    dt = datetime.datetime.strptime(lg.get("日期", ""), "%Y-%m-%d").date()
+                except:
+                    continue
+                if dt > latest:
+                    latest = dt
+        return latest
+
+    def _is_paused(proj_name):
+        pd = db_obj.get(proj_name, {})
+        if str(pd.get("Milestone", "")).strip() == "暂停研发":
+            return True
+        comps = pd.get("部件列表", {})
+        gk = next((k for k in comps.keys() if "全局" in k), "全局进度")
+        return is_pause_stage(comps.get(gk, {}).get("主流程", ""))
+
+    def _is_finished(proj_name):
+        return str(db_obj.get(proj_name, {}).get("Milestone", "")).strip() in ["生产结束", "项目结束撒花🎉", "✅ 已完成(结束)"]
+
+    # 项目列表排序：进行中在前，暂停在中，完结在后；同组按最近更新倒序
+    out.sort(key=lambda p: (
+        1 if _is_paused(p) else (2 if _is_finished(p) else 0),
+        -_latest_log_date(p).toordinal(),
+        p
+    ))
+    return out
+
 def is_hidden_system_log(log_obj):
     evt = str((log_obj or {}).get("事件", ""))
     return "[系统自动追踪]" in evt
@@ -343,9 +389,7 @@ pm_list    = ["所有人", "Mo", "越", "袁"]
 current_pm = st.sidebar.selectbox("👤 视角切换", pm_list)
 
 db          = st.session_state.db
-valid_projs = [p for p, d in db.items()
-               if p != "系统配置" and
-               (current_pm == "所有人" or str(d.get('负责人', '')).strip() == current_pm)]
+valid_projs = get_visible_projects(db, current_pm)
 
 menu = st.sidebar.radio("模块导航", [
     MENU_DASHBOARD, MENU_SPECIFIC, MENU_FASTLOG,
@@ -469,7 +513,7 @@ if menu == MENU_DASHBOARD:
     # ── 缓存大盘计算结果（TTL=30s，切模块不重算）──
     @st.cache_data(ttl=30, show_spinner=False)
     def _build_dash(proj_list_key: str, db_hash: str):
-        _table = []; _gantt = []; _ppr = []; _sx = []; _sy = []
+        _table = []; _gantt = []; _ppr = []; _sx = []; _sy = []; _meta = []
         for proj in valid_projs:
             data = db[proj]
             if not data.get('部件列表') and not data.get('Milestone') and not data.get('Target'):
@@ -517,6 +561,13 @@ if menu == MENU_DASHBOARD:
             elif "】" in ce: ce=ce.split("】")[-1].split("[系统]")[0].strip()
             _table.append({"状态":r_txt,"项目":proj,"跟单":gd,"项目当前阶段":ms,
                 "开定时间":tgt,"预计发货":ship_itv,"断更":dt_txt,"最新全盘动态":f"[{latest_comp_name}] {ce}"})
+            _meta.append({
+                "项目": proj,
+                "项目标签": proj_y_label,
+                "最近更新": latest_date_obj.strftime("%Y-%m-%d") if latest_date_obj else "0001-01-01",
+                "是否暂停": 1 if str(ms).strip() == "暂停研发" else 0,
+                "是否完结": 1 if str(ms).strip() in ["生产结束", "项目结束撒花🎉", "✅ 已完成(结束)"] else 0
+            })
             try:
                 if tgt and tgt.upper()!='TBD':
                     pt=datetime.datetime.strptime(f"{tgt}-01" if len(tgt)==7 else tgt[:10],"%Y-%m-%d")
@@ -572,7 +623,7 @@ if menu == MENU_DASHBOARD:
                         if not is_last:
                             cs = ns if ns else log["工序"]
                             sd = log["日期_obj"]; buf = []
-        return _table, _gantt, _ppr, _sx, _sy
+        return _table, _gantt, _ppr, _sx, _sy, _meta
 
     # cache key：项目列表 + 数据指纹（只用非图片字段的哈希）
     import hashlib as _hl
@@ -580,18 +631,30 @@ if menu == MENU_DASHBOARD:
         {k:{fk:fv for fk,fv in v.items() if fk not in ("配件清单长图",)}
          for k,v in db.items() if k!="系统配置"},
         ensure_ascii=False, sort_keys=True).encode()).hexdigest()
-    table_data, gantt_data, _ppr_list, star_x, star_y = _build_dash(",".join(valid_projs), _db_sig)
+    table_data, gantt_data, _ppr_list, star_x, star_y, _meta = _build_dash(",".join(valid_projs), _db_sig)
     project_person_roles = set(map(tuple, _ppr_list))
 
 
     st.divider()
     st.subheader("📈 全局进展甘特图")
+    st.markdown("💡 数据量上来后，这里可叠加 **建模/设计/工程/开模具** 的平均耗时统计，辅助识别瓶颈阶段。")
     if gantt_data:
         df_g = pd.DataFrame(gantt_data).sort_values(by=["项目", "Start"])
+        if _meta:
+            df_meta = pd.DataFrame(_meta).drop_duplicates(subset=["项目标签"])
+            # 甘特排序：最近更新的进行中项目在上；暂停项目统一压到最下方
+            df_meta["排序组"] = df_meta.apply(
+                lambda r: 2 if r["是否暂停"] == 1 else (1 if r["是否完结"] == 1 else 0), axis=1
+            )
+            df_meta["最近更新_dt"] = pd.to_datetime(df_meta["最近更新"], errors="coerce").fillna(pd.Timestamp.min)
+            df_meta = df_meta.sort_values(by=["排序组", "最近更新_dt", "项目标签"], ascending=[True, False, True])
+            y_order = df_meta["项目标签"].tolist()
+        else:
+            y_order = sorted(df_g["项目"].unique().tolist())
         fig = px.timeline(
             df_g, x_start="Start", x_end="Finish", y="项目",
             color="工序阶段", hover_name="详情",
-            category_orders={"工序阶段": gantt_cat_orders},
+            category_orders={"工序阶段": gantt_cat_orders, "项目": y_order},
             color_discrete_map=combined_color_map
         )
         if star_x:
