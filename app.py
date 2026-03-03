@@ -763,6 +763,7 @@ elif menu == MENU_SPECIFIC:
                         stage_recent_logs[stg].append(f"[{log.get('日期','')}] {log.get('事件','')}")
 
             for log in raw_logs:
+            for log in comps[comp_name].get('日志流', []):
                 if is_hidden_system_log(log):
                     continue
                 stg = log.get('工序', ''); evt = log.get('事件', '')
@@ -778,6 +779,11 @@ elif menu == MENU_SPECIFIC:
                 pause_anchor_idx = None
                 parsed_logs = []
                 for lg in raw_logs:
+            cur_is_paused = is_pause_stage(cur_stage)
+            if cur_is_paused:
+                pause_anchor_idx = None
+                parsed_logs = []
+                for lg in comps[comp_name].get('日志流', []):
                     if is_hidden_system_log(lg):
                         continue
                     stg = lg.get('工序', '')
@@ -797,6 +803,7 @@ elif menu == MENU_SPECIFIC:
                     active_idxs = [STAGES_UNIFIED.index(s) for s in active_stages
                                    if s in STAGES_UNIFIED and not is_pause_stage(s)]
                     pause_anchor_idx = max(active_idxs) if active_idxs else c_idx
+                    pause_anchor_idx = max(active_idxs) if active_idxs else 0
                 real_c_idx = pause_anchor_idx
             else:
                 real_c_idx = c_idx
