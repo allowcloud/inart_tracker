@@ -78,6 +78,7 @@ DEFAULT_SYS_CFG = {
     "标准阶段": ["立项", "建模(含打印/签样)", "涂装", "设计", "工程拆件", "手板/结构板", "官图", "工厂复样(含胶件/上色等)", "大货", "⏸️ 暂停/搁置", "✅ 已完成(结束)"],
     "宏观阶段": ["立项", "建模", "设计", "工程", "模具", "修模", "生产", "暂停", "结束"],
     "排期基线": {"立项": 7, "建模": 42, "设计": 35, "工程": 49, "模具": 28, "修模": 14, "生产": 30},
+    "项目别名": {},
     "AI_COMP_KW":  {},
     "AI_STAGE_KW": {}
 }
@@ -269,9 +270,12 @@ def sync_save_db(changed_proj=None):
     changed_proj: 传入项目名时只写该项目（并发安全）
                   不传时全量保存（备份恢复/系统配置变更时用）
     """
-    for p in st.session_state.db:
-        if p != "系统配置":
-            auto_sync_milestone(p)
+    if changed_proj and changed_proj in st.session_state.db and changed_proj != "系统配置":
+        auto_sync_milestone(changed_proj)
+    else:
+        for p in st.session_state.db:
+            if p != "系统配置":
+                auto_sync_milestone(p)
     if changed_proj:
         db_manager.save_one(changed_proj, st.session_state.db[changed_proj])
         db_manager.save_one("系统配置", st.session_state.db["系统配置"])
@@ -295,6 +299,19 @@ def get_macro_phase(detail_stage):
     if "建模" in s or "打印" in s or "涂装" in s: return "建模"  # 涂装属于建模阶段
     if "立项" in s: return "立项"
     return "工程"
+
+def is_pause_stage(stage_name):
+    s = str(stage_name).strip()
+    return ("暂停" in s) or ("搁置" in s)
+
+def norm_text(s):
+    return re.sub(r'\s+', '', str(s or '').strip()).lower()
+
+def resolve_alias_project(name, project_alias_map):
+    n = norm_text(name)
+    if not n:
+        return name
+    return project_alias_map.get(n, name)
 
 def get_risk_status(milestone, target_date_str="TBD"):
     ms = str(milestone).strip()
@@ -491,7 +508,7 @@ if menu == MENU_DASHBOARD:
                         if k not in grouped:
                             grouped[k] = {"日期_obj": dt_obj, "日期_str": log['日期'],
                                           "工序": macro_stage, "事件": evt,
-                                          "部件": [c_name], "is_pause": macro_stage == "暂停"}
+                                          "部件": [c_name], "is_pause": is_pause_stage(macro_stage)}
                         elif c_name not in grouped[k]["部件"]:
                             grouped[k]["部件"].append(c_name)
                     except: pass
@@ -543,8 +560,12 @@ if menu == MENU_DASHBOARD:
                         if nxt["工序"] == "暂停" or not in_pause_period(nxt["日期_obj"]):
                             ns = nxt["工序"]; break
                     if is_last or ns != cs:
-                        ed = log["日期_obj"]
-                        if sd == ed: ed += datetime.timedelta(days=1)
+                        # 暂停在甘特图里只占 1 天体量：暂停当天有色块，后续保持留白直到恢复
+                        if cs == "暂停":
+                            ed = sd + datetime.timedelta(days=1)
+                        else:
+                            ed = log["日期_obj"]
+                            if sd == ed: ed += datetime.timedelta(days=1)
                         _gantt.append({"项目": proj_y_label, "工序阶段": cs,
                                        "Start": sd.strftime("%Y-%m-%d"),
                                        "Finish": ed.strftime("%Y-%m-%d"),
@@ -624,10 +645,15 @@ elif menu == MENU_SPECIFIC:
                         db[new_p] = {"负责人": new_pm, "跟单": "", "Milestone": "待立项",
                                      "Target": "TBD", "发货区间": "",
                                      "部件列表": {}, "发货数据": {}, "成本数据": {}}
-                        sync_save_db(sel_proj)
+                        sync_save_db(new_p)
                         st.success(f"建档成功！已分配给 {new_pm}")
+                        st.toast(f"📌 已创建项目：{new_p}")
                         st.session_state.new_proj_mode = False
                         st.rerun()
+                    elif new_p in db:
+                        st.warning("项目已存在，请更换名称。")
+                    else:
+                        st.error("项目名称不能为空。")
 
     if not valid_projs:
         st.warning("当前视角下暂无项目。")
@@ -666,9 +692,29 @@ elif menu == MENU_SPECIFIC:
                         active_stages.discard(stg); completed_stages.add(stg)
             if active_stages or completed_stages:
                 active_stages.discard("立项"); completed_stages.add("立项")
-            if "暂停" in cur_stage:
-                active_idxs = [STAGES_UNIFIED.index(s) for s in active_stages if s in STAGES_UNIFIED]
-                real_c_idx  = max(active_idxs) if active_idxs else 0
+            cur_is_paused = is_pause_stage(cur_stage)
+            if cur_is_paused:
+                pause_anchor_idx = None
+                parsed_logs = []
+                for lg in comps[comp_name].get('日志流', []):
+                    stg = lg.get('工序', '')
+                    if stg not in STAGES_UNIFIED:
+                        continue
+                    try:
+                        lg_dt = datetime.datetime.strptime(lg['日期'], "%Y-%m-%d").date()
+                    except:
+                        continue
+                    parsed_logs.append((lg_dt, stg))
+                parsed_logs.sort(key=lambda x: x[0])
+                for _, stg in parsed_logs:
+                    if not is_pause_stage(stg) and stg != "✅ 已完成(结束)":
+                        pause_anchor_idx = STAGES_UNIFIED.index(stg)
+
+                if pause_anchor_idx is None:
+                    active_idxs = [STAGES_UNIFIED.index(s) for s in active_stages
+                                   if s in STAGES_UNIFIED and not is_pause_stage(s)]
+                    pause_anchor_idx = max(active_idxs) if active_idxs else 0
+                real_c_idx = pause_anchor_idx
             else:
                 real_c_idx = c_idx
             row_vals = []; row_hover = []
@@ -677,6 +723,10 @@ elif menu == MENU_SPECIFIC:
                 hover_base = f"部件: {comp_name}<br>负责人: {owner_str or '未分配'}<br>工序: {stg}"
                 if cur_stage == "✅ 已完成(结束)" and stg == "✅ 已完成(结束)":
                     row_vals.append(1); row_hover.append(f"{hover_base}<br>状态: ✅ 全部结束")
+                elif cur_is_paused and is_pause_stage(stg):
+                    row_vals.append(2); row_hover.append(f"{hover_base}<br>状态: ⏸️ <b>暂停中</b>")
+                elif cur_is_paused and i <= real_c_idx and not is_pause_stage(stg):
+                    row_vals.append(3); row_hover.append(f"{hover_base}<br>状态: ⏸️ 暂停前已流转")
                 elif (real_c_idx >= guan_tu_idx and i < real_c_idx and "暂停" not in stg) or \
                      (stg in completed_stages) or (cur_stage == "✅ 已完成(结束)"):
                     row_vals.append(1); row_hover.append(f"{hover_base}<br>状态: ✅ 已彻底完成")
@@ -687,8 +737,13 @@ elif menu == MENU_SPECIFIC:
                 else:
                     row_vals.append(0); row_hover.append(f"{hover_base}<br>状态: ⏳ 未流转")
             z_data.append(row_vals); hover_text.append(row_hover)
-        colorscale = [[0.0, '#f1f5f9'], [0.33, '#f1f5f9'], [0.33, '#2ecc71'],
-                      [0.66, '#2ecc71'], [0.66, '#3b82f6'], [1.0, '#3b82f6']]
+        # 0=未流转(浅灰), 1=完成(绿), 2=进行中/暂停(蓝), 3=暂停前已流转(深灰)
+        colorscale = [
+            [0.00, '#f1f5f9'], [0.24, '#f1f5f9'],
+            [0.25, '#2ecc71'], [0.49, '#2ecc71'],
+            [0.50, '#3b82f6'], [0.74, '#3b82f6'],
+            [0.75, '#4b5563'], [1.00, '#4b5563']
+        ]
         fig_grid = go.Figure(data=go.Heatmap(
             z=z_data, x=STAGES_UNIFIED, y=y_labels_display,
             colorscale=colorscale, showscale=False, xgap=4, ygap=4,
@@ -1042,9 +1097,15 @@ elif menu == MENU_FASTLOG:
                 "涂": "涂装", "色": "涂装", "设计": "设计", "原画": "设计",
                 "拆件": "工程拆件", "官图": "官图", "大货": "大货",
                 "完成": "✅ 已完成(结束)", "结束": "✅ 已完成(结束)"}
+    RESUME_KWS = ["resume", "恢复", "重启", "继续推进", "解除暂停", "复工"]
 
+    PROJECT_ALIAS_MAP = SYS_CFG.get("项目别名", {})
     DYNAMIC_COMP_KW  = {**COMP_KW,  **SYS_CFG.get("AI_COMP_KW",  {})}
     DYNAMIC_STAGE_KW = {**STAGE_KW, **SYS_CFG.get("AI_STAGE_KW", {})}
+
+    # 避免短词误伤（如“甘”几乎必然误判到甘道夫）
+    DYNAMIC_COMP_KW = {k: v for k, v in DYNAMIC_COMP_KW.items() if len(str(k).strip()) >= 2}
+    DYNAMIC_STAGE_KW = {k: v for k, v in DYNAMIC_STAGE_KW.items() if len(str(k).strip()) >= 1}
 
     if st.button("✨ 智能拆解", type="primary"):
         if not raw_text.strip():
@@ -1106,8 +1167,11 @@ elif menu == MENU_FASTLOG:
                     if dist <= threshold:
                         candidates.append((3+dist, len(vp_cl), vp))
 
-                if not candidates: return None
+                if not candidates:
+                    return None
                 candidates.sort(key=lambda x: (x[0], -x[1]))
+                if len(candidates) >= 2 and candidates[0][0] == candidates[1][0]:
+                    return "⚠️冲突: 请手动选择"
                 return candidates[0][2]
 
             def find_best_proj(text):
@@ -1179,6 +1243,7 @@ elif menu == MENU_FASTLOG:
                 for proj, content in parse_line(line):
                     detected_comp  = next((comp for kw, comp in DYNAMIC_COMP_KW.items()  if kw in content), "全局进度")
                     detected_stage = next((stg  for kw, stg  in DYNAMIC_STAGE_KW.items() if kw in content), "(维持原阶段)")
+                    proj = resolve_alias_project(proj, PROJECT_ALIAS_MAP)
                     parsed.append({"识别项目": proj, "推测部件": detected_comp,
                                    "推测阶段": detected_stage, "待写入事件": content})
 
@@ -1289,6 +1354,7 @@ elif menu == MENU_FASTLOG:
             learned_count = 0
             for log in edited_logs:
                 p = log['项目']
+                p = resolve_alias_project(p, PROJECT_ALIAS_MAP)
                 if p not in db or "未知" in p or "冲突" in p:
                     st.error(f"跳过无效项目: {p}")
                     continue
@@ -1303,8 +1369,13 @@ elif menu == MENU_FASTLOG:
                         learned_count += 1
                 if target_comp not in db[p].setdefault("部件列表", {}):
                     db[p]["部件列表"][target_comp] = {"主流程": STAGES_UNIFIED[0], "日志流": []}
-                final_stage = (db[p]["部件列表"][target_comp].get("主流程", STAGES_UNIFIED[0])
-                               if log["推测阶段"] == "(维持原阶段)" else log["推测阶段"])
+                curr_stage = db[p]["部件列表"][target_comp].get("主流程", STAGES_UNIFIED[0])
+                final_stage = (curr_stage if log["推测阶段"] == "(维持原阶段)" else log["推测阶段"])
+                # 防呆：当前处于暂停时，除非明确写了恢复关键词或手动改了阶段，否则保持暂停
+                evt_text = str(log.get('事件', '')).lower()
+                has_resume_signal = any(kw in evt_text for kw in RESUME_KWS)
+                if is_pause_stage(curr_stage) and log["推测阶段"] == "(维持原阶段)" and not has_resume_signal:
+                    final_stage = curr_stage
                 db[p]["部件列表"][target_comp]['日志流'].append({
                     "日期": td, "流转": "AI速记",
                     "工序": final_stage, "事件": log['事件'], "图片": ai_b64_list
@@ -1312,8 +1383,12 @@ elif menu == MENU_FASTLOG:
                 db[p]["部件列表"][target_comp]["主流程"] = final_stage
 
             # AI速记可能涉及多个项目，逐项目保存
-            changed_projs = list(set(log["项目"] for log in edited_logs
-                                     if log["项目"] in db and "未知" not in log["项目"] and "冲突" not in log["项目"]))
+            changed_projs = list(set(
+                resolve_alias_project(log["项目"], PROJECT_ALIAS_MAP)
+                for log in edited_logs
+                if resolve_alias_project(log["项目"], PROJECT_ALIAS_MAP) in db
+                and "未知" not in log["项目"] and "冲突" not in log["项目"]
+            ))
             for cp in changed_projs:
                 sync_save_db(cp)
             db_manager.save_one("系统配置", st.session_state.db["系统配置"])
@@ -1669,6 +1744,86 @@ elif menu == MENU_HISTORY:
 # ==========================================
 elif menu == MENU_SETTINGS:
     st.title("⚙️ 系统维护 (全局参数与词库管理)")
+
+    with st.expander("🧭 项目管理（重命名 / 合并同类 / 别名学习）", expanded=True):
+        all_proj_names = [p for p in db.keys() if p != "系统配置"]
+        if not all_proj_names:
+            st.info("暂无项目可管理。")
+        else:
+            st.markdown("**A. 重命名项目**")
+            c_r1, c_r2, c_r3 = st.columns([1.2, 1.2, 1])
+            with c_r1:
+                src_proj = st.selectbox("选择项目", all_proj_names, key="rename_src")
+            with c_r2:
+                new_proj_name = st.text_input("新名称", value=src_proj, key="rename_dst")
+            with c_r3:
+                st.write("")
+                if st.button("✏️ 确认重命名", type="primary", key="btn_rename"):
+                    if not new_proj_name.strip():
+                        st.error("新名称不能为空。")
+                    elif new_proj_name == src_proj:
+                        st.warning("名称未变化，无需重命名。")
+                    elif new_proj_name in db:
+                        st.error("目标名称已存在，请先使用“合并同类项目”。")
+                    else:
+                        db[new_proj_name] = db.pop(src_proj)
+                        alias_map = st.session_state.db["系统配置"].setdefault("项目别名", {})
+                        alias_map[norm_text(src_proj)] = new_proj_name
+                        sync_save_db()
+                        st.success(f"✅ 已重命名：{src_proj} → {new_proj_name}")
+                        st.rerun()
+
+            st.markdown("---")
+            st.markdown("**B. 合并同类项目 + 自动学习别名**")
+            c_m1, c_m2, c_m3 = st.columns([1, 1, 1.2])
+            with c_m1:
+                merge_src = st.selectbox("并入来源项目", all_proj_names, key="merge_src")
+            with c_m2:
+                merge_dst = st.selectbox("目标项目", all_proj_names, key="merge_dst")
+            with c_m3:
+                alias_input = st.text_input("附加别名（逗号分隔）", placeholder="如: 1/6超女, 1/6 supergirl, 1/6超级女孩")
+
+            if st.button("🔀 执行合并并学习别名", type="primary", key="btn_merge"):
+                if merge_src == merge_dst:
+                    st.error("来源项目与目标项目不能相同。")
+                else:
+                    src_data = db.get(merge_src, {})
+                    dst_data = db.get(merge_dst, {})
+                    dst_data.setdefault("部件列表", {})
+                    for comp_name, comp_data in src_data.get("部件列表", {}).items():
+                        if comp_name not in dst_data["部件列表"]:
+                            dst_data["部件列表"][comp_name] = comp_data
+                        else:
+                            dst_data["部件列表"][comp_name].setdefault("日志流", [])
+                            dst_data["部件列表"][comp_name]["日志流"].extend(comp_data.get("日志流", []))
+                    for bucket in ["发货数据", "成本数据"]:
+                        dst_data.setdefault(bucket, {})
+                        for k, v in src_data.get(bucket, {}).items():
+                            if k not in dst_data[bucket]:
+                                dst_data[bucket][k] = v
+
+                    db[merge_dst] = dst_data
+                    if merge_src in db:
+                        del db[merge_src]
+
+                    alias_map = st.session_state.db["系统配置"].setdefault("项目别名", {})
+                    learned_aliases = {merge_src, merge_dst}
+                    if alias_input.strip():
+                        learned_aliases.update(x.strip() for x in re.split(r'[,，]', alias_input) if x.strip())
+                    for a in learned_aliases:
+                        alias_map[norm_text(a)] = merge_dst
+
+                    sync_save_db()
+                    st.success(f"✅ 合并完成：{merge_src} → {merge_dst}，并已学习 {len(learned_aliases)} 个别名。")
+                    st.rerun()
+
+            alias_map = st.session_state.db["系统配置"].get("项目别名", {})
+            if alias_map:
+                alias_df = pd.DataFrame([
+                    {"别名(归一化)": k, "映射项目": v} for k, v in sorted(alias_map.items(), key=lambda x: x[0])
+                ])
+                st.markdown("**当前别名词典**")
+                st.dataframe(alias_df, use_container_width=True)
 
     with st.expander("🛠️ 团队成员清洗 (支持按职能/姓名替换)", expanded=True):
         st.info("替换某个人的特定职能（如：将 `建模-雨萱` 替换为 `设计-雨萱`），留空即彻底抹除。")
