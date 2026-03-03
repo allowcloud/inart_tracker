@@ -100,6 +100,19 @@ def is_hidden_system_log(log_obj):
     evt = str((log_obj or {}).get("事件", ""))
     return "[系统自动追踪]" in evt
 
+def collect_stage_activity(raw_logs, stages):
+    """从日志提取阶段活跃/完成状态，降低主循环缩进复杂度（防 merge 缩进回归）。"""
+    active_stages = set(); completed_stages = set()
+    for log in raw_logs:
+        stg = log.get('工序', ''); evt = log.get('事件', '')
+        if stg in stages:
+            active_stages.add(stg)
+            if any(k in evt for k in ["彻底完成", "OK", "通过", "完结", "结束", "撒花"]):
+                active_stages.discard(stg); completed_stages.add(stg)
+    if active_stages or completed_stages:
+        active_stages.discard("立项"); completed_stages.add("立项")
+    return active_stages, completed_stages
+
 # 防御式兜底：若后续 merge 冲突误删了函数定义，至少保证运行期不 NameError
 if "is_hidden_system_log" not in globals():
     def is_hidden_system_log(log_obj):
@@ -779,13 +792,6 @@ elif menu == MENU_SPECIFIC:
                 pause_anchor_idx = None
                 parsed_logs = []
                 for lg in raw_logs:
-            cur_is_paused = is_pause_stage(cur_stage)
-            if cur_is_paused:
-                pause_anchor_idx = None
-                parsed_logs = []
-                for lg in comps[comp_name].get('日志流', []):
-                    if is_hidden_system_log(lg):
-                        continue
                     stg = lg.get('工序', '')
                     if stg not in STAGES_UNIFIED:
                         continue
@@ -803,7 +809,6 @@ elif menu == MENU_SPECIFIC:
                     active_idxs = [STAGES_UNIFIED.index(s) for s in active_stages
                                    if s in STAGES_UNIFIED and not is_pause_stage(s)]
                     pause_anchor_idx = max(active_idxs) if active_idxs else c_idx
-                    pause_anchor_idx = max(active_idxs) if active_idxs else 0
                 real_c_idx = pause_anchor_idx
             else:
                 real_c_idx = c_idx

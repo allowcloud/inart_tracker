@@ -64,3 +64,13 @@ scripts/rebase_merge_guard.sh main theirs
 4. rebase 后再跑一次 `conflict_self_check`。
 
 当你们的冲突集中在同几段（本仓库确实如此）时，`rerere` 会显著减少“重复报同样冲突”。
+
+
+## PR 红了怎么快速定位（和 CI 同步）
+
+```bash
+scripts/pr_red_diagnose.sh
+```
+
+这个脚本会按 CI 同样的检查顺序输出“哪一个文件失败”，避免只看到 GitHub 红灯但不知道改哪。
+若本地通过、GitHub 仍红，通常是远端分支还没包含你本地最新修复 commit（需要 push）。
