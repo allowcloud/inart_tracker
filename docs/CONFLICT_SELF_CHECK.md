@@ -39,3 +39,28 @@ scripts/conflict_self_check.sh main
 - 自检脚本返回 PASS。
 - 无 merge markers。
 - `python -m py_compile app.py` 通过。
+
+
+## 一键“强制走 rebase 流程”（推荐）
+
+> 说明：Git 不能保证“绝对零冲突”，但可以通过 `rerere + rebase strategy` 最大化自动化，减少重复手工解冲突。
+
+```bash
+# 默认：rebase 到 main，且 -X theirs（优先应用当前分支补丁）
+scripts/rebase_merge_guard.sh
+
+# 指定目标分支
+scripts/rebase_merge_guard.sh main
+
+# 指定策略（theirs / ours / none）
+scripts/rebase_merge_guard.sh main theirs
+```
+
+这个脚本会：
+
+1. 强制要求工作区干净（防止脏状态放大冲突）。
+2. 自动开启 `rerere`（记住你解过的冲突，下次自动复用）。
+3. 先跑一次 `conflict_self_check` 再 rebase。
+4. rebase 后再跑一次 `conflict_self_check`。
+
+当你们的冲突集中在同几段（本仓库确实如此）时，`rerere` 会显著减少“重复报同样冲突”。
