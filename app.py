@@ -41,6 +41,15 @@ def render_image(img_str, **kwargs):
         try: st.image(base64.b64decode(img_str), **kwargs)
         except: pass
 
+def norm_text(s):
+    return re.sub(r'\s+', '', str(s or '').strip()).lower()
+
+def resolve_alias_project(name, project_alias_map):
+    n = norm_text(name)
+    if not n:
+        return name
+    return project_alias_map.get(n, name)
+
 # ==========================================
 # 1. 页面基础配置与核心变量
 # ==========================================
@@ -303,15 +312,6 @@ def get_macro_phase(detail_stage):
 def is_pause_stage(stage_name):
     s = str(stage_name).strip()
     return ("暂停" in s) or ("搁置" in s)
-
-def norm_text(s):
-    return re.sub(r'\s+', '', str(s or '').strip()).lower()
-
-def resolve_alias_project(name, project_alias_map):
-    n = norm_text(name)
-    if not n:
-        return name
-    return project_alias_map.get(n, name)
 
 def get_risk_status(milestone, target_date_str="TBD"):
     ms = str(milestone).strip()
