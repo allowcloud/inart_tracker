@@ -675,6 +675,8 @@ elif menu == MENU_SPECIFIC:
         st.warning("暂无录入部件明细。请在下方录入。")
     else:
         z_data = []; y_labels = list(comps.keys()); y_labels_display = []; hover_text = []
+        global_comp_key = next((k for k in comps.keys() if "全局" in k), "全局进度")
+        global_is_paused = is_pause_stage(comps.get(global_comp_key, {}).get("主流程", ""))
         guan_tu_idx = STAGES_UNIFIED.index("官图") if "官图" in STAGES_UNIFIED else len(STAGES_UNIFIED)
         for comp_name in y_labels:
             owner_str    = comps[comp_name].get('负责人', '').strip()
@@ -683,6 +685,21 @@ elif menu == MENU_SPECIFIC:
             cur_stage = comps[comp_name].get('主流程', STAGES_UNIFIED[0])
             c_idx     = STAGES_UNIFIED.index(cur_stage) if cur_stage in STAGES_UNIFIED else 0
             active_stages = set(); completed_stages = set()
+            stage_recent_logs = {}
+            raw_logs = [log for log in comps[comp_name].get('日志流', []) if not is_hidden_system_log(log)]
+            sorted_logs_desc = sorted(
+                raw_logs,
+                key=lambda x: x.get('日期', ''),
+                reverse=True
+            )
+            for log in sorted_logs_desc:
+                stg = log.get('工序', '')
+                if stg in STAGES_UNIFIED:
+                    stage_recent_logs.setdefault(stg, [])
+                    if len(stage_recent_logs[stg]) < 2:
+                        stage_recent_logs[stg].append(f"[{log.get('日期','')}] {log.get('事件','')}")
+
+            for log in raw_logs:
             for log in comps[comp_name].get('日志流', []):
                 if is_hidden_system_log(log):
                     continue
@@ -693,6 +710,12 @@ elif menu == MENU_SPECIFIC:
                         active_stages.discard(stg); completed_stages.add(stg)
             if active_stages or completed_stages:
                 active_stages.discard("立项"); completed_stages.add("立项")
+            # 领头羊规则：全局进入暂停时，子部件展示态也进入暂停（仅展示层，不覆盖原日志）
+            cur_is_paused = is_pause_stage(cur_stage) or (global_is_paused and "全局" not in comp_name)
+            if cur_is_paused:
+                pause_anchor_idx = None
+                parsed_logs = []
+                for lg in raw_logs:
             cur_is_paused = is_pause_stage(cur_stage)
             if cur_is_paused:
                 pause_anchor_idx = None
@@ -716,6 +739,7 @@ elif menu == MENU_SPECIFIC:
                 if pause_anchor_idx is None:
                     active_idxs = [STAGES_UNIFIED.index(s) for s in active_stages
                                    if s in STAGES_UNIFIED and not is_pause_stage(s)]
+                    pause_anchor_idx = max(active_idxs) if active_idxs else c_idx
                     pause_anchor_idx = max(active_idxs) if active_idxs else 0
                 real_c_idx = pause_anchor_idx
             else:
@@ -724,14 +748,19 @@ elif menu == MENU_SPECIFIC:
             for i in range(len(STAGES_UNIFIED)):
                 stg        = STAGES_UNIFIED[i]
                 hover_base = f"部件: {comp_name}<br>负责人: {owner_str or '未分配'}<br>工序: {stg}"
+                recent = stage_recent_logs.get(stg, [])
+                if recent:
+                    hover_base += "<br>最近日志:<br>• " + "<br>• ".join(recent)
                 if cur_stage == "✅ 已完成(结束)" and stg == "✅ 已完成(结束)":
                     row_vals.append(1); row_hover.append(f"{hover_base}<br>状态: ✅ 全部结束")
+                elif (stg in completed_stages) and not is_pause_stage(stg):
+                    row_vals.append(1); row_hover.append(f"{hover_base}<br>状态: ✅ 已彻底完成")
                 elif cur_is_paused and is_pause_stage(stg):
                     row_vals.append(2); row_hover.append(f"{hover_base}<br>状态: ⏸️ <b>暂停中</b>")
                 elif cur_is_paused and i <= real_c_idx and not is_pause_stage(stg):
                     row_vals.append(3); row_hover.append(f"{hover_base}<br>状态: ⏸️ 暂停前已流转")
                 elif (real_c_idx >= guan_tu_idx and i < real_c_idx and "暂停" not in stg) or \
-                     (stg in completed_stages) or (cur_stage == "✅ 已完成(结束)"):
+                     (cur_stage == "✅ 已完成(结束)"):
                     row_vals.append(1); row_hover.append(f"{hover_base}<br>状态: ✅ 已彻底完成")
                 elif i <= real_c_idx and "暂停" not in stg:
                     row_vals.append(2); row_hover.append(f"{hover_base}<br>状态: 🚀 <b>已流转至此/并行中</b>")
