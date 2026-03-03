@@ -50,6 +50,15 @@ def resolve_alias_project(name, project_alias_map):
         return name
     return project_alias_map.get(n, name)
 
+def is_hidden_system_log(log_obj):
+    evt = str((log_obj or {}).get("事件", ""))
+    return "[系统自动追踪]" in evt
+
+# 防御式兜底：若后续 merge 冲突误删了函数定义，至少保证运行期不 NameError
+if "is_hidden_system_log" not in globals():
+    def is_hidden_system_log(log_obj):
+        return False
+
 # ==========================================
 # 1. 页面基础配置与核心变量
 # ==========================================
@@ -1766,6 +1775,7 @@ elif menu == MENU_SETTINGS:
         all_proj_names = [p for p in db.keys() if p != "系统配置"]
         if not all_proj_names:
             st.info("暂无项目可管理。")
+
         else:
             st.markdown("**A. 重命名项目**")
             c_r1, c_r2, c_r3 = st.columns([1.2, 1.2, 1])
@@ -1806,6 +1816,14 @@ elif menu == MENU_SETTINGS:
                 else:
                     src_data = db.get(merge_src, {})
                     dst_data = db.get(merge_dst, {})
+                    st.session_state.db["系统配置"].setdefault("最近合并回滚", {})
+                    st.session_state.db["系统配置"]["最近合并回滚"] = {
+                        "merge_src": merge_src,
+                        "merge_dst": merge_dst,
+                        "src_data": json.loads(json.dumps(src_data, ensure_ascii=False)),
+                        "dst_data_before": json.loads(json.dumps(dst_data, ensure_ascii=False)),
+                        "alias_map_before": json.loads(json.dumps(st.session_state.db["系统配置"].get("项目别名", {}), ensure_ascii=False))
+                    }
                     dst_data.setdefault("部件列表", {})
                     for comp_name, comp_data in src_data.get("部件列表", {}).items():
                         if comp_name not in dst_data["部件列表"]:
@@ -1841,6 +1859,39 @@ elif menu == MENU_SETTINGS:
                 ])
                 st.markdown("**当前别名词典**")
                 st.dataframe(alias_df, use_container_width=True)
+                c_a1, c_a2 = st.columns([1.2, 1])
+                with c_a1:
+                    del_alias = st.selectbox("删除某个别名映射", [""] + sorted(alias_map.keys()), key="del_alias_key")
+                    if st.button("🧯 删除该别名", key="btn_del_alias") and del_alias:
+                        st.session_state.db["系统配置"].setdefault("项目别名", {}).pop(del_alias, None)
+                        sync_save_db()
+                        st.success(f"已删除别名：{del_alias}")
+                        st.rerun()
+                with c_a2:
+                    if st.button("🧹 清空全部别名映射", key="btn_clear_alias"):
+                        st.session_state.db["系统配置"]["项目别名"] = {}
+                        sync_save_db()
+                        st.success("已清空全部别名映射。")
+                        st.rerun()
+
+            rollback = st.session_state.db["系统配置"].get("最近合并回滚", {})
+            if rollback and rollback.get("merge_src"):
+                st.markdown("---")
+                st.markdown(f"**后悔药（最近一次合并）**：{rollback.get('merge_src')} → {rollback.get('merge_dst')}")
+                if st.button("↩️ 撤销最近一次合并", key="btn_undo_merge"):
+                    src_name = rollback.get("merge_src")
+                    dst_name = rollback.get("merge_dst")
+                    if dst_name in db:
+                        db[dst_name] = rollback.get("dst_data_before", db.get(dst_name, {}))
+                    db[src_name] = rollback.get("src_data", {})
+                    st.session_state.db["系统配置"]["项目别名"] = rollback.get(
+                        "alias_map_before", st.session_state.db["系统配置"].get("项目别名", {})
+                    )
+                    st.session_state.db["系统配置"].setdefault("最近合并回滚", {})
+                    st.session_state.db["系统配置"]["最近合并回滚"] = {}
+                    sync_save_db()
+                    st.success("✅ 已撤销最近一次合并。")
+                    st.rerun()
 
     with st.expander("🛠️ 团队成员清洗 (支持按职能/姓名替换)", expanded=True):
         st.info("替换某个人的特定职能（如：将 `建模-雨萱` 替换为 `设计-雨萱`），留空即彻底抹除。")
