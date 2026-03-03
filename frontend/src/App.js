@@ -2,6 +2,10 @@ import React, { useState } from 'react';
 import Sidebar from './components/Sidebar';
 import Dashboard from './pages/Dashboard';
 import ProjectControl from './pages/ProjectControl';
+import FastLog from './pages/FastLog';
+import Packing from './pages/Packing';
+import CostLedger from './pages/CostLedger';
+import HistoryTrace from './pages/HistoryTrace';
 import './App.css';
 
 function ComingSoon({ name }) {
@@ -20,14 +24,14 @@ export default function App() {
   const renderPage = () => {
     switch (page) {
       case 'dashboard': return <Dashboard />;
-      case 'project':  return <ProjectControl />;
-      case 'fastlog':  return <ComingSoon name="📝 手机AI速记" />;
-      case 'packing':  return <ComingSoon name="📦 包装与入库" />;
-      case 'cost':     return <ComingSoon name="💰 成本台账" />;
-      case 'history':  return <ComingSoon name="🔍 历史溯源" />;
-      case 'settings': return <ComingSoon name="⚙️ 系统维护" />;
-      case 'guide':    return <ComingSoon name="📖 使用指南" />;
-      default:         return <Dashboard />;
+      case 'project':   return <ProjectControl />;
+      case 'fastlog':   return <FastLog />;
+      case 'packing':   return <Packing />;
+      case 'cost':      return <CostLedger />;
+      case 'history':   return <HistoryTrace />;
+      case 'settings':  return <ComingSoon name="⚙️ 系统维护" />;
+      case 'guide':     return <ComingSoon name="📖 使用指南" />;
+      default:          return <Dashboard />;
     }
   };
 
