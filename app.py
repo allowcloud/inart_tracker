@@ -775,7 +775,17 @@ elif menu == MENU_SPECIFIC:
                     if len(stage_recent_logs[stg]) < 2:
                         stage_recent_logs[stg].append(f"[{log.get('日期','')}] {log.get('事件','')}")
 
-            active_stages, completed_stages = collect_stage_activity(raw_logs, STAGES_UNIFIED)
+            for log in raw_logs:
+            for log in comps[comp_name].get('日志流', []):
+                if is_hidden_system_log(log):
+                    continue
+                stg = log.get('工序', ''); evt = log.get('事件', '')
+                if stg in STAGES_UNIFIED:
+                    active_stages.add(stg)
+                    if any(k in evt for k in ["彻底完成", "OK", "通过", "完结", "结束", "撒花"]):
+                        active_stages.discard(stg); completed_stages.add(stg)
+            if active_stages or completed_stages:
+                active_stages.discard("立项"); completed_stages.add("立项")
             # 领头羊规则：全局进入暂停时，子部件展示态也进入暂停（仅展示层，不覆盖原日志）
             cur_is_paused = is_pause_stage(cur_stage) or (global_is_paused and "全局" not in comp_name)
             if cur_is_paused:
