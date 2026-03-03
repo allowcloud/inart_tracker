@@ -296,6 +296,10 @@ def get_macro_phase(detail_stage):
     if "立项" in s: return "立项"
     return "工程"
 
+def is_pause_stage(stage_name):
+    s = str(stage_name).strip()
+    return ("暂停" in s) or ("搁置" in s)
+
 def get_risk_status(milestone, target_date_str="TBD"):
     ms = str(milestone).strip()
     target_date_str = str(target_date_str).strip()
@@ -491,7 +495,7 @@ if menu == MENU_DASHBOARD:
                         if k not in grouped:
                             grouped[k] = {"日期_obj": dt_obj, "日期_str": log['日期'],
                                           "工序": macro_stage, "事件": evt,
-                                          "部件": [c_name], "is_pause": macro_stage == "暂停"}
+                                          "部件": [c_name], "is_pause": is_pause_stage(macro_stage)}
                         elif c_name not in grouped[k]["部件"]:
                             grouped[k]["部件"].append(c_name)
                     except: pass
@@ -543,8 +547,12 @@ if menu == MENU_DASHBOARD:
                         if nxt["工序"] == "暂停" or not in_pause_period(nxt["日期_obj"]):
                             ns = nxt["工序"]; break
                     if is_last or ns != cs:
-                        ed = log["日期_obj"]
-                        if sd == ed: ed += datetime.timedelta(days=1)
+                        # 暂停在甘特图里只占 1 天体量：暂停当天有色块，后续保持留白直到恢复
+                        if cs == "暂停":
+                            ed = sd + datetime.timedelta(days=1)
+                        else:
+                            ed = log["日期_obj"]
+                            if sd == ed: ed += datetime.timedelta(days=1)
                         _gantt.append({"项目": proj_y_label, "工序阶段": cs,
                                        "Start": sd.strftime("%Y-%m-%d"),
                                        "Finish": ed.strftime("%Y-%m-%d"),
@@ -666,9 +674,29 @@ elif menu == MENU_SPECIFIC:
                         active_stages.discard(stg); completed_stages.add(stg)
             if active_stages or completed_stages:
                 active_stages.discard("立项"); completed_stages.add("立项")
-            if "暂停" in cur_stage:
-                active_idxs = [STAGES_UNIFIED.index(s) for s in active_stages if s in STAGES_UNIFIED]
-                real_c_idx  = max(active_idxs) if active_idxs else 0
+            cur_is_paused = is_pause_stage(cur_stage)
+            if cur_is_paused:
+                pause_anchor_idx = None
+                parsed_logs = []
+                for lg in comps[comp_name].get('日志流', []):
+                    stg = lg.get('工序', '')
+                    if stg not in STAGES_UNIFIED:
+                        continue
+                    try:
+                        lg_dt = datetime.datetime.strptime(lg['日期'], "%Y-%m-%d").date()
+                    except:
+                        continue
+                    parsed_logs.append((lg_dt, stg))
+                parsed_logs.sort(key=lambda x: x[0])
+                for _, stg in parsed_logs:
+                    if not is_pause_stage(stg) and stg != "✅ 已完成(结束)":
+                        pause_anchor_idx = STAGES_UNIFIED.index(stg)
+
+                if pause_anchor_idx is None:
+                    active_idxs = [STAGES_UNIFIED.index(s) for s in active_stages
+                                   if s in STAGES_UNIFIED and not is_pause_stage(s)]
+                    pause_anchor_idx = max(active_idxs) if active_idxs else 0
+                real_c_idx = pause_anchor_idx
             else:
                 real_c_idx = c_idx
             row_vals = []; row_hover = []
@@ -677,6 +705,10 @@ elif menu == MENU_SPECIFIC:
                 hover_base = f"部件: {comp_name}<br>负责人: {owner_str or '未分配'}<br>工序: {stg}"
                 if cur_stage == "✅ 已完成(结束)" and stg == "✅ 已完成(结束)":
                     row_vals.append(1); row_hover.append(f"{hover_base}<br>状态: ✅ 全部结束")
+                elif cur_is_paused and is_pause_stage(stg):
+                    row_vals.append(2); row_hover.append(f"{hover_base}<br>状态: ⏸️ <b>暂停中</b>")
+                elif cur_is_paused and i <= real_c_idx and not is_pause_stage(stg):
+                    row_vals.append(3); row_hover.append(f"{hover_base}<br>状态: ⏸️ 暂停前已流转")
                 elif (real_c_idx >= guan_tu_idx and i < real_c_idx and "暂停" not in stg) or \
                      (stg in completed_stages) or (cur_stage == "✅ 已完成(结束)"):
                     row_vals.append(1); row_hover.append(f"{hover_base}<br>状态: ✅ 已彻底完成")
@@ -687,8 +719,13 @@ elif menu == MENU_SPECIFIC:
                 else:
                     row_vals.append(0); row_hover.append(f"{hover_base}<br>状态: ⏳ 未流转")
             z_data.append(row_vals); hover_text.append(row_hover)
-        colorscale = [[0.0, '#f1f5f9'], [0.33, '#f1f5f9'], [0.33, '#2ecc71'],
-                      [0.66, '#2ecc71'], [0.66, '#3b82f6'], [1.0, '#3b82f6']]
+        # 0=未流转(浅灰), 1=完成(绿), 2=进行中/暂停(蓝), 3=暂停前已流转(深灰)
+        colorscale = [
+            [0.00, '#f1f5f9'], [0.24, '#f1f5f9'],
+            [0.25, '#2ecc71'], [0.49, '#2ecc71'],
+            [0.50, '#3b82f6'], [0.74, '#3b82f6'],
+            [0.75, '#4b5563'], [1.00, '#4b5563']
+        ]
         fig_grid = go.Figure(data=go.Heatmap(
             z=z_data, x=STAGES_UNIFIED, y=y_labels_display,
             colorscale=colorscale, showscale=False, xgap=4, ygap=4,
