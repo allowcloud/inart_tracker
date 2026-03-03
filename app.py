@@ -249,17 +249,7 @@ def auto_sync_milestone(proj_name):
         curr_global_stage = str(comps[global_key].get("主流程", "")).strip()
         curr_idx = next((i for i, std_s in enumerate(STAGES_UNIFIED) if curr_global_stage in std_s or std_s in curr_global_stage), -1)
         if curr_idx < max_idx and "暂停" not in curr_global_stage:
-            for fill_idx in range(max(0, curr_idx + 1), max_idx + 1):
-                fill_stage = STAGES_UNIFIED[fill_idx]
-                if "暂停" in fill_stage:
-                    continue
-                evt_txt = (f"[系统自动追踪] 因子部件到达【{max_stage}】，全局被倒逼流转"
-                           if fill_idx != max_idx
-                           else f"[系统自动追踪] 因子部件到达【{max_stage}】，全局对齐！")
-                comps[global_key].setdefault("日志流", []).append({
-                    "日期": str(datetime.date.today()), "流转": "系统自动",
-                    "工序": fill_stage, "事件": evt_txt
-                })
+            # 自动对齐仅更新阶段，不再写入“系统自动追踪”日志，避免噪音
             comps[global_key]["主流程"] = max_stage
 
     sub_stages = [info.get('主流程', '') for c_name, info in comps.items() if "全局" not in c_name]
@@ -491,7 +481,7 @@ if menu == MENU_DASHBOARD:
                     if '-' in pair: rp,pp=pair.split('-',1); _ppr.append((proj,pp.strip(),rp.strip()))
                     elif ':' in pair: rp,pp=pair.split(':',1); _ppr.append((proj,pp.strip(),rp.strip()))
                     else: _ppr.append((proj,pair,"综合"))
-                logs=info.get('日志流',[])
+                logs=[lg for lg in info.get('日志流',[]) if not is_hidden_system_log(lg)]
                 if logs:
                     try:
                         l_dt=datetime.datetime.strptime(logs[-1]['日期'],"%Y-%m-%d").date()
@@ -685,6 +675,8 @@ elif menu == MENU_SPECIFIC:
             c_idx     = STAGES_UNIFIED.index(cur_stage) if cur_stage in STAGES_UNIFIED else 0
             active_stages = set(); completed_stages = set()
             for log in comps[comp_name].get('日志流', []):
+                if is_hidden_system_log(log):
+                    continue
                 stg = log.get('工序', ''); evt = log.get('事件', '')
                 if stg in STAGES_UNIFIED:
                     active_stages.add(stg)
@@ -697,6 +689,8 @@ elif menu == MENU_SPECIFIC:
                 pause_anchor_idx = None
                 parsed_logs = []
                 for lg in comps[comp_name].get('日志流', []):
+                    if is_hidden_system_log(lg):
+                        continue
                     stg = lg.get('工序', '')
                     if stg not in STAGES_UNIFIED:
                         continue
@@ -1001,6 +995,8 @@ elif menu == MENU_SPECIFIC:
                         img_info["data"].seek(0)
                         img_b64_list.append(compress_to_b64(img_info["data"].read()))
 
+                global_pause_cascade = ("🌐 全局进度 (Overall)" in comps_to_process and is_pause_stage(new_stage))
+
                 for c_raw in comps_to_process:
                     if c_raw == "🌐 全局进度 (Overall)":
                         actual_c = "全局进度"
@@ -1036,6 +1032,18 @@ elif menu == MENU_SPECIFIC:
                             "工序": new_stage, "事件": base_log, "图片": img_b64_list
                         })
                         db[sel_proj]["部件列表"][actual_c]['主流程'] = new_stage
+
+                if global_pause_cascade:
+                    db[sel_proj]["Milestone"] = "暂停研发"
+                    for sub_c, sub_info in db[sel_proj].get("部件列表", {}).items():
+                        if "全局" in sub_c:
+                            continue
+                        if sub_info.get("主流程") != new_stage:
+                            sub_info.setdefault('日志流', []).append({
+                                "日期": str(detail_record_date), "流转": "系统自动",
+                                "工序": new_stage, "事件": "[系统] 全局已暂停，子部件自动同步为暂停"
+                            })
+                            sub_info["主流程"] = new_stage
 
                 st.session_state.form_key    += 1
                 st.session_state.pasted_cache = {}
@@ -1077,6 +1085,11 @@ elif menu == MENU_SPECIFIC:
 # ==========================================
 elif menu == MENU_FASTLOG:
     st.title("🚀 移动端 智能速记引擎")
+    MANUAL_PICK = "⚠️冲突: 请手动选择"
+    def is_manual_pick_project(name):
+        ss = str(name or "").strip()
+        return ss in [MANUAL_PICK, "⚠️请手动选择项目", "未知/请手动修改"]
+
 
     with st.expander("💡 点击查看【标准速记语法模板】", expanded=False):
         st.markdown("""
@@ -1213,7 +1226,7 @@ elif menu == MENU_FASTLOG:
                         if m: cur_pfx = m.group(1)
                         seg2 = seg if prefix_pat.search(seg) else f"{cur_pfx} {seg}".strip()
                         proj, _ = find_best_proj(seg2)
-                        resolved.append(proj or "未知/请手动修改")
+                        resolved.append(proj or MANUAL_PICK)
                     return [(p, c) for p in resolved for c in contents]
                 # 格式2：无冒号，按&逐段贪心提取项目名，剩余作为内容
                 amp_parts = re.split(r'&', line)
@@ -1232,7 +1245,7 @@ elif menu == MENU_FASTLOG:
                             content_parts.append(leftover); switched = True
                     else:
                         content_parts.append(part); switched = True
-                if not proj_parts: proj_parts = ["未知/请手动修改"]
+                if not proj_parts: proj_parts = [MANUAL_PICK]
                 raw_content = "&".join(content_parts)
                 contents = [c.strip() for c in re.split(r'[;；]', raw_content) if c.strip()] or [raw_content or "(无内容)"]
                 return [(p, c) for p in proj_parts for c in contents]
@@ -1254,11 +1267,11 @@ elif menu == MENU_FASTLOG:
         st.divider()
         st.subheader("👀 核对与入库")
         edited_logs     = []
-        project_options = ["未知/请手动修改", "⚠️冲突: 请手动选择"] + valid_projs
+        project_options = [MANUAL_PICK] + valid_projs
         comp_options    = ["全局进度"] + STD_COMPONENTS + ["其他配件(系统自动创建)"]
 
         for i, item in enumerate(st.session_state.parsed_logs):
-            is_unknown = item['识别项目'] in ["未知/请手动修改", "⚠️冲突: 请手动选择"]
+            is_unknown = is_manual_pick_project(item['识别项目'])
             c1, c2, c3, c4, c5 = st.columns([1.2, 1, 1, 1.8, 1])
             with c1:
                 sel_proj_ai = st.selectbox(
@@ -1267,7 +1280,7 @@ elif menu == MENU_FASTLOG:
                     key=f"sel_p_{i}"
                 )
                 # 识别失败时，显示快速新建项目入口
-                if is_unknown or sel_proj_ai in ["未知/请手动修改", "⚠️冲突: 请手动选择"]:
+                if is_unknown or is_manual_pick_project(sel_proj_ai):
                     with st.expander("➕ 直接新建此项目", expanded=False):
                         new_p_name = st.text_input("项目名称", key=f"new_pname_{i}",
                                                     placeholder="如: 1/6 威龙")
@@ -1630,6 +1643,8 @@ elif menu == MENU_HISTORY:
 
     for c_name, comp in db[sel_proj].get("部件列表", {}).items():
         for log in comp.get("日志流", []):
+            if is_hidden_system_log(log):
+                continue
             if "_id" not in log:
                 log["_id"] = str(uuid.uuid4())
 
@@ -1642,6 +1657,8 @@ elif menu == MENU_HISTORY:
         if sel_comp != "🌐 全部展示" and c_name != sel_comp:
             continue
         for log in comp.get("日志流", []):
+            if is_hidden_system_log(log):
+                continue
             log_ref_map[log["_id"]] = log
             key = (log.get("日期",""), log.get("工序",""), log.get("流转",""), log.get("事件",""))
             if key not in grouped_logs:
