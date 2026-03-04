@@ -113,6 +113,57 @@ def collect_stage_activity(raw_logs, stages):
         active_stages.discard("立项"); completed_stages.add("立项")
     return active_stages, completed_stages
 
+def get_project_production_start_date(proj_data):
+    """推断项目进入生产期（工厂复样/大货或里程碑设为生产中）的起始日期。"""
+    comps = (proj_data or {}).get("部件列表", {})
+    global_key = next((k for k in comps.keys() if "全局" in k), "全局进度")
+    global_logs = comps.get(global_key, {}).get("日志流", [])
+    date_candidates = []
+    for log in global_logs:
+        evt = str(log.get("事件", ""))
+        stg = str(log.get("工序", ""))
+        is_prod_hint = (
+            stg in ["工厂复样(含胶件/上色等)", "大货"] or
+            "阶段:生产中" in evt
+        )
+        if not is_prod_hint:
+            continue
+        try:
+            dt = datetime.datetime.strptime(log.get("日期", ""), "%Y-%m-%d").date()
+        except:
+            continue
+        date_candidates.append(dt)
+    if not date_candidates:
+        return None
+    return min(date_candidates)
+
+def is_late_added_component(comp_name, comp_info, production_start_date, factory_idx, stages):
+    """区分生产期后新增零件：允许其独立从早期阶段重新走。"""
+    if "全局" in str(comp_name):
+        return False
+    if not production_start_date:
+        return False
+
+    cur_stage = str((comp_info or {}).get("主流程", "")).strip()
+    cur_idx = stages.index(cur_stage) if cur_stage in stages else 0
+    if cur_idx >= factory_idx:
+        return False
+
+    logs = [lg for lg in (comp_info or {}).get("日志流", []) if not is_hidden_system_log(lg)]
+    if not logs:
+        return True
+
+    first_dt = None
+    for lg in logs:
+        try:
+            dt = datetime.datetime.strptime(lg.get("日期", ""), "%Y-%m-%d").date()
+        except:
+            continue
+        first_dt = dt if first_dt is None else min(first_dt, dt)
+    if first_dt is None:
+        return False
+    return first_dt >= production_start_date
+
 # 防御式兜底：若后续 merge 冲突误删了函数定义，至少保证运行期不 NameError
 if "is_hidden_system_log" not in globals():
     def is_hidden_system_log(log_obj):
@@ -138,7 +189,7 @@ footer { visibility: hidden; }
 """, unsafe_allow_html=True)
 
 MENU_DASHBOARD = "📊 全局大盘与甘特图"
-MENU_SPECIFIC  = "🎯 特定项目管控台"
+MENU_SPECIFIC  = "🎯 PM 工作台"
 MENU_FASTLOG   = "📝 手机 AI 速记"
 MENU_PACKING   = "📦 包装与入库特殊领用"
 MENU_COST      = "💰 专属成本台账"
@@ -149,6 +200,8 @@ MENU_GUIDE     = "📖 新手使用指南"
 STD_MILESTONES  = ["待立项", "研发中", "暂停研发", "下模中", "生产中", "生产结束", "项目结束撒花🎉"]
 HANDOFF_METHODS = ["内部正常推进", "微信", "飞书", "实物/打印件交接", "网盘链接", "当面沟通"]
 STD_COSTS_LIST  = ["研发费", "模具费", "大货生产", "包装印刷", "物流运输", "外包设计", "杂项其他"]
+REVIEW_TYPE_OPTIONS = ["(无)", "2D提审", "3D提审", "实物提审", "包装提审"]
+REVIEW_RESULT_OPTIONS = ["(无)", "待反馈", "通过", "打回"]
 
 DEFAULT_SYS_CFG = {
     "标准部件": ["头雕(表情)", "素体", "手型", "服装", "配件", "地台", "包装"],
@@ -360,7 +413,7 @@ def get_macro_phase(detail_stage):
     if "完成" in s or "结束" in s or "撒花" in s: return "结束"
     if "暂停" in s or "搁置" in s: return "暂停"
     if any(x in s for x in ["大货", "复样", "量产", "开定"]): return "生产"
-    if any(x in s for x in ["拆件", "手板", "结构"]): return "工程"
+    if any(x in s for x in ["拆件", "手板", "结构", "官图"]): return "工程"
     if "模具" in s: return "模具"
     if "设计" in s or "官图" in s: return "设计"
     if "建模" in s or "打印" in s or "涂装" in s: return "建模"  # 涂装属于建模阶段
@@ -370,6 +423,125 @@ def get_macro_phase(detail_stage):
 def is_pause_stage(stage_name):
     s = str(stage_name).strip()
     return ("暂停" in s) or ("搁置" in s)
+
+def get_stage_index(stage_name, stages):
+    s = str(stage_name).strip()
+    if s in stages:
+        return stages.index(s)
+    return next((i for i, std_s in enumerate(stages) if s in std_s or std_s in s), -1)
+
+def validate_review_with_stage(review_type, stage_name, comp_name, stages):
+    """返回空字符串表示合法，否则返回 warning 文案。"""
+    rt = str(review_type).strip()
+    if not rt or rt == "(无)":
+        return ""
+    idx = get_stage_index(stage_name, stages)
+    if idx < 0:
+        return f"提审[{rt}]无法校验：阶段[{stage_name}]不在标准阶段中"
+    design_idx = get_stage_index("设计", stages)
+    eng_idx = get_stage_index("工程拆件", stages)
+    struct_idx = get_stage_index("手板/结构板", stages)
+    if rt == "2D提审":
+        if idx < get_stage_index("立项", stages):
+            return "2D提审应在立项后再使用"
+    elif rt == "3D提审":
+        min_idx = min([i for i in [design_idx, eng_idx] if i >= 0], default=-1)
+        if min_idx >= 0 and idx < min_idx:
+            return "3D提审建议在设计或工程阶段使用"
+    elif rt == "实物提审":
+        if struct_idx >= 0 and idx < struct_idx:
+            return "实物提审建议在手板/结构板阶段及之后使用"
+    elif rt == "包装提审":
+        if "包装" not in str(comp_name):
+            return "包装提审建议用于【包装】部件"
+    return ""
+
+def validate_transition_warning(curr_stage, next_stage, stages):
+    """返回 warning 文案；空串表示无明显风险。"""
+    if not next_stage or next_stage == "(维持原阶段)" or next_stage == curr_stage:
+        return ""
+    ci = get_stage_index(curr_stage, stages)
+    ni = get_stage_index(next_stage, stages)
+    if ci < 0 or ni < 0:
+        return ""
+    if next_stage == "✅ 已完成(结束)":
+        min_finish_idx = get_stage_index("工厂复样(含胶件/上色等)", stages)
+        if min_finish_idx >= 0 and ci < min_finish_idx:
+            return f"当前阶段[{curr_stage}]过早完结，建议至少到工厂复样后再结束"
+    if ni < ci and (not is_pause_stage(next_stage)):
+        return f"阶段逆行：[{curr_stage}] -> [{next_stage}]，请确认是否需要强制提交"
+    return ""
+
+def infer_review_type_from_text(txt):
+    s = str(txt).lower()
+    if "2d" in s and "提审" in s:
+        return "2D提审"
+    if "3d" in s and "提审" in s:
+        return "3D提审"
+    if any(k in s for k in ["实物提审", "手板提审", "结构件提审"]):
+        return "实物提审"
+    if "包装" in s and "提审" in s:
+        return "包装提审"
+    return "(无)"
+
+def infer_review_result_from_text(txt):
+    s = str(txt).lower()
+    if any(k in s for k in ["通过", "ok", "pass"]):
+        return "通过"
+    if any(k in s for k in ["打回", "驳回", "退回"]):
+        return "打回"
+    if "提审" in s:
+        return "待反馈"
+    return "(无)"
+
+def quarter_to_deadline(q_str):
+    """YYYY Qn -> 该季度最后一天日期"""
+    m = re.match(r'^(\d{4})\s*Q([1-4])$', str(q_str or '').strip().upper())
+    if not m:
+        return None
+    y = int(m.group(1)); q = int(m.group(2))
+    month = q * 3
+    if month == 12:
+        return datetime.date(y, 12, 31)
+    return datetime.date(y, month + 1, 1) - datetime.timedelta(days=1)
+
+def is_due_soon(target_str, days=5):
+    """开定/发货是否进入提前预警窗口"""
+    s = str(target_str or '').strip()
+    if not s or s.upper() == 'TBD':
+        return False
+    try:
+        if re.match(r'^\d{4}\s*Q[1-4]$', s.upper()):
+            dt = quarter_to_deadline(s)
+        elif len(s) >= 10:
+            dt = datetime.datetime.strptime(s[:10], "%Y-%m-%d").date()
+        else:
+            return False
+    except:
+        return False
+    if not dt:
+        return False
+    d = (dt - datetime.date.today()).days
+    return 0 <= d <= days
+
+def get_stage_delay_set(raw_logs, baseline_days):
+    """返回处于 delay 的阶段集合（按最近一次该阶段日志距今天数与基线比较）"""
+    latest_by_stage = {}
+    for lg in raw_logs:
+        stg = lg.get('工序', '')
+        try:
+            dt = datetime.datetime.strptime(lg.get('日期', ''), "%Y-%m-%d").date()
+        except:
+            continue
+        if stg not in latest_by_stage or dt > latest_by_stage[stg]:
+            latest_by_stage[stg] = dt
+    delayed = set()
+    for stg, dt in latest_by_stage.items():
+        macro = get_macro_phase(stg)
+        limit = int((baseline_days or {}).get(macro, 99999))
+        if (datetime.date.today() - dt).days > limit and limit < 99999:
+            delayed.add(stg)
+    return delayed
 
 def get_risk_status(milestone, target_date_str="TBD"):
     ms = str(milestone).strip()
@@ -488,15 +660,18 @@ if menu == MENU_DASHBOARD:
                         p_name = str(row[col_proj]).strip()
                         if not p_name or p_name.lower() in ['nan', 'none', '']:
                             continue
-                        pm_val   = str(row[col_pm]).strip()   if col_pm   and not pd.isna(row[col_pm])   else "Mo"
+                        pm_val   = str(row[col_pm]).strip()   if col_pm   and not pd.isna(row[col_pm])   else ""
                         ms_val   = str(row[col_ms]).strip()   if col_ms   and not pd.isna(row[col_ms])   else "待立项"
                         tgt_val  = str(row[col_tgt]).strip()  if col_tgt  and not pd.isna(row[col_tgt])  else "TBD"
                         ship_val = str(row[col_ship]).strip() if col_ship and not pd.isna(row[col_ship]) else ""
                         gd_val   = str(row[col_gd]).strip()   if col_gd   and not pd.isna(row[col_gd])   else ""
-                        if pm_val.lower()   == 'nan': pm_val   = "Mo"
+                        if pm_val.lower()   == 'nan': pm_val   = ""
                         if ms_val.lower()   == 'nan': ms_val   = "待立项"
                         if tgt_val.lower()  == 'nan': tgt_val  = "TBD"
                         if ship_val.lower() == 'nan': ship_val = ""
+                        ship_val = ship_val.upper().replace('-', ' ').strip()
+                        m_q = re.match(r'^(\d{4})\s*Q([1-4])$', ship_val)
+                        ship_val = f"{m_q.group(1)} Q{m_q.group(2)}" if m_q else ""
                         if gd_val.lower()   == 'nan': gd_val   = ""
                         if p_name not in db:
                             db[p_name] = {"负责人": pm_val, "跟单": gd_val, "Milestone": ms_val,
@@ -564,7 +739,8 @@ if menu == MENU_DASHBOARD:
                         if k not in grouped:
                             grouped[k] = {"日期_obj": dt_obj, "日期_str": log['日期'],
                                           "工序": macro_stage, "事件": evt,
-                                          "部件": [c_name], "is_pause": is_pause_stage(macro_stage)}
+                                          "部件": [c_name], "is_pause": is_pause_stage(macro_stage),
+                                          "提审类型": log.get("提审类型", ""), "提审结果": log.get("提审结果", "")}
                         elif c_name not in grouped[k]["部件"]:
                             grouped[k]["部件"].append(c_name)
                     except: pass
@@ -614,7 +790,14 @@ if menu == MENU_DASHBOARD:
                     # 暂停区间内的非暂停日志（系统自动追踪等）跳过，不产生甘特色块
                     if log["工序"] != "暂停" and in_pause_period(log["日期_obj"]):
                         continue
-                    buf.append(f"[{log['日期_str']}] [{', '.join(log['部件'])}] {log['事件']}")
+                    rv_type = str(log.get("提审类型", "")).strip()
+                    rv_res = str(log.get("提审结果", "")).strip()
+                    rv_txt = ""
+                    if rv_type and rv_type != "(无)":
+                        rv_txt = f" | 提审:{rv_type}"
+                        if rv_res and rv_res != "(无)":
+                            rv_txt += f"/{rv_res}"
+                    buf.append(f"[{log['日期_str']}] [{', '.join(log['部件'])}] {log['事件']}{rv_txt}")
                     is_last  = (i == len(all_logs) - 1)
                     # 看下一条有效日志（同样跳过暂停区间内的）
                     ns = None
@@ -650,17 +833,24 @@ if menu == MENU_DASHBOARD:
 
     st.divider()
     st.subheader("📈 全局进展甘特图")
-    st.markdown("💡 数据量上来后，这里可叠加 **建模/设计/工程/开模具** 的平均耗时统计，辅助识别瓶颈阶段。")
+    st.markdown("💡 支持按时间区间筛选；并统计建模/设计/工程平均耗时（可选去极值）。")
     if gantt_data:
         df_g = pd.DataFrame(gantt_data).sort_values(by=["项目", "Start"])
+        df_g["Start_dt"] = pd.to_datetime(df_g["Start"], errors="coerce")
+        df_g["Finish_dt"] = pd.to_datetime(df_g["Finish"], errors="coerce")
+        d1, d2 = st.columns(2)
+        with d1:
+            gantt_start = st.date_input("甘特开始日期", value=df_g["Start_dt"].min().date() if not df_g["Start_dt"].isna().all() else datetime.date.today(), key="gantt_start")
+        with d2:
+            gantt_end = st.date_input("甘特结束日期", value=df_g["Finish_dt"].max().date() if not df_g["Finish_dt"].isna().all() else datetime.date.today(), key="gantt_end")
+        m = (df_g["Finish_dt"] >= pd.to_datetime(gantt_start)) & (df_g["Start_dt"] <= pd.to_datetime(gantt_end))
+        df_g = df_g[m]
+
         if _meta:
             df_meta = pd.DataFrame(_meta).drop_duplicates(subset=["项目标签"])
-            # 甘特排序：最近更新的进行中项目在上；暂停项目统一压到最下方
-            df_meta["排序组"] = df_meta.apply(
-                lambda r: 2 if r["是否暂停"] == 1 else (1 if r["是否完结"] == 1 else 0), axis=1
-            )
             df_meta["最近更新_dt"] = pd.to_datetime(df_meta["最近更新"], errors="coerce").fillna(pd.Timestamp.min)
-            df_meta = df_meta.sort_values(by=["排序组", "最近更新_dt", "项目标签"], ascending=[True, False, True])
+            df_meta["有更新"] = (df_meta["最近更新"] != "0001-01-01").astype(int)
+            df_meta = df_meta.sort_values(by=["有更新", "最近更新_dt", "项目标签"], ascending=[False, False, True])
             y_order = df_meta["项目标签"].tolist()
         else:
             y_order = sorted(df_g["项目"].unique().tolist())
@@ -681,30 +871,69 @@ if menu == MENU_DASHBOARD:
         fig.update_yaxes(autorange="reversed")
         fig.update_layout(height=max(400, len(df_g['项目'].unique()) * 45))
         st.plotly_chart(fig, use_container_width=True)
+
+        st.markdown("#### ⏱️ 建模/设计/工程平均耗时（天）")
+        trim_outlier = st.checkbox("去掉最大值和最小值（样本>=3时）", value=False, key="trim_stage_avg")
+        df_dur = df_g.copy()
+        df_dur["天数"] = (df_dur["Finish_dt"] - df_dur["Start_dt"]).dt.days.clip(lower=1)
+        focus = df_dur[df_dur["工序阶段"].isin(["建模", "设计", "工程"])]
+        rows = []
+        for stg in ["建模", "设计", "工程"]:
+            vals = focus[focus["工序阶段"] == stg]["天数"].dropna().tolist()
+            vals = [int(v) for v in vals if v >= 1]
+            if trim_outlier and len(vals) >= 3:
+                vals = sorted(vals)[1:-1]
+            avg = round(sum(vals)/len(vals), 2) if vals else 0
+            rows.append({"阶段": stg, "样本数": len(vals), "平均耗时(天)": avg})
+        st.dataframe(pd.DataFrame(rows), use_container_width=True)
     else:
         st.warning("无足够日志数据生成甘特图。")
 
     st.subheader("📋 大盘状态明细表")
     if table_data:
         df_table = pd.DataFrame(table_data)
-        df_table['is_finished'] = df_table['状态'].apply(lambda x: 1 if "已结案" in str(x) else 0)
-        df_table['sort_date']   = df_table['开定时间'].replace({'TBD': '9999-12-31', '': '9999-12-31'})
-        df_table = df_table.sort_values(by=['is_finished', 'sort_date', '项目']).drop(columns=['is_finished', 'sort_date'])
-        st.dataframe(df_table, use_container_width=True)
+        df_table["开定延迟预警"] = ""
+        df_table["发货延迟预警"] = ""
+        df_table["状态组"] = 2
+        df_table.loc[df_table["状态"].str.contains("研发|生产", na=False), "状态组"] = 0
+        df_table.loc[df_table["状态"].str.contains("暂停", na=False), "状态组"] = 1
+        df_table.loc[df_table["状态"].str.contains("未知", na=False), "状态组"] = 2
+        df_table.loc[df_table["状态"].str.contains("结案", na=False), "状态组"] = 3
+        df_table["开定排序"] = pd.to_datetime(df_table["开定时间"], errors="coerce")
+        df_table["发货排序"] = df_table["预计发货"].apply(lambda x: quarter_to_deadline(x) or datetime.date.max)
+        df_table["发货排序"] = pd.to_datetime(df_table["发货排序"], errors="coerce")
+        df_table["断更天"] = df_table["断更"].str.extract(r'(\d+)').fillna('99999').astype(int)
+        for i, r in df_table.iterrows():
+            stt = str(r.get("状态", ""))
+            if "研发" in stt and is_due_soon(r.get("开定时间", ""), 5):
+                df_table.at[i, "开定延迟预警"] = "⚠️ +5天临期"
+            if "生产" in stt and is_due_soon(r.get("预计发货", ""), 5):
+                df_table.at[i, "发货延迟预警"] = "⚠️ +5天临期"
+        df_table = df_table.sort_values(by=["状态组", "开定排序", "发货排序", "断更天", "项目"], ascending=[True, True, True, True, True])
+        st.dataframe(df_table.drop(columns=["状态组", "开定排序", "发货排序", "断更天"]), use_container_width=True)
 
     st.divider()
     if project_person_roles:
         df_ppr   = pd.DataFrame(list(project_person_roles), columns=["项目", "人员", "职务"])
         df_owner = df_ppr.groupby(["人员", "职务"]).size().reset_index(name='积压项目数')
+        df_owner["积压项目数"] = df_owner["积压项目数"].astype(int)
         fig_owner = px.bar(df_owner, x='人员', y='积压项目数', color='职务',
                            title="👤 团队&责任人 Loading", text='积压项目数')
+        fig_owner.update_yaxes(dtick=1)
         st.plotly_chart(fig_owner, use_container_width=True)
+
+        st.markdown("#### 📌 Function 去重项目数（进行中）")
+        table_df = pd.DataFrame(table_data)
+        ongoing = table_df[table_df["状态"].str.contains("研发|生产", na=False)][["项目"]]
+        role_df = df_ppr.merge(ongoing, on="项目", how="inner").drop_duplicates(subset=["项目", "职务"])
+        fn_stats = role_df.groupby("职务")["项目"].nunique().reset_index(name="进行中项目数")
+        st.dataframe(fn_stats.sort_values(by=["进行中项目数", "职务"], ascending=[False, True]), use_container_width=True)
 
 # ==========================================
 # 模块 2：特定项目管控台
 # ==========================================
 elif menu == MENU_SPECIFIC:
-    st.title("🎯 特定项目专属管控台")
+    st.title("🎯 PM 工作台")
 
     if st.button("➕ 手动建档新项目"):
         st.session_state.new_proj_mode = not st.session_state.get('new_proj_mode', False)
@@ -757,6 +986,9 @@ elif menu == MENU_SPECIFIC:
         global_comp_key = next((k for k in comps.keys() if "全局" in k), "全局进度")
         global_is_paused = is_pause_stage(comps.get(global_comp_key, {}).get("主流程", ""))
         guan_tu_idx = STAGES_UNIFIED.index("官图") if "官图" in STAGES_UNIFIED else len(STAGES_UNIFIED)
+        factory_idx = STAGES_UNIFIED.index("工厂复样(含胶件/上色等)") if "工厂复样(含胶件/上色等)" in STAGES_UNIFIED else None
+        project_in_production = str(db[sel_proj].get("Milestone", "")).strip() == "生产中"
+        production_start_date = get_project_production_start_date(db.get(sel_proj, {})) if project_in_production else None
         for comp_name in y_labels:
             owner_str    = comps[comp_name].get('负责人', '').strip()
             display_name = f"{comp_name} 👤 {owner_str}" if owner_str and owner_str != '未分配' else comp_name
@@ -780,6 +1012,7 @@ elif menu == MENU_SPECIFIC:
                         stage_recent_logs[stg].append(f"[{log.get('日期','')}] {log.get('事件','')}")
 
             active_stages, completed_stages = collect_stage_activity(raw_logs, STAGES_UNIFIED)
+            delayed_stages = get_stage_delay_set(raw_logs, SYS_CFG.get("排期基线", {}))
             # 领头羊规则：全局进入暂停时，子部件展示态也进入暂停（仅展示层，不覆盖原日志）
             cur_is_paused = is_pause_stage(cur_stage) or (global_is_paused and "全局" not in comp_name)
             if cur_is_paused:
@@ -807,12 +1040,23 @@ elif menu == MENU_SPECIFIC:
             else:
                 real_c_idx = c_idx
             row_vals = []; row_hover = []
+            late_added_component = (
+                project_in_production and factory_idx is not None and
+                is_late_added_component(comp_name, comps.get(comp_name, {}), production_start_date, factory_idx, STAGES_UNIFIED)
+            )
             for i in range(len(STAGES_UNIFIED)):
                 stg        = STAGES_UNIFIED[i]
                 hover_base = f"部件: {comp_name}<br>负责人: {owner_str or '未分配'}<br>工序: {stg}"
                 recent = stage_recent_logs.get(stg, [])
                 if recent:
                     hover_base += "<br>最近日志:<br>• " + "<br>• ".join(recent)
+                if project_in_production and factory_idx is not None and not late_added_component:
+                    if i < factory_idx and "暂停" not in stg:
+                        row_vals.append(1); row_hover.append(f"{hover_base}<br>状态: ✅ 生产期前置阶段默认视作完成")
+                        continue
+                    if i == factory_idx:
+                        row_vals.append(2); row_hover.append(f"{hover_base}<br>状态: 🚀 <b>生产中（工厂复样）</b>")
+                        continue
                 if cur_stage == "✅ 已完成(结束)" and stg == "✅ 已完成(结束)":
                     row_vals.append(1); row_hover.append(f"{hover_base}<br>状态: ✅ 全部结束")
                 elif (stg in completed_stages) and not is_pause_stage(stg):
@@ -825,18 +1069,25 @@ elif menu == MENU_SPECIFIC:
                      (cur_stage == "✅ 已完成(结束)"):
                     row_vals.append(1); row_hover.append(f"{hover_base}<br>状态: ✅ 已彻底完成")
                 elif i <= real_c_idx and "暂停" not in stg:
-                    row_vals.append(2); row_hover.append(f"{hover_base}<br>状态: 🚀 <b>已流转至此/并行中</b>")
+                    if (stg in delayed_stages) and not cur_is_paused:
+                        row_vals.append(4); row_hover.append(f"{hover_base}<br>状态: ⚠️ <b>Delay</b>")
+                    else:
+                        row_vals.append(2); row_hover.append(f"{hover_base}<br>状态: 🚀 <b>已流转至此/并行中</b>")
                 elif stg in active_stages:
-                    row_vals.append(2); row_hover.append(f"{hover_base}<br>状态: 🚀 <b>进行中/暂停停留</b>")
+                    if (stg in delayed_stages) and not cur_is_paused:
+                        row_vals.append(4); row_hover.append(f"{hover_base}<br>状态: ⚠️ <b>Delay</b>")
+                    else:
+                        row_vals.append(2); row_hover.append(f"{hover_base}<br>状态: 🚀 <b>进行中</b>")
                 else:
                     row_vals.append(0); row_hover.append(f"{hover_base}<br>状态: ⏳ 未流转")
             z_data.append(row_vals); hover_text.append(row_hover)
-        # 0=未流转(浅灰), 1=完成(绿), 2=进行中/暂停(蓝), 3=暂停前已流转(深灰)
+        # 0=未流转(浅灰), 1=完成(绿), 2=进行中/暂停(蓝), 3=暂停前已流转(深灰), 4=delay(黄)
         colorscale = [
-            [0.00, '#f1f5f9'], [0.24, '#f1f5f9'],
-            [0.25, '#2ecc71'], [0.49, '#2ecc71'],
-            [0.50, '#3b82f6'], [0.74, '#3b82f6'],
-            [0.75, '#4b5563'], [1.00, '#4b5563']
+            [0.00, '#f1f5f9'], [0.19, '#f1f5f9'],
+            [0.20, '#2ecc71'], [0.39, '#2ecc71'],
+            [0.40, '#3b82f6'], [0.59, '#3b82f6'],
+            [0.60, '#4b5563'], [0.79, '#4b5563'],
+            [0.80, '#facc15'], [1.00, '#facc15']
         ]
         fig_grid = go.Figure(data=go.Heatmap(
             z=z_data, x=STAGES_UNIFIED, y=y_labels_display,
@@ -973,11 +1224,13 @@ elif menu == MENU_SPECIFIC:
 
     with st.container(border=True):
         st.markdown("**(1) 基础流转信息**")
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
         with c1: selected_comps_raw = st.multiselect("操作部件", all_comps, default=[], key=f"ms_{fk}")
         with c2: evt_type  = st.selectbox("记录类型", ["🔄 内部进展/正常流转", "⬅️ 收到反馈/被打回"], key=f"evt_{fk}")
         with c3: new_stage = st.selectbox("🎯 目标工序阶段", STAGES_UNIFIED, key=f"stg_{fk}")
         with c4: handoff   = st.selectbox("关联媒介", HANDOFF_METHODS, key=f"hd_{fk}")
+        with c5: review_type = st.selectbox("🧾 提审类型", REVIEW_TYPE_OPTIONS, key=f"rv_type_{fk}")
+        with c6: review_result = st.selectbox("🧾 提审结果", REVIEW_RESULT_OPTIONS, key=f"rv_res_{fk}")
 
         comps_to_process = selected_comps_raw if selected_comps_raw else ["🌐 全局进度 (Overall)"]
         new_comp_name    = ""
@@ -1114,11 +1367,15 @@ elif menu == MENU_SPECIFIC:
                                 if log_txt else f"【{evt_type} | {handoff}】")
                     if is_completed:
                         base_log += " [系统]彻底完成"
+                    review_warn = validate_review_with_stage(review_type, new_stage, actual_c, STAGES_UNIFIED)
+                    if review_warn:
+                        st.warning(f"[{actual_c}] {review_warn}")
 
                     if new_stage == "立项":
                         db[sel_proj]["部件列表"][actual_c]['日志流'].append({
                             "日期": str(detail_record_date), "流转": evt_type,
-                            "工序": "立项", "事件": base_log, "图片": img_b64_list
+                            "工序": "立项", "事件": base_log, "图片": img_b64_list,
+                            "提审类型": review_type, "提审结果": review_result
                         })
                         db[sel_proj]["部件列表"][actual_c]['日志流'].append({
                             "日期": str(detail_record_date + datetime.timedelta(days=1)),
@@ -1129,7 +1386,8 @@ elif menu == MENU_SPECIFIC:
                     else:
                         db[sel_proj]["部件列表"][actual_c]['日志流'].append({
                             "日期": str(detail_record_date), "流转": evt_type,
-                            "工序": new_stage, "事件": base_log, "图片": img_b64_list
+                            "工序": new_stage, "事件": base_log, "图片": img_b64_list,
+                            "提审类型": review_type, "提审结果": review_result
                         })
                         db[sel_proj]["部件列表"][actual_c]['主流程'] = new_stage
 
@@ -1372,7 +1630,7 @@ elif menu == MENU_FASTLOG:
 
         for i, item in enumerate(st.session_state.parsed_logs):
             is_unknown = is_manual_pick_project(item['识别项目'])
-            c1, c2, c3, c4, c5 = st.columns([1.2, 1, 1, 1.8, 1])
+            c1, c2, c3, c4, c5, c6, c7 = st.columns([1.2, 1, 1, 1.6, 1, 1, 1])
             with c1:
                 sel_proj_ai = st.selectbox(
                     "归属项目", project_options,
@@ -1416,8 +1674,19 @@ elif menu == MENU_FASTLOG:
                 sel_event = st.text_input("📝 写入事件", value=item['待写入事件'], key=f"evt_{i}")
             with c5:
                 ai_kw = st.text_input("🧠 提取触发新词", placeholder="如: 法杖", key=f"kw_{i}")
+            with c6:
+                rv_type_default = infer_review_type_from_text(item['待写入事件'])
+                rv_type = st.selectbox("提审类型", REVIEW_TYPE_OPTIONS,
+                                       index=REVIEW_TYPE_OPTIONS.index(rv_type_default) if rv_type_default in REVIEW_TYPE_OPTIONS else 0,
+                                       key=f"rv_ai_type_{i}")
+            with c7:
+                rv_res_default = infer_review_result_from_text(item['待写入事件'])
+                rv_res = st.selectbox("提审结果", REVIEW_RESULT_OPTIONS,
+                                      index=REVIEW_RESULT_OPTIONS.index(rv_res_default) if rv_res_default in REVIEW_RESULT_OPTIONS else 0,
+                                      key=f"rv_ai_res_{i}")
             edited_logs.append({"项目": sel_proj_ai, "部件": sel_comp, "事件": sel_event,
-                                 "推测阶段": sel_stage, "新词汇": ai_kw})
+                                 "推测阶段": sel_stage, "新词汇": ai_kw,
+                                 "提审类型": rv_type, "提审结果": rv_res})
 
         st.markdown("**🖼️ 附件图片**")
         try:
@@ -1454,6 +1723,7 @@ elif menu == MENU_FASTLOG:
                     st.session_state.ai_consumed_hashes.add(k)
                 st.rerun()
 
+        force_ai_submit = st.checkbox("⚠️ 允许强制提交（忽略阶段/提审 warning）", value=False, key="ai_force_submit")
         if st.button("💾 确认入库", type="primary"):
             td          = str(global_ai_date)
             ai_b64_list = []
@@ -1484,6 +1754,12 @@ elif menu == MENU_FASTLOG:
                     db[p]["部件列表"][target_comp] = {"主流程": STAGES_UNIFIED[0], "日志流": []}
                 curr_stage = db[p]["部件列表"][target_comp].get("主流程", STAGES_UNIFIED[0])
                 final_stage = (curr_stage if log["推测阶段"] == "(维持原阶段)" else log["推测阶段"])
+                stage_warn = validate_transition_warning(curr_stage, final_stage, STAGES_UNIFIED)
+                review_warn = validate_review_with_stage(log.get("提审类型", "(无)"), final_stage, target_comp, STAGES_UNIFIED)
+                if (stage_warn or review_warn) and not force_ai_submit:
+                    merged_warn = "；".join([w for w in [stage_warn, review_warn] if w])
+                    st.warning(f"[{p}/{target_comp}] {merged_warn}。如确认无误请勾选强制提交后再次保存")
+                    continue
                 # 防呆：当前处于暂停时，除非明确写了恢复关键词或手动改了阶段，否则保持暂停
                 evt_text = str(log.get('事件', '')).lower()
                 has_resume_signal = any(kw in evt_text for kw in RESUME_KWS)
@@ -1491,7 +1767,8 @@ elif menu == MENU_FASTLOG:
                     final_stage = curr_stage
                 db[p]["部件列表"][target_comp]['日志流'].append({
                     "日期": td, "流转": "AI速记",
-                    "工序": final_stage, "事件": log['事件'], "图片": ai_b64_list
+                    "工序": final_stage, "事件": log['事件'], "图片": ai_b64_list,
+                    "提审类型": log.get("提审类型", "(无)"), "提审结果": log.get("提审结果", "(无)")
                 })
                 db[p]["部件列表"][target_comp]["主流程"] = final_stage
 
