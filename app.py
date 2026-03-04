@@ -543,6 +543,12 @@ def get_stage_delay_set(raw_logs, baseline_days):
             delayed.add(stg)
     return delayed
 
+def parse_date_safe(date_str):
+    try:
+        return datetime.datetime.strptime(str(date_str), "%Y-%m-%d").date()
+    except:
+        return None
+
 def get_risk_status(milestone, target_date_str="TBD"):
     ms = str(milestone).strip()
     target_date_str = str(target_date_str).strip()
@@ -972,6 +978,63 @@ elif menu == MENU_SPECIFIC:
         st.session_state.exclude_imgs        = set()
         st.session_state.config_consumed_hashes = set()
         st.session_state.current_proj_context   = sel_proj
+
+    st.subheader("🗂️ To do List（轻量）")
+    todo_list = db[sel_proj].setdefault("TODO列表", [])
+    t1, t2, t3, t4, t5 = st.columns([2, 1.2, 1.2, 1, 1])
+    with t1:
+        todo_title = st.text_input("任务", key=f"todo_title_{sel_proj}", placeholder="如：T2 结构件确认")
+    with t2:
+        todo_func = st.selectbox("Function", ["监修", "建模", "设计", "工程", "包装", "其他"], key=f"todo_func_{sel_proj}")
+    with t3:
+        todo_due = st.date_input("DDL(可空)", value=datetime.date.today(), key=f"todo_due_{sel_proj}")
+        todo_has_due = st.checkbox("启用DDL", value=False, key=f"todo_due_on_{sel_proj}")
+    with t4:
+        todo_ref_proj = st.selectbox("关联项目", valid_projs, index=valid_projs.index(sel_proj) if sel_proj in valid_projs else 0, key=f"todo_ref_{sel_proj}")
+    with t5:
+        st.write("")
+        if st.button("➕ 添加", key=f"todo_add_{sel_proj}", type="primary"):
+            if todo_title.strip():
+                db[sel_proj].setdefault("TODO列表", []).append({
+                    "任务": todo_title.strip(), "Function": todo_func,
+                    "关联项目": todo_ref_proj,
+                    "DDL": str(todo_due) if todo_has_due else "",
+                    "完成": False, "创建": str(datetime.date.today())
+                })
+                sync_save_db(sel_proj); st.rerun()
+    hint_target = db.get(todo_ref_proj, {}).get("Target", "") if todo_ref_proj else ""
+    if hint_target and str(hint_target).strip().upper() != "TBD":
+        st.caption(f"🔎 提示：[{todo_ref_proj}] 当前预计开定为 {hint_target}")
+
+    if todo_list:
+        todo_sorted = sorted(todo_list, key=lambda x: (1 if x.get("完成") else 0, x.get("DDL", "9999-12-31"), x.get("创建", "")))
+        for i, td in enumerate(todo_sorted):
+            c1, c2, c3, c4, c5 = st.columns([0.7, 3, 1.2, 1.2, 1])
+            due_txt = str(td.get("DDL", "")).strip()
+            due_dt = parse_date_safe(due_txt) if due_txt else None
+            tag = ""
+            if due_dt and not td.get("完成"):
+                dd = (due_dt - datetime.date.today()).days
+                if dd <= 0:
+                    tag = " 🔴今日/逾期"
+                elif dd == 1:
+                    tag = " 🟡明日到期"
+            with c1:
+                done = st.checkbox("", value=bool(td.get("完成")), key=f"todo_done_{sel_proj}_{i}")
+                td["完成"] = done
+            with c2:
+                st.markdown(f"**{td.get('任务','')}**{tag}")
+                st.caption(f"{td.get('关联项目','')} | {td.get('Function','其他')}")
+            with c3:
+                st.write(td.get("DDL", "-" ) or "-")
+            with c4:
+                st.write("✅ 已完成" if td.get("完成") else "⏳ 进行中")
+            with c5:
+                if st.button("🗑️", key=f"todo_del_{sel_proj}_{i}"):
+                    todo_list.remove(td); sync_save_db(sel_proj); st.rerun()
+        if st.button("💾 保存To do状态", key=f"todo_save_{sel_proj}"):
+            db[sel_proj]["TODO列表"] = todo_list
+            sync_save_db(sel_proj); st.rerun()
 
     st.divider()
     st.subheader("🔬 项目进度透视矩阵 (并行连消追踪)")
@@ -1666,14 +1729,14 @@ elif menu == MENU_FASTLOG:
             with c3:
                 options_stages = ["(维持原阶段)"] + STAGES_UNIFIED
                 sel_stage = st.selectbox(
-                    "AI预测", options_stages,
+                    "部件阶段", options_stages,
                     index=options_stages.index(item['推测阶段']) if item.get('推测阶段') in options_stages else 0,
                     key=f"stg_{i}"
                 )
             with c4:
                 sel_event = st.text_input("📝 写入事件", value=item['待写入事件'], key=f"evt_{i}")
             with c5:
-                ai_kw = st.text_input("🧠 提取触发新词", placeholder="如: 法杖", key=f"kw_{i}")
+                ai_kw = st.text_input("🧠 新词(可选，留空自动学习)", placeholder="如: 法杖", key=f"kw_{i}")
             with c6:
                 rv_type_default = infer_review_type_from_text(item['待写入事件'])
                 rv_type = st.selectbox("提审类型", REVIEW_TYPE_OPTIONS,
@@ -1723,6 +1786,7 @@ elif menu == MENU_FASTLOG:
                     st.session_state.ai_consumed_hashes.add(k)
                 st.rerun()
 
+        auto_learn_kw = st.checkbox("🤖 自动学习新词（留空时从事件前8字提取）", value=True, key="ai_auto_learn")
         force_ai_submit = st.checkbox("⚠️ 允许强制提交（忽略阶段/提审 warning）", value=False, key="ai_force_submit")
         if st.button("💾 确认入库", type="primary"):
             td          = str(global_ai_date)
@@ -1743,6 +1807,9 @@ elif menu == MENU_FASTLOG:
                     continue
                 target_comp = log["部件"] if log["部件"] != "其他配件(系统自动创建)" else "自定义配件"
                 snippet     = log.get("新词汇", "").strip()
+                if (not snippet) and auto_learn_kw:
+                    evt = str(log.get("事件", "")).strip()
+                    snippet = evt[:8] if len(evt) >= 2 else ""
                 if snippet:
                     if target_comp != "全局进度":
                         SYS_CFG.setdefault("AI_COMP_KW", {})[snippet]  = target_comp
