@@ -589,7 +589,10 @@ def validate_transition_warning(curr_stage, next_stage, stages):
 
 def infer_review_type_from_text(txt):
     s = str(txt or "").lower()
-    has_review_signal = any(k in s for k in ["提审", "过审", "通过", "打回", "驳回", "待反馈", "review"])
+    has_review_signal = (
+        any(k in s for k in ["提审", "过审", "review", "打回", "驳回", "退回", "待反馈"])
+        or any(k in s for k in ["2d", "3d", "二维", "三维", "实物提审", "包装提审"])
+    )
     if not has_review_signal:
         return "(无)"
     if any(k in s for k in ["2d", "二维"]):
@@ -604,14 +607,19 @@ def infer_review_type_from_text(txt):
 
 def infer_review_result_from_text(txt):
     s = str(txt or "").lower()
-    if any(k in s for k in ["通过", "ok", "pass", "过审"]):
-        return "通过"
+    has_review_signal = (
+        any(k in s for k in ["提审", "过审", "review", "打回", "驳回", "退回", "待反馈"])
+        or any(k in s for k in ["2d", "3d", "二维", "三维", "实物提审", "包装提审"])
+    )
+    has_ok_word = re.search(r'(?<![a-z])ok(?![a-z])', s) is not None
+    has_pass_word = re.search(r'(?<![a-z])pass(?![a-z])', s) is not None
     if any(k in s for k in ["打回", "驳回", "退回"]):
         return "打回"
-    if any(k in s for k in ["提审", "待反馈", "review"]):
+    if has_review_signal and (("通过" in s) or ("过审" in s) or has_ok_word or has_pass_word):
+        return "通过"
+    if has_review_signal and any(k in s for k in ["提审", "待反馈", "review"]):
         return "待反馈"
     return "(无)"
-
 def normalize_review_round(val):
     s = str(val or "").strip()
     if not s:
@@ -941,6 +949,7 @@ def render_pm_batch_fastlog_integrated(visible_projects, default_proj=""):
     if not rows:
         st.info("输入批量速记后，点击【智能拆解】。")
         return
+    st.caption("提审识别规则：仅命中提审语义（提审/过审/review/打回等）时自动填写提审结果，普通 OK 不再默认=通过。")
 
     all_existing_comps = set()
     for p in visible_projects:
@@ -1113,6 +1122,7 @@ def render_pm_fastlog_integrated(sel_proj):
     if not rows:
         st.info("输入速记后点击【解析到部件/阶段】即可批量入库。")
         return
+    st.caption("提审识别规则：仅命中提审语义（提审/过审/review/打回等）时自动填写提审结果，普通 OK 不再默认=通过。")
 
     existing_comps = list(db[sel_proj].get("部件列表", {}).keys())
     comp_opts = [unresolved_comp, "全局进度"] + STD_COMPONENTS + existing_comps + ["其他配件(系统自动创建)"]
@@ -1928,49 +1938,133 @@ if menu == MENU_DASHBOARD:
         def _hl_warn(v):
             return 'background-color: #fef08a; color: #111827; font-weight: 600' if str(v).strip() else ''
 
-        st.caption("提示：开定/发货 +5 天临期会高亮黄色，仍可点击表头二次排序。")
-        st.dataframe(
-            show_df.style.map(_hl_warn, subset=["开定延迟预警", "发货延迟预警"]),
-            use_container_width=True
+        def _status_bucket_from_ms(ms):
+            s = str(ms).strip()
+            if s == "暂停研发":
+                return "暂停"
+            if s in ["生产结束", "项目结束撒花🎉", "✅ 已完成(结束)"]:
+                return "已完结"
+            if s in ["生产中", "下模中"]:
+                return "生产"
+            if "研发" in s or s in ["待开定", "已开定", "待立项"]:
+                return "研发"
+            return "未知阶段"
+
+        def _milestone_from_status_bucket(bucket, old_ms):
+            b = str(bucket).strip()
+            old = str(old_ms).strip()
+            if b == "暂停":
+                return "暂停研发"
+            if b == "已完结":
+                return old if old in ["项目结束撒花🎉", "✅ 已完成(结束)"] else "生产结束"
+            if b == "生产":
+                return "生产中"
+            if b == "研发":
+                return "研发中"
+            if b == "未知阶段":
+                return "待立项"
+            return old or "待立项"
+
+        def _cell_text(v):
+            if pd.isna(v):
+                return ""
+            if isinstance(v, pd.Timestamp):
+                return v.strftime("%Y-%m-%d")
+            if isinstance(v, datetime.datetime):
+                return v.strftime("%Y-%m-%d")
+            if isinstance(v, datetime.date):
+                return v.strftime("%Y-%m-%d")
+            s = str(v).strip()
+            return "" if s.lower() in ["nan", "nat", "none"] else s
+
+        show_df["负责人"] = show_df["项目"].apply(lambda p: str(db.get(p, {}).get("负责人", "")))
+        show_df["状态调整"] = show_df["项目"].apply(lambda p: _status_bucket_from_ms(db.get(p, {}).get("Milestone", "")))
+        show_df = show_df[[
+            "状态", "状态调整", "项目", "项目当前阶段", "开定时间", "预计发货", "负责人", "跟单",
+            "开定延迟预警", "发货延迟预警", "断更", "最新全盘动态"
+        ]]
+
+        st.caption("支持在明细表中直接修改：状态调整 / 项目当前阶段 / 开定时间 / 预计发货 / 负责人 / 跟单。")
+        edited_dash_df = st.data_editor(
+            show_df,
+            use_container_width=True,
+            hide_index=True,
+            key="dash_detail_editor",
+            column_config={
+                "状态调整": st.column_config.SelectboxColumn("状态调整", options=["研发", "生产", "暂停", "未知阶段", "已完结"], required=True),
+                "项目当前阶段": st.column_config.SelectboxColumn("项目当前阶段", options=STD_MILESTONES, required=True),
+                "负责人": st.column_config.SelectboxColumn("负责人", options=["Mo", "越", "袁"], required=True),
+            },
+            disabled=["状态", "项目", "开定延迟预警", "发货延迟预警", "断更", "最新全盘动态"]
         )
 
-        with st.expander("✏️ 大盘状态快速更新（项目状态/开定/发货）", expanded=False):
-            st.caption("建议用于紧急修正；日常详细过程仍建议在 PM 工作台更新。")
-            edit_proj = st.selectbox("项目", valid_projs, key="dash_quick_edit_proj")
-            cur_d = db.get(edit_proj, {})
-            e1, e2, e3, e4 = st.columns(4)
-            with e1:
-                edit_ms = st.selectbox("项目状态", STD_MILESTONES,
-                                       index=STD_MILESTONES.index(cur_d.get("Milestone", "待立项")) if cur_d.get("Milestone", "待立项") in STD_MILESTONES else 0,
-                                       key="dash_quick_edit_ms")
-            with e2:
-                edit_target = st.text_input("预计开定", value=str(cur_d.get("Target", "TBD")), key="dash_quick_edit_target")
-            with e3:
-                edit_ship = st.text_input("预计发货区间", value=str(cur_d.get("发货区间", "")), key="dash_quick_edit_ship")
-            with e4:
-                edit_pm = st.selectbox("负责人", ["Mo", "越", "袁"],
-                                       index=["Mo", "越", "袁"].index(cur_d.get("负责人", "Mo")) if cur_d.get("负责人", "Mo") in ["Mo", "越", "袁"] else 0,
-                                       key="dash_quick_edit_pm")
+        if st.button("💾 保存明细表修改", key="dash_detail_save", type="primary"):
+            origin_map = show_df.set_index("项目").to_dict(orient="index")
+            changed_projects = []
+            today_str = str(datetime.date.today())
+            for _, row in edited_dash_df.iterrows():
+                proj = str(row.get("项目", "")).strip()
+                if proj not in db:
+                    continue
+                old = origin_map.get(proj, {})
+                old_ms = str(old.get("项目当前阶段", db[proj].get("Milestone", "待立项"))).strip()
+                old_bucket = str(old.get("状态调整", _status_bucket_from_ms(old_ms))).strip()
+                new_bucket = _cell_text(row.get("状态调整", old_bucket))
+                input_ms = _cell_text(row.get("项目当前阶段", old_ms)) or old_ms
+                new_ms = input_ms if input_ms in STD_MILESTONES else old_ms
+                if new_bucket != old_bucket:
+                    new_ms = _milestone_from_status_bucket(new_bucket, old_ms)
+                new_target = _cell_text(row.get("开定时间", old.get("开定时间", "TBD")))
+                new_ship = _cell_text(row.get("预计发货", old.get("预计发货", "")))
+                new_pm = _cell_text(row.get("负责人", old.get("负责人", db[proj].get("负责人", "Mo"))))
+                new_gd = _cell_text(row.get("跟单", old.get("跟单", "")))
+                if not new_target:
+                    new_target = "TBD"
+                change_items = []
+                if db[proj].get("Milestone", "") != new_ms and new_ms in STD_MILESTONES:
+                    db[proj]["Milestone"] = new_ms
+                    change_items.append(f"状态:{new_ms}")
+                if str(db[proj].get("Target", "")).strip() != new_target:
+                    db[proj]["Target"] = new_target
+                    change_items.append(f"开定:{new_target}")
+                if str(db[proj].get("发货区间", "")).strip() != new_ship:
+                    db[proj]["发货区间"] = new_ship
+                    change_items.append(f"发货:{new_ship}")
+                if str(db[proj].get("负责人", "")).strip() != new_pm:
+                    db[proj]["负责人"] = new_pm
+                    change_items.append(f"PM:{new_pm}")
+                if str(db[proj].get("跟单", "")).strip() != new_gd:
+                    db[proj]["跟单"] = new_gd
+                    change_items.append(f"跟单:{new_gd}")
 
-            if st.button("💾 保存大盘快速更新", key="dash_quick_save", type="primary"):
-                db[edit_proj]["Milestone"] = edit_ms
-                db[edit_proj]["Target"] = edit_target
-                db[edit_proj]["发货区间"] = edit_ship
-                db[edit_proj]["负责人"] = edit_pm
-                td = str(datetime.date.today())
-                comps = db[edit_proj].setdefault("部件列表", {})
+                if not change_items:
+                    continue
+
+                comps = db[proj].setdefault("部件列表", {})
                 gk = "全局进度" if "全局进度" in comps else (next(iter(comps.keys()), "全局进度"))
                 if gk not in comps:
                     comps[gk] = {"主流程": STAGES_UNIFIED[0], "日志流": []}
                 comps[gk].setdefault("日志流", []).append({
-                    "日期": td,
+                    "日期": today_str,
                     "流转": "系统更新",
                     "工序": comps[gk].get("主流程", STAGES_UNIFIED[0]),
-                    "事件": f"[大盘快速更新] 状态:{edit_ms} | 开定:{edit_target} | 发货:{edit_ship} | PM:{edit_pm}"
+                    "事件": "[大盘明细直改] " + " | ".join(change_items)
                 })
-                sync_save_db(edit_proj)
-                st.success("已更新。")
+                changed_projects.append(proj)
+
+            if changed_projects:
+                for cp in sorted(set(changed_projects)):
+                    sync_save_db(cp)
+                st.success(f"已更新 {len(set(changed_projects))} 个项目。")
                 st.rerun()
+            else:
+                st.info("未检测到变更。")
+
+        with st.expander("只读预览（含临期黄色高亮）", expanded=False):
+            st.dataframe(
+                show_df.style.map(_hl_warn, subset=["开定延迟预警", "发货延迟预警"]),
+                use_container_width=True
+            )
 
     st.divider()
     if project_person_roles:
@@ -2222,7 +2316,7 @@ elif menu == MENU_SPECIFIC:
         ]
         fig_grid = go.Figure(data=go.Heatmap(
             z=z_data, x=STAGES_UNIFIED, y=y_labels_display,
-            colorscale=colorscale, showscale=False, xgap=4, ygap=4,
+            colorscale=colorscale, zmin=0, zmax=4, showscale=False, xgap=4, ygap=4,
             text=hover_text, hoverinfo='text'
         ))
         fig_grid.update_layout(
@@ -3352,12 +3446,23 @@ elif menu == MENU_HISTORY:
                     if img and img not in seen_imgs:
                         seen_imgs.add(img)
                         all_imgs.append(img)
+                rv_type = str(g["log"].get("提审类型", "(无)") or "(无)")
+        rv_res = str(g["log"].get("提审结果", "(无)") or "(无)")
+        if rv_type == "(无)" and rv_res == "(无)":
+            rv_state = "(无)"
+        elif rv_type != "(无)" and rv_res == "(无)":
+            rv_state = f"{rv_type} / 待补结果"
+        elif rv_type == "(无)" and rv_res != "(无)":
+            rv_state = f"仅结果:{rv_res}"
+        else:
+            rv_state = f"{rv_type} / {rv_res}"
         flat_data.append({
             "_ids": g["_ids"], "部件": ", ".join(g["部件"]),
             "日期": g["log"]["日期"], "工序": g["log"]["工序"],
             "类型": g["log"]["流转"], "事件": g["log"]["事件"],
-            "提审类型": g["log"].get("提审类型", "(无)"),
-            "提审结果": g["log"].get("提审结果", "(无)"),
+            "提审类型": rv_type,
+            "提审结果": rv_res,
+            "提审状态": rv_state,
             "提审轮次": g["log"].get("提审轮次", ""),
             "图片": all_imgs
         })
@@ -3365,6 +3470,11 @@ elif menu == MENU_HISTORY:
     if flat_data:
         df_logs = pd.DataFrame(flat_data).sort_values(by="日期", ascending=False).reset_index(drop=True)
         df_logs.insert(0, '序号', range(len(df_logs), 0, -1))
+        review_ctx = df_logs["事件"].astype(str).str.contains(r"提审|过审|review|打回|驳回|退回|待反馈|2d|3d|二维|三维|实物提审|包装提审", case=False, regex=True)
+        mismatch_mask = (df_logs['提审类型'].astype(str) == '(无)') & (df_logs['提审结果'].astype(str).isin(['待反馈', '通过', '打回'])) & (~review_ctx)
+        mismatch_cnt = int(mismatch_mask.sum())
+        if mismatch_cnt > 0:
+            st.warning(f"检测到 {mismatch_cnt} 条记录疑似误判提审（无提审语义但提审结果有值）。建议改为(无)或补齐提审信息。")
 
         st.info("💡 下方为历史日志。直接**双击修改文字**，或选中整行后按 **Delete** 删除。")
         edited_df = st.data_editor(
@@ -3375,6 +3485,7 @@ elif menu == MENU_HISTORY:
                 "工序":  st.column_config.SelectboxColumn("工序", options=STAGES_UNIFIED, required=True),
                 "提审类型": st.column_config.SelectboxColumn("提审类型", options=REVIEW_TYPE_OPTIONS, required=True),
                 "提审结果": st.column_config.SelectboxColumn("提审结果", options=REVIEW_RESULT_OPTIONS, required=True),
+                "提审状态": st.column_config.TextColumn("提审状态", disabled=True),
                 "提审轮次": st.column_config.NumberColumn("提审轮次", min_value=1, step=1)
             },
             num_rows="dynamic", use_container_width=True
@@ -3798,6 +3909,16 @@ elif menu == MENU_GUIDE:
         st.markdown(
             "每次收工建议下载全量备份（数据+图片）；换设备后通过上传备份一键恢复。"
         )
+
+
+
+
+
+
+
+
+
+
 
 
 
