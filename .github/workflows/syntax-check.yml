@@ -1,0 +1,24 @@
+name: Syntax Check
+
+on:
+  pull_request:
+  push:
+    branches: ["**"]
+
+jobs:
+  py-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Python compile check
+        run: |
+          python -m py_compile app.py app_backup_before_sync.py project_admin.py
+      - name: Conflict marker check
+        run: |
+          if grep -R -n -E '^(<<<<<<<|=======|>>>>>>>)' -- . ; then
+            echo 'Found unresolved conflict markers'
+            exit 1
+          fi
