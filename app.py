@@ -966,44 +966,33 @@ elif menu == MENU_SPECIFIC:
                     else:
                         st.error("项目名称不能为空。")
 
-    if not valid_projs:
-        st.warning("当前视角下暂无项目。")
-        st.stop()
-
-    if 'current_proj_context' not in st.session_state:
-        st.session_state.current_proj_context = valid_projs[0] if valid_projs else None
-    sel_proj = st.selectbox("📌 1. 选择要透视与操作的项目 (💡支持键盘打字模糊搜索)", valid_projs)
-    if sel_proj != st.session_state.current_proj_context:
-        st.session_state.pasted_cache        = {}
-        st.session_state.config_pasted_cache = {}
-        st.session_state.exclude_imgs        = set()
-        st.session_state.config_consumed_hashes = set()
-        st.session_state.current_proj_context   = sel_proj
-
     st.subheader("🗂️ To do List（轻量）")
-    todo_list = db[sel_proj].setdefault("TODO列表", [])
-    t1, t2, t3, t4, t5 = st.columns([2, 1.2, 1.2, 1, 1])
+    todo_list = db.setdefault("系统配置", {}).setdefault("PM_TODO_LIST", [])
+    todo_proj_options = ["(不关联项目)"] + valid_projs
+
+    t1, t2, t3, t4 = st.columns([2.5, 1.2, 1.6, 0.9])
     with t1:
-        todo_title = st.text_input("任务", key=f"todo_title_{sel_proj}", placeholder="如：T2 结构件确认")
+        todo_title = st.text_input("任务", key="todo_title_global", placeholder="如：T2 结构件确认")
     with t2:
-        todo_func = st.selectbox("Function", ["监修", "建模", "设计", "工程", "包装", "其他"], key=f"todo_func_{sel_proj}")
+        todo_due = st.date_input("DDL(可空)", value=datetime.date.today(), key="todo_due_global")
+        todo_has_due = st.checkbox("启用DDL", value=False, key="todo_due_on_global")
     with t3:
-        todo_due = st.date_input("DDL(可空)", value=datetime.date.today(), key=f"todo_due_{sel_proj}")
-        todo_has_due = st.checkbox("启用DDL", value=False, key=f"todo_due_on_{sel_proj}")
+        todo_ref_proj = st.selectbox("关联项目(可选)", todo_proj_options, key="todo_ref_global")
     with t4:
-        todo_ref_proj = st.selectbox("关联项目", valid_projs, index=valid_projs.index(sel_proj) if sel_proj in valid_projs else 0, key=f"todo_ref_{sel_proj}")
-    with t5:
         st.write("")
-        if st.button("➕ 添加", key=f"todo_add_{sel_proj}", type="primary"):
+        if st.button("➕ 添加", key="todo_add_global", type="primary"):
             if todo_title.strip():
-                db[sel_proj].setdefault("TODO列表", []).append({
-                    "任务": todo_title.strip(), "Function": todo_func,
-                    "关联项目": todo_ref_proj,
+                todo_list.append({
+                    "任务": todo_title.strip(),
+                    "关联项目": "" if todo_ref_proj == "(不关联项目)" else todo_ref_proj,
                     "DDL": str(todo_due) if todo_has_due else "",
-                    "完成": False, "创建": str(datetime.date.today())
+                    "完成": False,
+                    "创建": str(datetime.date.today())
                 })
-                sync_save_db(sel_proj); st.rerun()
-    hint_target = db.get(todo_ref_proj, {}).get("Target", "") if todo_ref_proj else ""
+                sync_save_db("系统配置")
+                st.rerun()
+
+    hint_target = db.get(todo_ref_proj, {}).get("Target", "") if todo_ref_proj in db else ""
     if hint_target and str(hint_target).strip().upper() != "TBD":
         st.caption(f"🔎 提示：[{todo_ref_proj}] 当前预计开定为 {hint_target}")
 
@@ -1021,24 +1010,44 @@ elif menu == MENU_SPECIFIC:
                 elif dd == 1:
                     tag = " 🟡明日到期"
             with c1:
-                done = st.checkbox("", value=bool(td.get("完成")), key=f"todo_done_{sel_proj}_{i}")
+                done = st.checkbox("", value=bool(td.get("完成")), key=f"todo_done_global_{i}")
                 td["完成"] = done
             with c2:
                 st.markdown(f"**{td.get('任务','')}**{tag}")
-                st.caption(f"{td.get('关联项目','')} | {td.get('Function','其他')}")
+                ref_proj = td.get("关联项目", "")
+                st.caption(ref_proj if ref_proj else "(未关联项目)")
             with c3:
                 st.write(td.get("DDL", "-" ) or "-")
             with c4:
                 st.write("✅ 已完成" if td.get("完成") else "⏳ 进行中")
             with c5:
-                if st.button("🗑️", key=f"todo_del_{sel_proj}_{i}"):
-                    todo_list.remove(td); sync_save_db(sel_proj); st.rerun()
-        if st.button("💾 保存To do状态", key=f"todo_save_{sel_proj}"):
-            db[sel_proj]["TODO列表"] = todo_list
-            sync_save_db(sel_proj); st.rerun()
+                if st.button("🗑️", key=f"todo_del_global_{i}"):
+                    todo_list.remove(td)
+                    sync_save_db("系统配置")
+                    st.rerun()
+        if st.button("💾 保存To do状态", key="todo_save_global"):
+            db.setdefault("系统配置", {})["PM_TODO_LIST"] = todo_list
+            sync_save_db("系统配置")
+            st.rerun()
 
     st.divider()
+
+    if not valid_projs:
+        st.warning("当前视角下暂无项目，可先维护 To do List。")
+        st.stop()
+
+    if 'current_proj_context' not in st.session_state:
+        st.session_state.current_proj_context = valid_projs[0] if valid_projs else None
+    sel_proj = st.selectbox("📌 选择要透视与操作的项目 (💡支持键盘打字模糊搜索)", valid_projs)
+    if sel_proj != st.session_state.current_proj_context:
+        st.session_state.pasted_cache        = {}
+        st.session_state.config_pasted_cache = {}
+        st.session_state.exclude_imgs        = set()
+        st.session_state.config_consumed_hashes = set()
+        st.session_state.current_proj_context   = sel_proj
+    st.divider()
     st.subheader("🔬 项目进度透视矩阵 (并行连消追踪)")
+    st.caption("颜色说明：🟩 已完成 ｜ 🟦 进行中/生产中 ｜ ⬛ 暂停前已流转 ｜ 🟨 Delay ｜ ⬜ 未流转")
     comps = db[sel_proj].get('部件列表', {})
     if not comps:
         st.warning("暂无录入部件明细。请在下方录入。")
@@ -1134,15 +1143,18 @@ elif menu == MENU_SPECIFIC:
                     row_vals.append(1); row_hover.append(f"{hover_base}<br>状态: ✅ 全部结束")
                 elif (stg in completed_stages) and not is_pause_stage(stg):
                     row_vals.append(1); row_hover.append(f"{hover_base}<br>状态: ✅ 已彻底完成")
-                elif (real_c_idx >= guan_tu_idx and i < real_c_idx and "暂停" not in stg) or                      (cur_stage == "✅ 已完成(结束)"):
+                elif (real_c_idx >= guan_tu_idx and i < real_c_idx and "暂停" not in stg) or \
+                     (cur_stage == "✅ 已完成(结束)"):
                     row_vals.append(1); row_hover.append(f"{hover_base}<br>状态: ✅ 已彻底完成")
-                elif i <= real_c_idx and "暂停" not in stg:
-                    if stg in delayed_stages:
+                elif i < real_c_idx and "暂停" not in stg:
+                    row_vals.append(1); row_hover.append(f"{hover_base}<br>状态: ✅ 已流转完成")
+                elif i == real_c_idx and "暂停" not in stg:
+                    if (stg in delayed_stages) and not cur_is_paused:
                         row_vals.append(4); row_hover.append(f"{hover_base}<br>状态: ⚠️ <b>Delay</b>")
                     else:
                         row_vals.append(2); row_hover.append(f"{hover_base}<br>状态: 🚀 <b>进行中</b>")
                 elif stg in active_stages:
-                    if stg in delayed_stages:
+                    if (stg in delayed_stages) and not cur_is_paused:
                         row_vals.append(4); row_hover.append(f"{hover_base}<br>状态: ⚠️ <b>Delay</b>")
                     else:
                         row_vals.append(2); row_hover.append(f"{hover_base}<br>状态: 🚀 <b>进行中</b>")
