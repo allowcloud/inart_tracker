@@ -41,6 +41,18 @@ def render_image(img_str, **kwargs):
         try: st.image(base64.b64decode(img_str), **kwargs)
         except: pass
 
+def save_uploaded_file_ref(file_obj, prefix="upload"):
+    if file_obj is None:
+        return ""
+    if not os.path.exists(IMG_DIR):
+        os.makedirs(IMG_DIR)
+    ext = os.path.splitext(getattr(file_obj, 'name', '') or '')[1].lower() or '.jpg'
+    fname = f"{prefix}_{uuid.uuid4().hex}{ext}"
+    fpath = os.path.join(IMG_DIR, fname)
+    with open(fpath, 'wb') as f:
+        f.write(file_obj.read())
+    return f"FILE:{fname}"
+
 def norm_text(s):
     return re.sub(r'\s+', '', str(s or '').strip()).lower()
 
@@ -916,8 +928,18 @@ if menu == MENU_DASHBOARD:
                 df_table.at[i, "开定延迟预警"] = "⚠️ +5天临期"
             if "生产" in stt and is_due_soon(r.get("预计发货", ""), 5):
                 df_table.at[i, "发货延迟预警"] = "⚠️ +5天临期"
+
         df_table = df_table.sort_values(by=["状态组", "开定排序", "发货排序", "断更天", "项目"], ascending=[True, True, True, True, True])
-        st.dataframe(df_table.drop(columns=["状态组", "开定排序", "发货排序", "断更天"]), use_container_width=True)
+        show_df = df_table.drop(columns=["状态组", "开定排序", "发货排序", "断更天"])
+
+        def _hl_warn(v):
+            return 'background-color: #fef08a; color: #111827; font-weight: 600' if str(v).strip() else ''
+
+        st.caption("提示：开定/发货 +5 天临期会高亮黄色，仍可点击表头二次排序。")
+        st.dataframe(
+            show_df.style.map(_hl_warn, subset=["开定延迟预警", "发货延迟预警"]),
+            use_container_width=True
+        )
 
     st.divider()
     if project_person_roles:
@@ -1890,28 +1912,53 @@ elif menu == MENU_PACKING:
         st.rerun()
 
     st.divider()
-    st.markdown("### 🎁 包装 Checklist")
+    st.markdown("### 🎁 包装 Checklist（卡片版 + 物料附件追溯）")
     pack_data = db[sel_proj].get("包装专项", {})
-    p11, p12, p13 = st.columns(3)
-    s1 = p11.checkbox("1. 实物寄包装厂",  value=pack_data.get("实物寄厂",   False))
-    s2 = p12.checkbox("2. 提供刀线",      value=pack_data.get("提供刀线",   False))
-    s5 = p13.checkbox("⚖️ 3. 内部已称重", value=pack_data.get("已称重",     False))
-    p21, p22, p23 = st.columns(3)
-    s3 = p21.checkbox("彩盒设计完毕",     value=pack_data.get("彩盒设计",   False))
-    s4 = p22.checkbox("灰箱设计完毕",     value=pack_data.get("灰箱设计",   False))
-    s6 = p23.checkbox("物流箱已设计",     value=pack_data.get("物流箱设计", False))
-    p31, p32, p33 = st.columns(3)
-    s7 = p31.checkbox("说明书定版",       value=pack_data.get("说明书",     False))
-    s8 = p32.checkbox("感谢信定版",       value=pack_data.get("感谢信",     False))
-    s9 = p33.checkbox("杂项纸品",         value=pack_data.get("杂项纸品",   False))
-    if st.button("💾 保存包装进度"):
-        db[sel_proj]["包装专项"] = {
-            "实物寄厂": s1, "提供刀线": s2, "彩盒设计": s3, "灰箱设计": s4,
-            "已称重": s5, "物流箱设计": s6, "说明书": s7, "感谢信": s8, "杂项纸品": s9
-        }
+    pack_items = [
+        "实物寄厂", "提供刀线", "已称重", "彩盒设计", "灰箱设计", "物流箱设计", "说明书", "感谢信", "杂项纸品"
+    ]
+    labels = {
+        "实物寄厂": "1. 实物寄包装厂", "提供刀线": "2. 提供刀线", "已称重": "3. 内部已称重",
+        "彩盒设计": "4. 彩盒设计完毕", "灰箱设计": "5. 灰箱设计完毕", "物流箱设计": "6. 物流箱已设计",
+        "说明书": "7. 说明书定版", "感谢信": "8. 感谢信定版", "杂项纸品": "9. 杂项纸品"
+    }
+    pack_file_map = db[sel_proj].setdefault("包装物料附件", {})
+    new_pack_vals = {}
+    cols = st.columns(3)
+    for i, key in enumerate(pack_items):
+        with cols[i % 3]:
+            with st.container(border=True):
+                new_pack_vals[key] = st.checkbox(labels[key], value=pack_data.get(key, False), key=f"pack_ck_{sel_proj}_{key}")
+                up = st.file_uploader("上传附件(可选)", type=['png', 'jpg', 'jpeg', 'pdf'], key=f"pack_file_{sel_proj}_{key}")
+                if up is not None:
+                    ref = save_uploaded_file_ref(up, prefix=f"pack_{norm_text(sel_proj)[:12]}_{i}")
+                    if ref:
+                        pack_file_map.setdefault(key, []).append(ref)
+                        st.success("附件已缓存，点击【保存包装进度】后统一落库。")
+                refs = pack_file_map.get(key, [])
+                if refs:
+                    st.caption(f"已关联附件：{len(refs)}")
+
+    if st.button("💾 保存包装进度", type="primary"):
+        db[sel_proj]["包装专项"] = new_pack_vals
+        db[sel_proj]["包装物料附件"] = pack_file_map
         sync_save_db(sel_proj)
         st.success("已存档！")
         st.rerun()
+
+    with st.expander("🗂️ 查看包装物料附件"):
+        for key in pack_items:
+            refs = pack_file_map.get(key, [])
+            if not refs:
+                continue
+            st.markdown(f"**{labels[key]}**")
+            pcols = st.columns(min(len(refs), 4))
+            for j, ref in enumerate(refs):
+                with pcols[j % 4]:
+                    if str(ref).lower().endswith('.pdf'):
+                        st.write(ref)
+                    else:
+                        render_image(ref, use_container_width=True)
 
     st.divider()
     st.markdown("### 🧮 工厂大货入库与特殊领用台账")
@@ -2342,13 +2389,17 @@ elif menu == MENU_SETTINGS:
                     src_data = db.get(merge_src, {})
                     dst_data = db.get(merge_dst, {})
                     st.session_state.db["系统配置"].setdefault("最近合并回滚", {})
-                    st.session_state.db["系统配置"]["最近合并回滚"] = {
+                    rollback_payload = {
+                        "id": str(uuid.uuid4()),
+                        "时间": str(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
                         "merge_src": merge_src,
                         "merge_dst": merge_dst,
                         "src_data": json.loads(json.dumps(src_data, ensure_ascii=False)),
                         "dst_data_before": json.loads(json.dumps(dst_data, ensure_ascii=False)),
                         "alias_map_before": json.loads(json.dumps(st.session_state.db["系统配置"].get("项目别名", {}), ensure_ascii=False))
                     }
+                    st.session_state.db["系统配置"]["最近合并回滚"] = rollback_payload
+                    st.session_state.db["系统配置"].setdefault("合并回滚历史", []).append(rollback_payload)
                     dst_data.setdefault("部件列表", {})
                     for comp_name, comp_data in src_data.get("部件列表", {}).items():
                         if comp_name not in dst_data["部件列表"]:
@@ -2417,6 +2468,46 @@ elif menu == MENU_SETTINGS:
                     sync_save_db()
                     st.success("✅ 已撤销最近一次合并。")
                     st.rerun()
+
+            hist = st.session_state.db["系统配置"].setdefault("合并回滚历史", [])
+            if hist:
+                st.markdown("---")
+                st.markdown("**合并回滚历史（可多选删除，单条恢复）**")
+                hist_df = pd.DataFrame([
+                    {
+                        "ID": h.get("id", ""),
+                        "时间": h.get("时间", ""),
+                        "来源": h.get("merge_src", ""),
+                        "目标": h.get("merge_dst", "")
+                    }
+                    for h in hist
+                ]).sort_values(by=["时间"], ascending=False)
+                st.dataframe(hist_df, use_container_width=True)
+                id_list = hist_df["ID"].tolist()
+                sel_restore = st.selectbox("选择要恢复的历史记录（单选）", ["(不选择)"] + id_list, key="merge_hist_restore")
+                c_h1, c_h2 = st.columns(2)
+                with c_h1:
+                    if st.button("↩️ 按历史记录恢复", key="btn_restore_hist") and sel_restore != "(不选择)":
+                        tar = next((x for x in hist if x.get("id") == sel_restore), None)
+                        if tar:
+                            src_name = tar.get("merge_src")
+                            dst_name = tar.get("merge_dst")
+                            if dst_name in db:
+                                db[dst_name] = tar.get("dst_data_before", db.get(dst_name, {}))
+                            db[src_name] = tar.get("src_data", {})
+                            st.session_state.db["系统配置"]["项目别名"] = tar.get(
+                                "alias_map_before", st.session_state.db["系统配置"].get("项目别名", {})
+                            )
+                            sync_save_db()
+                            st.success("✅ 已按历史记录恢复。")
+                            st.rerun()
+                with c_h2:
+                    del_ids = st.multiselect("多选删除历史记录", id_list, key="merge_hist_delete")
+                    if st.button("🗑️ 删除选中历史", key="btn_del_hist") and del_ids:
+                        st.session_state.db["系统配置"]["合并回滚历史"] = [x for x in hist if x.get("id") not in set(del_ids)]
+                        sync_save_db()
+                        st.success(f"已删除 {len(del_ids)} 条历史记录。")
+                        st.rerun()
 
     with st.expander("🛠️ 团队成员清洗 (支持按职能/姓名替换)", expanded=True):
         st.info("替换某个人的特定职能（如：将 `建模-雨萱` 替换为 `设计-雨萱`），留空即彻底抹除。")
@@ -2566,7 +2657,7 @@ elif menu == MENU_GUIDE:
 
     with st.expander("🎯 核心场景 1：日常进度交接与流转", expanded=True):
         st.markdown(
-            "1. **进入专属操作台**：点击左侧 **【🎯 特定项目管控台】**，上方选择项目。\n"
+            "1. **进入专属操作台**：点击左侧 **【🎯 PM 工作台】**，先维护 To do 再选择项目更新。\n"
             "2. **填写【基础信息】与【细分角色】**：根据进度选择更新阶段并填入成员名称。\n"
             "3. **填入进展详情**与图片。\n"
             "4. 点击最下方的批量保存按钮，**系统会在保存后全自动为你清空表单！**"
