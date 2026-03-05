@@ -200,6 +200,7 @@ MENU_GUIDE     = "📖 新手使用指南"
 STD_MILESTONES  = ["待立项", "研发中", "暂停研发", "下模中", "生产中", "生产结束", "项目结束撒花🎉"]
 HANDOFF_METHODS = ["内部正常推进", "微信", "飞书", "实物/打印件交接", "网盘链接", "当面沟通"]
 STD_COSTS_LIST  = ["研发费", "模具费", "大货生产", "包装印刷", "物流运输", "外包设计", "杂项其他"]
+QUOTE_ITEM_DEFAULTS = ["生产价", "衣服+皮布件", "头+装配", "模具费", "包装彩盒、吸塑", "手*9", "战衣版成品", "周转运费"]
 REVIEW_TYPE_OPTIONS = ["(无)", "2D提审", "3D提审", "实物提审", "包装提审"]
 REVIEW_RESULT_OPTIONS = ["(无)", "待反馈", "通过", "打回"]
 
@@ -1113,6 +1114,15 @@ elif menu == MENU_SPECIFIC:
                 recent = stage_recent_logs.get(stg, [])
                 if recent:
                     hover_base += "<br>最近日志:<br>• " + "<br>• ".join(recent)
+                if cur_is_paused:
+                    if is_pause_stage(stg):
+                        row_vals.append(2); row_hover.append(f"{hover_base}<br>状态: ⏸️ <b>暂停中</b>")
+                    elif i <= real_c_idx and not is_pause_stage(stg):
+                        row_vals.append(3); row_hover.append(f"{hover_base}<br>状态: ⏸️ 暂停前已流转")
+                    else:
+                        row_vals.append(0); row_hover.append(f"{hover_base}<br>状态: ⏳ 未流转")
+                    continue
+
                 if project_in_production and factory_idx is not None and not late_added_component:
                     if i < factory_idx and "暂停" not in stg:
                         row_vals.append(1); row_hover.append(f"{hover_base}<br>状态: ✅ 生产期前置阶段默认视作完成")
@@ -1124,20 +1134,15 @@ elif menu == MENU_SPECIFIC:
                     row_vals.append(1); row_hover.append(f"{hover_base}<br>状态: ✅ 全部结束")
                 elif (stg in completed_stages) and not is_pause_stage(stg):
                     row_vals.append(1); row_hover.append(f"{hover_base}<br>状态: ✅ 已彻底完成")
-                elif cur_is_paused and is_pause_stage(stg):
-                    row_vals.append(2); row_hover.append(f"{hover_base}<br>状态: ⏸️ <b>暂停中</b>")
-                elif cur_is_paused and i <= real_c_idx and not is_pause_stage(stg):
-                    row_vals.append(3); row_hover.append(f"{hover_base}<br>状态: ⏸️ 暂停前已流转")
-                elif (real_c_idx >= guan_tu_idx and i < real_c_idx and "暂停" not in stg) or \
-                     (cur_stage == "✅ 已完成(结束)"):
+                elif (real_c_idx >= guan_tu_idx and i < real_c_idx and "暂停" not in stg) or                      (cur_stage == "✅ 已完成(结束)"):
                     row_vals.append(1); row_hover.append(f"{hover_base}<br>状态: ✅ 已彻底完成")
                 elif i <= real_c_idx and "暂停" not in stg:
-                    if (stg in delayed_stages) and not cur_is_paused:
+                    if stg in delayed_stages:
                         row_vals.append(4); row_hover.append(f"{hover_base}<br>状态: ⚠️ <b>Delay</b>")
                     else:
-                        row_vals.append(2); row_hover.append(f"{hover_base}<br>状态: 🚀 <b>已流转至此/并行中</b>")
+                        row_vals.append(2); row_hover.append(f"{hover_base}<br>状态: 🚀 <b>进行中</b>")
                 elif stg in active_stages:
-                    if (stg in delayed_stages) and not cur_is_paused:
+                    if stg in delayed_stages:
                         row_vals.append(4); row_hover.append(f"{hover_base}<br>状态: ⚠️ <b>Delay</b>")
                     else:
                         row_vals.append(2); row_hover.append(f"{hover_base}<br>状态: 🚀 <b>进行中</b>")
@@ -1956,6 +1961,72 @@ elif menu == MENU_COST:
             st.rerun()
 
     st.divider()
+    st.subheader("🧩 预计报价模板（按工艺/工厂/头版方案）")
+    scenario_list = db[sel_proj].setdefault("成本数据", {}).setdefault("预计报价方案", [])
+    scenario_names = [x.get("方案名", f"方案{i+1}") for i, x in enumerate(scenario_list)]
+    scenario_pick = st.selectbox("选择方案", scenario_names + ["➕ 新建方案"], key=f"quote_pick_{sel_proj}")
+
+    if scenario_pick == "➕ 新建方案":
+        current = {
+            "方案名": "", "头版类型": "啤件头版", "工厂": "", "工艺": "",
+            "订单量": 0, "备注": "", "建议售价系数": 0.333333,
+            "条目": [{"报价项目": nm, "核算工厂报价": 0.0, "备注": ""} for nm in QUOTE_ITEM_DEFAULTS]
+        }
+        s_idx = None
+    else:
+        s_idx = scenario_names.index(scenario_pick)
+        current = scenario_list[s_idx]
+        current.setdefault("条目", [{"报价项目": nm, "核算工厂报价": 0.0, "备注": ""} for nm in QUOTE_ITEM_DEFAULTS])
+
+    form_key = f"{sel_proj}_{'new' if s_idx is None else s_idx}"
+    q1, q2, q3, q4, q5, q6 = st.columns([1.4, 1, 1, 1, 1, 1.2])
+    with q1: sc_name = st.text_input("方案名", value=current.get("方案名", ""), key=f"q_name_{form_key}")
+    with q2: sc_head = st.selectbox("头版类型", ["啤件头版", "翻模头版", "其他"], index=["啤件头版", "翻模头版", "其他"].index(current.get("头版类型", "啤件头版")) if current.get("头版类型", "啤件头版") in ["啤件头版", "翻模头版", "其他"] else 0, key=f"q_head_{form_key}")
+    with q3: sc_factory = st.text_input("工厂", value=current.get("工厂", ""), key=f"q_factory_{form_key}")
+    with q4: sc_process = st.text_input("工艺", value=current.get("工艺", ""), key=f"q_process_{form_key}")
+    with q5: sc_qty = st.number_input("订单量", min_value=0, value=int(current.get("订单量", 0)), step=100, key=f"q_qty_{form_key}")
+    with q6: sc_coef = st.number_input("建议售价系数(成本/系数)", min_value=0.05, max_value=1.0, value=float(current.get("建议售价系数", 0.333333)), step=0.01, key=f"q_coef_{form_key}")
+
+    sc_note = st.text_input("方案备注", value=current.get("备注", ""), key=f"q_note_{form_key}")
+    quote_df = pd.DataFrame(current.get("条目", []))
+    if quote_df.empty:
+        quote_df = pd.DataFrame([{"报价项目": nm, "核算工厂报价": 0.0, "备注": ""} for nm in QUOTE_ITEM_DEFAULTS])
+    quote_df = st.data_editor(quote_df, num_rows="dynamic", use_container_width=True, key=f"q_editor_{form_key}")
+    if "核算工厂报价" in quote_df.columns:
+        quote_df["核算工厂报价"] = pd.to_numeric(quote_df["核算工厂报价"], errors="coerce").fillna(0.0)
+    total_est = float(quote_df["核算工厂报价"].sum()) if "核算工厂报价" in quote_df.columns else 0.0
+    suggest_price = (total_est / sc_coef) if sc_coef > 0 else 0.0
+    st.info(f"预计整套成本价：¥{total_est:,.2f} | 建议售价：¥{suggest_price:,.2f}")
+
+    qa, qb, qc = st.columns([1,1,2])
+    with qa:
+        if st.button("💾 保存/更新报价方案", key=f"q_save_{form_key}", type="primary"):
+            payload = {
+                "方案名": sc_name or f"方案{len(scenario_list)+1}", "头版类型": sc_head,
+                "工厂": sc_factory, "工艺": sc_process, "订单量": int(sc_qty), "备注": sc_note,
+                "建议售价系数": float(sc_coef), "预计整套成本价": round(total_est, 2), "建议售价": round(suggest_price, 2),
+                "条目": quote_df.to_dict("records")
+            }
+            if s_idx is None:
+                scenario_list.append(payload)
+            else:
+                scenario_list[s_idx] = payload
+            sync_save_db(sel_proj); st.success("已保存报价方案"); st.rerun()
+    with qb:
+        if scenario_pick != "➕ 新建方案" and st.button("🗑️ 删除当前方案", key=f"q_del_{form_key}"):
+            scenario_list.pop(s_idx)
+            sync_save_db(sel_proj); st.success("已删除方案"); st.rerun()
+
+    if scenario_list:
+        st.markdown("#### 📌 方案对比")
+        comp_df = pd.DataFrame([
+            {"方案名": x.get("方案名", ""), "头版": x.get("头版类型", ""), "工厂": x.get("工厂", ""), "工艺": x.get("工艺", ""),
+             "订单量": x.get("订单量", 0), "预计整套成本价": x.get("预计整套成本价", 0.0), "建议售价": x.get("建议售价", 0.0)}
+            for x in scenario_list
+        ])
+        st.dataframe(comp_df, use_container_width=True)
+
+    st.divider()
     st.subheader("📥 批量导入成本明细 (CSV)")
     cost_csv = st.file_uploader("选择成本 CSV 文件", type=['csv'], key="cost_csv")
     if cost_csv and st.button("🚀 开始解析导入", type="primary"):
@@ -2042,6 +2113,13 @@ elif menu == MENU_COST:
             metric_cols = st.columns(num_cols)
             for i, row in subtotals.iterrows():
                 metric_cols[i % num_cols].metric(label=row['分类'], value=f"¥ {row['税后总成本']:,.2f}")
+
+        total_sub = float(subtotals['税后总成本'].sum()) if not subtotals.empty else 0.0
+        if total_sub > 0:
+            share_df = subtotals.copy()
+            share_df['成本占比'] = (share_df['税后总成本'] / total_sub * 100).round(2).astype(str) + '%'
+            st.markdown("#### 🧮 各分类成本占比")
+            st.dataframe(share_df.sort_values(by='税后总成本', ascending=False), use_container_width=True)
 
         st.divider()
         st.markdown("### 📝 动态明细管理")
