@@ -305,6 +305,7 @@ def _ensure_runtime_state_defaults():
         "new_proj_mode": False,
         "current_proj_context": None,
         "form_key": 0,
+        "todo_handoff_prefill": None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -1046,6 +1047,96 @@ def infer_todo_target_hint(td, valid_projs):
         return f"✅ 档期{fmt_ym(sch_ym)}=开定{fmt_ym(tgt_ym)}"
     return f"⚠️ 档期{fmt_ym(sch_ym)} ≠ 开定{fmt_ym(tgt_ym)}"
 
+def todo_link_status_text(td):
+    td_obj = td or {}
+    mod = str(td_obj.get("最近联动模块", "")).strip()
+    dt = str(td_obj.get("最近联动日期", "")).strip()
+    comp = str(td_obj.get("最近联动部件", "")).strip()
+    stage = str(td_obj.get("最近联动阶段", "")).strip()
+    if not mod and not dt:
+        return "未落地"
+    parts = []
+    if dt:
+        parts.append(dt)
+    if mod:
+        parts.append(mod)
+    if comp:
+        parts.append(comp)
+    if stage:
+        parts.append(stage)
+    return " / ".join(parts)
+
+
+def infer_todo_handoff_prefill(td, proj_name):
+    td_obj = td or {}
+    proj = str(proj_name or "").strip()
+    txt = f"{str(td_obj.get('任务', '')).strip()} {todo_cpddl_text(td_obj)}".strip()
+    txt_norm = norm_text(txt)
+    comp_hits = []
+    proj_comps = list(db.get(proj, {}).get("部件列表", {}).keys())
+    for comp in proj_comps:
+        if "全局" in comp:
+            continue
+        variants = {str(comp).strip()}
+        if " - " in str(comp):
+            variants.add(str(comp).split(" - ", 1)[1].strip())
+        for std_comp in STD_COMPONENTS:
+            if str(comp).startswith(std_comp):
+                variants.add(std_comp)
+                variants.add(re.sub(r"\(.*?\)", "", std_comp).strip())
+        hit = False
+        for vv in [v for v in variants if v]:
+            if vv in txt or norm_text(vv) in txt_norm:
+                hit = True
+                break
+        if hit and comp not in comp_hits:
+            comp_hits.append(comp)
+
+    if not comp_hits:
+        for std_comp in STD_COMPONENTS:
+            base = re.sub(r"\(.*?\)", "", std_comp).strip()
+            if (base and base in txt) or (norm_text(std_comp) in txt_norm):
+                comp_hits.append(std_comp)
+                break
+
+    stage_guess = ""
+    stage_kw = [
+        ("开定", "立项"), ("立项", "立项"), ("建模", "建模(含打印/签样)"),
+        ("打印", "建模(含打印/签样)"), ("涂装", "涂装"), ("设计", "设计"),
+        ("官图", "官图"), ("拆件", "工程拆件"), ("工程", "工程拆件"),
+        ("结构件", "工程拆件"), ("手板", "手板/结构板"), ("结构板", "手板/结构板"),
+        ("复样", "工厂复样(含胶件/上色等)"), ("上色", "工厂复样(含胶件/上色等)"),
+        ("大货", "大货"), ("包装", "包装"), ("暂停", "⏸️ 暂停/搁置"),
+        ("完成", "✅ 已完成(结束)")
+    ]
+    for kw, stage_name in stage_kw:
+        if kw in txt:
+            stage_guess = stage_name
+            break
+    if not stage_guess:
+        for stg in STAGES_UNIFIED:
+            if norm_text(stg) and norm_text(stg) in txt_norm:
+                stage_guess = stg
+                break
+
+    log_txt = str(td_obj.get("任务", "")).strip()
+    cpddl = todo_cpddl_text(td_obj)
+    if cpddl:
+        log_txt = f"{log_txt} | {cpddl}" if log_txt else cpddl
+    if not log_txt:
+        log_txt = "To do 联动更新"
+
+    if not comp_hits:
+        comp_hits = ["🌐 全局进度 (Overall)"]
+
+    return {
+        "项目": proj,
+        "todo_ids": [str(td_obj.get("_id", "")).strip()] if str(td_obj.get("_id", "")).strip() else [],
+        "部件": comp_hits,
+        "阶段": stage_guess,
+        "内容": log_txt,
+    }
+
 def _csv_cell_text(v):
     s = str(v if v is not None else "").strip()
     if s.lower() in ["nan", "none", "nat"]:
@@ -1354,6 +1445,12 @@ def render_pm_todo_manager(valid_projs, current_pm):
         td.setdefault("关联项目", "")
         td.setdefault("完成", False)
         td.setdefault("创建", str(today))
+        td.setdefault("最近联动模块", "")
+        td.setdefault("最近联动日期", "")
+        td.setdefault("最近联动项目", "")
+        td.setdefault("最近联动部件", "")
+        td.setdefault("最近联动阶段", "")
+        td.setdefault("最近联动写入时间", "")
         scope_val = str(td.get("所属视角", "")).strip()
         if scope_val not in scope_options:
             td["所属视角"] = "所有人"
@@ -1481,6 +1578,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
             "到期": due_dt.strftime("%Y-%m-%d") if due_dt else "-",
             "提醒": tip,
             "开定识别": infer_todo_target_hint(td, valid_projs),
+            "联动状态": todo_link_status_text(td),
             "删除": False,
             "_due": due_dt or datetime.date.max,
             "_create": str(td.get("创建", ""))
@@ -1513,12 +1611,12 @@ def render_pm_todo_manager(valid_projs, current_pm):
         return todo_list
 
     df_view = pd.DataFrame(view_rows).set_index("_id")
-    editor_disabled = ["到期", "提醒", "开定识别"]
+    editor_disabled = ["到期", "提醒", "开定识别", "联动状态"]
     if current_pm != "所有人":
         editor_disabled.append("所属视角")
 
     edited_df = st.data_editor(
-        df_view[["完成", "任务", "CP/DDL", "关联项目", "所属视角", "到期", "提醒", "开定识别", "删除"]],
+        df_view[["完成", "任务", "CP/DDL", "关联项目", "所属视角", "到期", "提醒", "开定识别", "联动状态", "删除"]],
         hide_index=True,
         use_container_width=True,
         key="todo_editor_global",
@@ -1531,6 +1629,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
             "到期": st.column_config.TextColumn("到期", disabled=True),
             "提醒": st.column_config.TextColumn("提醒", disabled=True),
             "开定识别": st.column_config.TextColumn("开定识别", disabled=True, width="large"),
+            "联动状态": st.column_config.TextColumn("联动状态", disabled=True, width="large"),
             "删除": st.column_config.CheckboxColumn("删除"),
         },
         disabled=editor_disabled
@@ -2941,13 +3040,36 @@ if menu == MENU_DASHBOARD:
                 return f"{first}（{due_txt}） +{len(arr)-1}项"
             return f"{first}（{due_txt}）"
 
+        def _todo_link_for_proj(proj_name):
+            arr = []
+            for td in db.get("系统配置", {}).get("PM_TODO_LIST", []):
+                if not todo_visible_for_view(td, current_pm):
+                    continue
+                if str(td.get("关联项目", "")).strip() != str(proj_name):
+                    continue
+                arr.append(td)
+            if not arr:
+                return "-"
+            linked = [x for x in arr if str(x.get("最近联动模块", "")).strip() or str(x.get("最近联动日期", "")).strip()]
+            if not linked:
+                return "未落地"
+            linked = sorted(linked, key=lambda x: (str(x.get("最近联动日期", "")), str(x.get("最近联动写入时间", ""))), reverse=True)
+            best = linked[0]
+            dt = str(best.get("最近联动日期", "")).strip()
+            mod = str(best.get("最近联动模块", "")).strip()
+            stg = str(best.get("最近联动阶段", "")).strip()
+            tail = f"/{stg}" if stg else ""
+            return f"{dt} {mod}{tail}".strip()
+
+
         show_df["负责人"] = show_df["项目"].apply(lambda p: str(db.get(p, {}).get("负责人", "")))
         show_df["状态调整"] = show_df["项目"].apply(lambda p: _status_bucket_from_ms(db.get(p, {}).get("Milestone", "")))
         show_df["待办数"] = show_df["项目"].apply(lambda p: int(len(todo_pending_map.get(str(p), []))))
         show_df["待办摘要"] = show_df["项目"].apply(_todo_summary_for_proj)
+        show_df["待办联动"] = show_df["项目"].apply(_todo_link_for_proj)
         show_df["动态修改方式"] = "不修改动态"
         show_df = show_df[[
-            "状态", "状态调整", "项目", "待办数", "待办摘要", "项目当前阶段", "开定时间", "预计发货", "负责人", "跟单",
+            "状态", "状态调整", "项目", "待办数", "待办摘要", "待办联动", "项目当前阶段", "开定时间", "预计发货", "负责人", "跟单",
             "临期预警", "断更", "最新全盘动态", "动态修改方式"
         ]]
 
@@ -2972,7 +3094,7 @@ if menu == MENU_DASHBOARD:
                     required=True
                 ),
             },
-            disabled=["状态", "项目", "待办数", "待办摘要", "临期预警", "断更"]
+            disabled=["状态", "项目", "待办数", "待办摘要", "待办联动", "临期预警", "断更"]
         )
 
         a1, a2 = st.columns([1.2, 1.2])
@@ -3268,6 +3390,40 @@ elif menu == MENU_SPECIFIC:
         else:
             st.caption("当前项目暂无提审待办")
 
+    project_pending_todos = [
+        x for x in todo_list
+        if (not x.get("完成")) and str(x.get("关联项目", "")).strip() == sel_proj
+    ]
+    project_pending_todos = sorted(project_pending_todos, key=lambda x: (todo_due_date(x) or datetime.date.max, str(x.get("创建", ""))))
+
+    with st.container(border=True):
+        st.markdown("**🔗 当前项目待办联动**")
+        if project_pending_todos:
+            todo_option_ids = [str(x.get("_id", "")).strip() for x in project_pending_todos]
+            todo_option_map = {str(x.get("_id", "")).strip(): x for x in project_pending_todos}
+            def _fmt_todo_opt(todo_id):
+                td = todo_option_map.get(todo_id, {})
+                due = todo_due_date(td)
+                due_txt = due.strftime("%m/%d") if due else "无DDL"
+                return f"{str(td.get('任务', '')).strip()} ｜ {due_txt}"
+            pick_todo_id = st.selectbox(
+                "选择一条待办带入交接表单",
+                todo_option_ids,
+                format_func=_fmt_todo_opt,
+                key=f"todo_prefill_pick_{sel_proj}"
+            )
+            pick_todo = todo_option_map.get(pick_todo_id, {})
+            c_l1, c_l2 = st.columns([1.2, 3.8])
+            with c_l1:
+                if st.button("↘ 带入交接表单", key=f"todo_prefill_btn_{sel_proj}", type="secondary"):
+                    st.session_state.todo_handoff_prefill = infer_todo_handoff_prefill(pick_todo, sel_proj)
+                    st.rerun()
+            with c_l2:
+                st.caption("开定识别：" + infer_todo_target_hint(pick_todo, valid_projs))
+                st.caption("最近落地：" + todo_link_status_text(pick_todo))
+        else:
+            st.caption("当前项目暂无关联 To do；你也可以先在左侧 To do 新建后再带入。")
+
     st.divider()
     st.markdown("<div class='pm-subsection-title'>🔬 项目透视矩阵（并行连消追踪）</div>", unsafe_allow_html=True)
     st.markdown("""
@@ -3544,6 +3700,30 @@ elif menu == MENU_SPECIFIC:
         st.markdown("**2. 细分配件交接工作台**")
         st.caption("说明：提审是独立维度，不会自动改变主阶段；仅做一致性校验提醒。")
         fk = st.session_state.form_key
+        handoff_todos = [
+            x for x in db.get("系统配置", {}).get("PM_TODO_LIST", [])
+            if (not x.get("完成")) and todo_visible_for_view(x, current_pm) and str(x.get("关联项目", "")).strip() == sel_proj
+        ]
+        handoff_todo_map = {str(x.get("_id", "")).strip(): x for x in handoff_todos}
+        prefill = st.session_state.get("todo_handoff_prefill")
+        if prefill and str(prefill.get("项目", "")).strip() == sel_proj:
+            if prefill.get("部件"):
+                st.session_state[f"ms_{fk}"] = prefill.get("部件")
+            if prefill.get("阶段") in STAGES_UNIFIED:
+                st.session_state[f"stg_{fk}"] = prefill.get("阶段")
+            if prefill.get("内容"):
+                st.session_state[f"txt_{fk}"] = prefill.get("内容")
+            if prefill.get("todo_ids"):
+                st.session_state[f"todo_link_{fk}"] = prefill.get("todo_ids")
+                st.session_state[f"todo_auto_done_{fk}"] = True
+            st.session_state.todo_handoff_prefill = None
+        todo_default_ids = [
+            tid for tid in st.session_state.get(f"todo_link_{fk}", [])
+            if tid in handoff_todo_map
+        ]
+        st.session_state[f"todo_link_{fk}"] = todo_default_ids
+
+
         existing_comps = list(db[sel_proj].get('部件列表', {}).keys())
         custom_comps   = sorted([c for c in existing_comps if c not in STD_COMPONENTS and "全局" not in c])
         all_comps      = ["➕ 新增细分配件...", "🌐 全局进度 (Overall)"] + STD_COMPONENTS + custom_comps
@@ -3613,6 +3793,20 @@ elif menu == MENU_SPECIFIC:
             with d_col: detail_record_date = st.date_input("🕒 发生日期", datetime.date.today(), key=f"date_{fk}")
             with t_col: log_txt = st.text_area("📝 详细进展 (按需写打回原因)", height=80, key=f"txt_{fk}")
     
+            st.markdown("**(3.5) 关联 To do**")
+            linked_todo_ids = st.multiselect(
+                "本次记录关联哪些待办",
+                options=list(handoff_todo_map.keys()),
+                default=st.session_state.get(f"todo_link_{fk}", []),
+                format_func=lambda x: f"{str(handoff_todo_map.get(x, {}).get('任务', '')).strip()} ｜ {(todo_due_date(handoff_todo_map.get(x, {})).strftime('%m/%d') if todo_due_date(handoff_todo_map.get(x, {})) else '无DDL')}",
+                key=f"todo_link_{fk}"
+            )
+            todo_auto_done = st.checkbox(
+                "保存交接后自动完成所关联 To do",
+                value=bool(st.session_state.get(f"todo_auto_done_{fk}", False) or linked_todo_ids),
+                key=f"todo_auto_done_{fk}"
+            )
+
             st.markdown("**(4) 参考图 (支持连按 Ctrl+V 缓存)**")
             try:
                 from streamlit_paste_button import paste_image_button
@@ -3695,6 +3889,14 @@ elif menu == MENU_SPECIFIC:
     
                         base_log = (f"【{evt_type} | {handoff}】补充: {log_txt}"
                                     if log_txt else f"【{evt_type} | {handoff}】")
+                        todo_names_for_log = [
+                            str(handoff_todo_map.get(str(tid).strip(), {}).get("任务", "")).strip()
+                            for tid in linked_todo_ids
+                            if str(handoff_todo_map.get(str(tid).strip(), {}).get("任务", "")).strip()
+                        ]
+                        if todo_names_for_log:
+                            base_log += " [关联To do] " + "；".join(todo_names_for_log[:3])
+
                         if is_completed:
                             base_log += " [系统]彻底完成"
                         curr_stage_detail = db[sel_proj]["部件列表"][actual_c].get("主流程", STAGES_UNIFIED[0])
@@ -3742,6 +3944,29 @@ elif menu == MENU_SPECIFIC:
                                 })
                                 sub_info["主流程"] = new_stage
     
+                    linked_todo_titles = []
+                    if saved_records > 0 and linked_todo_ids:
+                        todo_all_cfg = db.setdefault("系统配置", {}).setdefault("PM_TODO_LIST", [])
+                        todo_cfg_map = {str(x.get("_id", "")).strip(): x for x in todo_all_cfg}
+                        comp_label = "、".join([
+                            (new_comp_name if c == "➕ 新增细分配件..." and new_comp_name else ("全局进度" if c == "🌐 全局进度 (Overall)" else c))
+                            for c in comps_to_process
+                        ])
+                        write_ts = datetime.datetime.now().isoformat(timespec="seconds")
+                        for todo_id in linked_todo_ids:
+                            td_obj = todo_cfg_map.get(str(todo_id).strip())
+                            if not td_obj:
+                                continue
+                            td_obj["最近联动模块"] = "交接工作台"
+                            td_obj["最近联动日期"] = str(detail_record_date)
+                            td_obj["最近联动项目"] = sel_proj
+                            td_obj["最近联动部件"] = comp_label
+                            td_obj["最近联动阶段"] = new_stage
+                            td_obj["最近联动写入时间"] = write_ts
+                            if todo_auto_done:
+                                td_obj["完成"] = True
+                            linked_todo_titles.append(str(td_obj.get("任务", "")).strip())
+
                     if saved_records <= 0:
                         st.warning("未写入任何记录：请检查提审/阶段 warning，或勾选强制提交。")
                     else:
@@ -3749,7 +3974,10 @@ elif menu == MENU_SPECIFIC:
                         st.session_state.pasted_cache = {}
                         st.session_state.exclude_imgs = set()
                         sync_save_db(sel_proj)
-                        st.success(f"🎉 记录成功！本次写入 {saved_records} 条。")
+                        if linked_todo_ids:
+                            sync_save_db("系统配置")
+                        todo_msg = f"；联动待办 {len(linked_todo_titles)} 条" if linked_todo_titles else ""
+                        st.success(f"🎉 记录成功！本次写入 {saved_records} 条{todo_msg}。")
                         st.rerun()
 
         with st.expander("⏱️ 团队效能与工时", expanded=False):
