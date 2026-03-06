@@ -1728,7 +1728,7 @@ if menu == MENU_DASHBOARD:
             if not comps:
                 _table.append({"状态":r_txt,"项目":proj,"跟单":gd,"项目当前阶段":ms,
                     "开定时间":tgt,"预计发货":ship_itv,"断更":"-","最新全盘动态":"无数据"}); continue
-            latest_date_obj=None; latest_event_str="无数据"; latest_comp_name="-"; grouped={}
+            latest_date_obj=None; latest_event_str="无数据"; latest_comp_name="-"; latest_sort_key=None; grouped={}
             for c_name,info in comps.items():
                 for pair in re.split(r'[,，|]',str(info.get('负责人','')).strip()):
                     pair=pair.strip()
@@ -1739,9 +1739,13 @@ if menu == MENU_DASHBOARD:
                 logs=[lg for lg in info.get('日志流',[]) if not is_hidden_system_log(lg)]
                 if logs:
                     try:
-                        l_dt=datetime.datetime.strptime(logs[-1]['日期'],"%Y-%m-%d").date()
-                        if latest_date_obj is None or l_dt>latest_date_obj:
-                            latest_date_obj=l_dt; latest_event_str=logs[-1]['事件']; latest_comp_name=c_name
+                        last_log = logs[-1]
+                        l_dt=datetime.datetime.strptime(last_log['日期'],"%Y-%m-%d").date()
+                        l_write_ts = str(last_log.get("写入时间", ""))
+                        sort_key = (l_dt, l_write_ts)
+                        if latest_sort_key is None or sort_key > latest_sort_key:
+                            latest_sort_key = sort_key
+                            latest_date_obj=l_dt; latest_event_str=last_log.get('事件', ''); latest_comp_name=c_name
                     except: pass
                 for log in logs:
                     log_stage = log.get('工序', info.get('主流程', '未知'))
@@ -1909,8 +1913,7 @@ if menu == MENU_DASHBOARD:
     st.subheader("📋 大盘状态明细表")
     if table_data:
         df_table = pd.DataFrame(table_data)
-        df_table["开定延迟预警"] = ""
-        df_table["发货延迟预警"] = ""
+        df_table["临期预警"] = "✅ 正常"
         df_table["状态组"] = 2
         df_table.loc[df_table["状态"].str.contains("研发|生产", na=False), "状态组"] = 0
         df_table.loc[df_table["状态"].str.contains("暂停", na=False), "状态组"] = 1
@@ -1927,16 +1930,27 @@ if menu == MENU_DASHBOARD:
         df_table.loc[prod_mask, "主排序时间"] = df_table.loc[prod_mask, "发货排序"].fillna(pd.Timestamp.max)
         for i, r in df_table.iterrows():
             stt = str(r.get("状态", ""))
-            if "研发" in stt and is_due_soon(r.get("开定时间", ""), 5):
-                df_table.at[i, "开定延迟预警"] = "⚠️ +5天临期"
-            if "生产" in stt and is_due_soon(r.get("预计发货", ""), 5):
-                df_table.at[i, "发货延迟预警"] = "⚠️ +5天临期"
+            due_target = ("研发" in stt) and is_due_soon(r.get("开定时间", ""), 5)
+            due_ship = ("生产" in stt) and is_due_soon(r.get("预计发货", ""), 5)
+            if due_target and due_ship:
+                df_table.at[i, "临期预警"] = "🟧 开定+发货临期(<=5天)"
+            elif due_target:
+                df_table.at[i, "临期预警"] = "🟨 开定临期(<=5天)"
+            elif due_ship:
+                df_table.at[i, "临期预警"] = "🟨 发货临期(<=5天)"
+            else:
+                df_table.at[i, "临期预警"] = "✅ 正常"
 
         df_table = df_table.sort_values(by=["状态组", "主排序时间", "断更天", "项目"], ascending=[True, True, True, True])
         show_df = df_table.drop(columns=["状态组", "开定排序", "发货排序", "断更天", "主排序时间"])
 
         def _hl_warn(v):
-            return 'background-color: #fef08a; color: #111827; font-weight: 600' if str(v).strip() else ''
+            s = str(v).strip()
+            if s.startswith("🟧"):
+                return "background-color: #fed7aa; color: #9a3412; font-weight: 700"
+            if s.startswith("🟨"):
+                return "background-color: #fef08a; color: #111827; font-weight: 700"
+            return ""
 
         def _status_bucket_from_ms(ms):
             s = str(ms).strip()
@@ -1965,6 +1979,12 @@ if menu == MENU_DASHBOARD:
                 return "待立项"
             return old or "待立项"
 
+        def _bucket_label(ms):
+            b = _status_bucket_from_ms(ms)
+            if b in ["研发", "生产", "暂停", "已完结"]:
+                return b
+            return "项目"
+
         def _cell_text(v):
             if pd.isna(v):
                 return ""
@@ -1977,14 +1997,26 @@ if menu == MENU_DASHBOARD:
             s = str(v).strip()
             return "" if s.lower() in ["nan", "nat", "none"] else s
 
+        def _fmt_value(v, fallback="-"):
+            s = _cell_text(v)
+            return s if s else fallback
+
+        def _parse_dynamic_cell(txt):
+            s = _cell_text(txt)
+            m = re.match(r'^\[(.*?)\]\s*(.*)$', s)
+            if m:
+                return m.group(1).strip(), m.group(2).strip()
+            return "", s
+
         show_df["负责人"] = show_df["项目"].apply(lambda p: str(db.get(p, {}).get("负责人", "")))
         show_df["状态调整"] = show_df["项目"].apply(lambda p: _status_bucket_from_ms(db.get(p, {}).get("Milestone", "")))
+        show_df["动态修改方式"] = "不修改动态"
         show_df = show_df[[
             "状态", "状态调整", "项目", "项目当前阶段", "开定时间", "预计发货", "负责人", "跟单",
-            "开定延迟预警", "发货延迟预警", "断更", "最新全盘动态"
+            "临期预警", "断更", "最新全盘动态", "动态修改方式"
         ]]
 
-        st.caption("支持在明细表中直接修改：状态调整 / 项目当前阶段 / 开定时间 / 预计发货 / 负责人 / 跟单。")
+        st.caption("可直接修改阶段/时间/负责人/跟单；若修改【最新全盘动态】，请同时选择【动态修改方式】用于二次确认。")
         edited_dash_df = st.data_editor(
             show_df,
             use_container_width=True,
@@ -1994,13 +2026,24 @@ if menu == MENU_DASHBOARD:
                 "状态调整": st.column_config.SelectboxColumn("状态调整", options=["研发", "生产", "暂停", "未知阶段", "已完结"], required=True),
                 "项目当前阶段": st.column_config.SelectboxColumn("项目当前阶段", options=STD_MILESTONES, required=True),
                 "负责人": st.column_config.SelectboxColumn("负责人", options=["Mo", "越", "袁"], required=True),
+                "最新全盘动态": st.column_config.TextColumn(
+                    "最新全盘动态",
+                    help="可直接编辑；改动后请在【动态修改方式】选择‘更新为最新动态’或‘修改最近历史(纠错)’。",
+                    width="large"
+                ),
+                "动态修改方式": st.column_config.SelectboxColumn(
+                    "动态修改方式",
+                    options=["不修改动态", "更新为最新动态", "修改最近历史(纠错)"],
+                    required=True
+                ),
             },
-            disabled=["状态", "项目", "开定延迟预警", "发货延迟预警", "断更", "最新全盘动态"]
+            disabled=["状态", "项目", "临期预警", "断更"]
         )
 
         if st.button("💾 保存明细表修改", key="dash_detail_save", type="primary"):
             origin_map = show_df.set_index("项目").to_dict(orient="index")
             changed_projects = []
+            skipped_dynamic_confirm = []
             today_str = str(datetime.date.today())
             for _, row in edited_dash_df.iterrows():
                 proj = str(row.get("项目", "")).strip()
@@ -2014,44 +2057,97 @@ if menu == MENU_DASHBOARD:
                 new_ms = input_ms if input_ms in STD_MILESTONES else old_ms
                 if new_bucket != old_bucket:
                     new_ms = _milestone_from_status_bucket(new_bucket, old_ms)
-                new_target = _cell_text(row.get("开定时间", old.get("开定时间", "TBD")))
-                new_ship = _cell_text(row.get("预计发货", old.get("预计发货", "")))
-                new_pm = _cell_text(row.get("负责人", old.get("负责人", db[proj].get("负责人", "Mo"))))
-                new_gd = _cell_text(row.get("跟单", old.get("跟单", "")))
+
+                old_target = _cell_text(old.get("开定时间", db[proj].get("Target", "TBD"))) or "TBD"
+                old_ship = _cell_text(old.get("预计发货", db[proj].get("发货区间", "")))
+                old_pm = _cell_text(old.get("负责人", db[proj].get("负责人", "")))
+                old_gd = _cell_text(old.get("跟单", db[proj].get("跟单", "")))
+                new_target = _cell_text(row.get("开定时间", old_target))
+                new_ship = _cell_text(row.get("预计发货", old_ship))
+                new_pm = _cell_text(row.get("负责人", old_pm or db[proj].get("负责人", "Mo")))
+                new_gd = _cell_text(row.get("跟单", old_gd))
                 if not new_target:
                     new_target = "TBD"
-                change_items = []
+
+                old_dynamic_raw = _cell_text(old.get("最新全盘动态", ""))
+                new_dynamic_raw = _cell_text(row.get("最新全盘动态", old_dynamic_raw))
+                dynamic_mode = _cell_text(row.get("动态修改方式", "不修改动态")) or "不修改动态"
+                dynamic_changed = new_dynamic_raw != old_dynamic_raw
+                if dynamic_changed and dynamic_mode == "不修改动态":
+                    skipped_dynamic_confirm.append(proj)
+                    continue
+
+                field_msgs = []
                 if db[proj].get("Milestone", "") != new_ms and new_ms in STD_MILESTONES:
                     db[proj]["Milestone"] = new_ms
-                    change_items.append(f"状态:{new_ms}")
+                    field_msgs.append(f"{_bucket_label(new_ms)}当前阶段从[{_fmt_value(old_ms, '待立项')}]修改为[{_fmt_value(new_ms, '待立项')}]")
                 if str(db[proj].get("Target", "")).strip() != new_target:
                     db[proj]["Target"] = new_target
-                    change_items.append(f"开定:{new_target}")
+                    field_msgs.append(f"开定时间从[{_fmt_value(old_target, 'TBD')}]修改为[{_fmt_value(new_target, 'TBD')}]")
                 if str(db[proj].get("发货区间", "")).strip() != new_ship:
                     db[proj]["发货区间"] = new_ship
-                    change_items.append(f"发货:{new_ship}")
+                    field_msgs.append(f"预计发货从[{_fmt_value(old_ship)}]修改为[{_fmt_value(new_ship)}]")
                 if str(db[proj].get("负责人", "")).strip() != new_pm:
                     db[proj]["负责人"] = new_pm
-                    change_items.append(f"PM:{new_pm}")
+                    field_msgs.append(f"负责人从[{_fmt_value(old_pm)}]修改为[{_fmt_value(new_pm)}]")
                 if str(db[proj].get("跟单", "")).strip() != new_gd:
                     db[proj]["跟单"] = new_gd
-                    change_items.append(f"跟单:{new_gd}")
-
-                if not change_items:
-                    continue
+                    field_msgs.append(f"跟单从[{_fmt_value(old_gd)}]修改为[{_fmt_value(new_gd)}]")
 
                 comps = db[proj].setdefault("部件列表", {})
                 gk = "全局进度" if "全局进度" in comps else (next(iter(comps.keys()), "全局进度"))
                 if gk not in comps:
                     comps[gk] = {"主流程": STAGES_UNIFIED[0], "日志流": []}
-                comps[gk].setdefault("日志流", []).append({
-                    "日期": today_str,
-                    "流转": "系统更新",
-                    "工序": comps[gk].get("主流程", STAGES_UNIFIED[0]),
-                    "事件": "[大盘明细直改] " + " | ".join(change_items)
-                })
-                changed_projects.append(proj)
 
+                write_ts = datetime.datetime.now().isoformat(timespec="seconds")
+                if field_msgs:
+                    comps[gk].setdefault("日志流", []).append({
+                        "日期": today_str,
+                        "流转": "大盘明细直改",
+                        "工序": comps[gk].get("主流程", STAGES_UNIFIED[0]),
+                        "事件": "；".join(field_msgs),
+                        "写入时间": write_ts
+                    })
+
+                if dynamic_changed:
+                    old_dyn_comp, _ = _parse_dynamic_cell(old_dynamic_raw)
+                    new_dyn_comp, new_dyn_evt = _parse_dynamic_cell(new_dynamic_raw)
+                    target_comp = new_dyn_comp if new_dyn_comp in comps else (old_dyn_comp if old_dyn_comp in comps else gk)
+                    final_dyn_evt = new_dyn_evt if new_dyn_evt else _cell_text(new_dynamic_raw)
+                    if not final_dyn_evt:
+                        final_dyn_evt = "动态已更新"
+                    target_logs = comps.setdefault(target_comp, {"主流程": STAGES_UNIFIED[0], "日志流": []}).setdefault("日志流", [])
+                    if dynamic_mode == "修改最近历史(纠错)":
+                        edit_idx = -1
+                        for li in range(len(target_logs) - 1, -1, -1):
+                            if not is_hidden_system_log(target_logs[li]):
+                                edit_idx = li
+                                break
+                        if edit_idx >= 0:
+                            target_logs[edit_idx]["事件"] = final_dyn_evt
+                            target_logs[edit_idx]["写入时间"] = write_ts
+                        else:
+                            target_logs.append({
+                                "日期": today_str,
+                                "流转": "大盘动态更新",
+                                "工序": comps.get(target_comp, {}).get("主流程", STAGES_UNIFIED[0]),
+                                "事件": final_dyn_evt,
+                                "写入时间": write_ts
+                            })
+                    else:
+                        target_logs.append({
+                            "日期": today_str,
+                            "流转": "大盘动态更新",
+                            "工序": comps.get(target_comp, {}).get("主流程", STAGES_UNIFIED[0]),
+                            "事件": final_dyn_evt,
+                            "写入时间": write_ts
+                        })
+
+                if field_msgs or dynamic_changed:
+                    changed_projects.append(proj)
+
+            if skipped_dynamic_confirm:
+                st.warning(f"以下项目修改了【最新全盘动态】但未确认动态修改方式，已跳过：{', '.join(sorted(set(skipped_dynamic_confirm)))}")
             if changed_projects:
                 for cp in sorted(set(changed_projects)):
                     sync_save_db(cp)
@@ -2060,12 +2156,11 @@ if menu == MENU_DASHBOARD:
             else:
                 st.info("未检测到变更。")
 
-        with st.expander("只读预览（含临期黄色高亮）", expanded=False):
+        with st.expander("只读预览（含临期预警样式）", expanded=False):
             st.dataframe(
-                show_df.style.map(_hl_warn, subset=["开定延迟预警", "发货延迟预警"]),
+                show_df.style.map(_hl_warn, subset=["临期预警"]),
                 use_container_width=True
             )
-
     st.divider()
     if project_person_roles:
         df_ppr   = pd.DataFrame(list(project_person_roles), columns=["项目", "人员", "职务"])
