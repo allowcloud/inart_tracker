@@ -13,12 +13,28 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Python compile check
+      - name: Python compile check (key files)
         run: |
           python -m py_compile app.py app_backup_before_sync.py project_admin.py
+      - name: Repository-wide Python compile check
+        run: |
+          python - <<'PY'
+          import py_compile, subprocess
+          files = subprocess.check_output(['git', 'ls-files', '*.py'], text=True).splitlines()
+          for f in files:
+              py_compile.compile(f, doraise=True)
+          print(f"compiled {len(files)} python files")
+          PY
       - name: Indentation sanity check
         run: |
           python -m tabnanny app.py app_backup_before_sync.py project_admin.py
+      - name: AST parse sanity check (app.py)
+        run: |
+          python - <<'PY'
+          import ast, pathlib
+          ast.parse(pathlib.Path('app.py').read_text(encoding='utf-8'))
+          print('app.py AST parse OK')
+          PY
       - name: Conflict marker check
         run: |
           if grep -R -n -E '^(<<<<<<<|=======|>>>>>>>)' -- . ; then
