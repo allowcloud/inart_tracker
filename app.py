@@ -1222,28 +1222,21 @@ def _extract_target_map_from_matrix(df_raw, valid_projs, alias_map):
 
     conflicts = {k: sorted(list(v)) for k, v in conflicts.items()}
     return target_map, conflicts
+def get_status_label(milestone):
+    bucket = get_project_status_bucket(milestone)
+    if bucket == "pause":
+        return "⏸️ 暂停研发"
+    if bucket == "done":
+        return "🏁 已结案"
+    if bucket == "prod":
+        return "🟢 生产期"
+    if bucket == "dev":
+        return "🟡 研发期"
+    return "⚪ 未知阶段"
+
+
 def get_risk_status(milestone, target_date_str="TBD"):
-    ms = str(milestone).strip()
-    target_date_str = str(target_date_str).strip()
-    if ms == "暂停研发":
-        return "⏸️ 暂停研发", "normal"
-    is_finished = ms in ["生产结束", "项目结束撒花🎉", "✅ 已完成(结束)"]
-    if target_date_str.upper() != "TBD" and target_date_str != "":
-        try:
-            today = datetime.date.today()
-            if len(target_date_str) == 7 and "-" in target_date_str:
-                t_year, t_month = int(target_date_str[:4]), int(target_date_str[5:7])
-                if (today.year > t_year) or (today.year == t_year and today.month > t_month):
-                    if not is_finished: return "🔴 逾期预警", "danger"
-            elif len(target_date_str) >= 10:
-                t_date = datetime.datetime.strptime(target_date_str[:10], "%Y-%m-%d").date()
-                if today > t_date and not is_finished: return "🔴 逾期预警", "danger"
-        except:
-            pass
-    if is_finished: return "🏁 已结案", "safe"
-    if ms in ["生产中", "下模中"]: return "🟢 生产期", "safe"
-    if "研发" in ms or ms in ["待开定", "已开定", "待立项"]: return "🟡 研发期", "warning"
-    return "⚪ 未知阶段", "normal"
+    return get_status_label(milestone), "normal"
 
 
 def get_project_status_bucket(milestone):
@@ -1296,6 +1289,26 @@ def parse_schedule_marker_date(schedule_str, marker_mode="target"):
         return datetime.date(year, month, 15)
 
     return None
+
+
+def get_deadline_alert(milestone, target_text="TBD", ship_text="-", days=5):
+    bucket = get_project_status_bucket(milestone)
+    if bucket not in ["dev", "prod"]:
+        return "✅ 正常", 2
+
+    marker_mode = "target" if bucket == "dev" else "ship"
+    raw_value = target_text if bucket == "dev" else ship_text
+    alert_name = "开定" if bucket == "dev" else "发货"
+    deadline = parse_schedule_marker_date(raw_value, marker_mode=marker_mode)
+    if not deadline:
+        return "✅ 正常", 2
+
+    diff_days = (deadline - datetime.date.today()).days
+    if diff_days < 0:
+        return f"🔴 {alert_name}逾期", 0
+    if diff_days <= int(days):
+        return f"🟨 {alert_name}临期(<={int(days)}天)", 1
+    return "✅ 正常", 2
 
 
 def build_timeline_marker_info(proj_name, proj_label, milestone, target_text, ship_text):
@@ -2800,39 +2813,36 @@ if menu == MENU_DASHBOARD:
     st.subheader("📋 大盘状态明细表")
     if table_data:
         df_table = pd.DataFrame(table_data)
+        df_table["状态"] = df_table["项目当前阶段"].apply(get_status_label)
         df_table["临期预警"] = "✅ 正常"
-        df_table["状态组"] = 2
-        df_table.loc[df_table["状态"].str.contains("研发|生产", na=False), "状态组"] = 0
-        df_table.loc[df_table["状态"].str.contains("暂停", na=False), "状态组"] = 1
-        df_table.loc[df_table["状态"].str.contains("未知", na=False), "状态组"] = 2
-        df_table.loc[df_table["状态"].str.contains("结案", na=False), "状态组"] = 3
-        df_table["开定排序"] = pd.to_datetime(df_table["开定时间"], errors="coerce")
-        df_table["发货排序"] = df_table["预计发货"].apply(lambda x: quarter_to_deadline(x) or datetime.date.max)
-        df_table["发货排序"] = pd.to_datetime(df_table["发货排序"], errors="coerce")
-        df_table["断更天"] = df_table["断更"].str.extract(r'(\d+)').fillna('99999').astype(int)
+        df_table["状态桶"] = df_table["项目当前阶段"].apply(get_project_status_bucket)
+        df_table["状态组"] = df_table["状态桶"].map({"dev": 0, "prod": 0, "pause": 1, "unknown": 2, "done": 3}).fillna(2).astype(int)
+        df_table["开定排序"] = pd.to_datetime(df_table["开定时间"].apply(lambda x: parse_schedule_marker_date(x, marker_mode="target")), errors="coerce")
+        df_table["发货排序"] = pd.to_datetime(df_table["预计发货"].apply(lambda x: parse_schedule_marker_date(x, marker_mode="ship")), errors="coerce")
+        df_table["断更天"] = df_table["断更"].str.extract(r'(\d+)' ).fillna('99999').astype(int)
+        df_table["风险组"] = 2
         df_table["主排序时间"] = pd.Timestamp.max
-        dev_mask = df_table["状态"].str.contains("研发", na=False)
-        prod_mask = df_table["状态"].str.contains("生产", na=False)
+        dev_mask = df_table["状态桶"] == "dev"
+        prod_mask = df_table["状态桶"] == "prod"
         df_table.loc[dev_mask, "主排序时间"] = df_table.loc[dev_mask, "开定排序"].fillna(pd.Timestamp.max)
         df_table.loc[prod_mask, "主排序时间"] = df_table.loc[prod_mask, "发货排序"].fillna(pd.Timestamp.max)
         for i, r in df_table.iterrows():
-            stt = str(r.get("状态", ""))
-            due_target = ("研发" in stt) and is_due_soon(r.get("开定时间", ""), 5)
-            due_ship = ("生产" in stt) and is_due_soon(r.get("预计发货", ""), 5)
-            if due_target and due_ship:
-                df_table.at[i, "临期预警"] = "🟧 开定+发货临期(<=5天)"
-            elif due_target:
-                df_table.at[i, "临期预警"] = "🟨 开定临期(<=5天)"
-            elif due_ship:
-                df_table.at[i, "临期预警"] = "🟨 发货临期(<=5天)"
-            else:
-                df_table.at[i, "临期预警"] = "✅ 正常"
+            warn_txt, warn_rank = get_deadline_alert(
+                r.get("项目当前阶段", ""),
+                r.get("开定时间", ""),
+                r.get("预计发货", ""),
+                5
+            )
+            df_table.at[i, "临期预警"] = warn_txt
+            df_table.at[i, "风险组"] = warn_rank
 
-        df_table = df_table.sort_values(by=["状态组", "主排序时间", "断更天", "项目"], ascending=[True, True, True, True])
-        show_df = df_table.drop(columns=["状态组", "开定排序", "发货排序", "断更天", "主排序时间"])
+        df_table = df_table.sort_values(by=["状态组", "风险组", "主排序时间", "断更天", "项目"], ascending=[True, True, True, True, True])
+        show_df = df_table.drop(columns=["状态桶", "状态组", "开定排序", "发货排序", "断更天", "风险组", "主排序时间"])
 
         def _hl_warn(v):
             s = str(v).strip()
+            if s.startswith("🔴"):
+                return "background-color: #fecaca; color: #991b1b; font-weight: 700"
             if s.startswith("🟧"):
                 return "background-color: #fed7aa; color: #9a3412; font-weight: 700"
             if s.startswith("🟨"):
