@@ -305,6 +305,7 @@ def _ensure_runtime_state_defaults():
         "new_proj_mode": False,
         "current_proj_context": None,
         "form_key": 0,
+        "todo_handoff_prefill": None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -1046,6 +1047,96 @@ def infer_todo_target_hint(td, valid_projs):
         return f"✅ 档期{fmt_ym(sch_ym)}=开定{fmt_ym(tgt_ym)}"
     return f"⚠️ 档期{fmt_ym(sch_ym)} ≠ 开定{fmt_ym(tgt_ym)}"
 
+def todo_link_status_text(td):
+    td_obj = td or {}
+    mod = str(td_obj.get("最近联动模块", "")).strip()
+    dt = str(td_obj.get("最近联动日期", "")).strip()
+    comp = str(td_obj.get("最近联动部件", "")).strip()
+    stage = str(td_obj.get("最近联动阶段", "")).strip()
+    if not mod and not dt:
+        return "未落地"
+    parts = []
+    if dt:
+        parts.append(dt)
+    if mod:
+        parts.append(mod)
+    if comp:
+        parts.append(comp)
+    if stage:
+        parts.append(stage)
+    return " / ".join(parts)
+
+
+def infer_todo_handoff_prefill(td, proj_name):
+    td_obj = td or {}
+    proj = str(proj_name or "").strip()
+    txt = f"{str(td_obj.get('任务', '')).strip()} {todo_cpddl_text(td_obj)}".strip()
+    txt_norm = norm_text(txt)
+    comp_hits = []
+    proj_comps = list(db.get(proj, {}).get("部件列表", {}).keys())
+    for comp in proj_comps:
+        if "全局" in comp:
+            continue
+        variants = {str(comp).strip()}
+        if " - " in str(comp):
+            variants.add(str(comp).split(" - ", 1)[1].strip())
+        for std_comp in STD_COMPONENTS:
+            if str(comp).startswith(std_comp):
+                variants.add(std_comp)
+                variants.add(re.sub(r"\(.*?\)", "", std_comp).strip())
+        hit = False
+        for vv in [v for v in variants if v]:
+            if vv in txt or norm_text(vv) in txt_norm:
+                hit = True
+                break
+        if hit and comp not in comp_hits:
+            comp_hits.append(comp)
+
+    if not comp_hits:
+        for std_comp in STD_COMPONENTS:
+            base = re.sub(r"\(.*?\)", "", std_comp).strip()
+            if (base and base in txt) or (norm_text(std_comp) in txt_norm):
+                comp_hits.append(std_comp)
+                break
+
+    stage_guess = ""
+    stage_kw = [
+        ("开定", "立项"), ("立项", "立项"), ("建模", "建模(含打印/签样)"),
+        ("打印", "建模(含打印/签样)"), ("涂装", "涂装"), ("设计", "设计"),
+        ("官图", "官图"), ("拆件", "工程拆件"), ("工程", "工程拆件"),
+        ("结构件", "工程拆件"), ("手板", "手板/结构板"), ("结构板", "手板/结构板"),
+        ("复样", "工厂复样(含胶件/上色等)"), ("上色", "工厂复样(含胶件/上色等)"),
+        ("大货", "大货"), ("包装", "包装"), ("暂停", "⏸️ 暂停/搁置"),
+        ("完成", "✅ 已完成(结束)")
+    ]
+    for kw, stage_name in stage_kw:
+        if kw in txt:
+            stage_guess = stage_name
+            break
+    if not stage_guess:
+        for stg in STAGES_UNIFIED:
+            if norm_text(stg) and norm_text(stg) in txt_norm:
+                stage_guess = stg
+                break
+
+    log_txt = str(td_obj.get("任务", "")).strip()
+    cpddl = todo_cpddl_text(td_obj)
+    if cpddl:
+        log_txt = f"{log_txt} | {cpddl}" if log_txt else cpddl
+    if not log_txt:
+        log_txt = "To do 联动更新"
+
+    if not comp_hits:
+        comp_hits = ["🌐 全局进度 (Overall)"]
+
+    return {
+        "项目": proj,
+        "todo_ids": [str(td_obj.get("_id", "")).strip()] if str(td_obj.get("_id", "")).strip() else [],
+        "部件": comp_hits,
+        "阶段": stage_guess,
+        "内容": log_txt,
+    }
+
 def _csv_cell_text(v):
     s = str(v if v is not None else "").strip()
     if s.lower() in ["nan", "none", "nat"]:
@@ -1222,28 +1313,120 @@ def _extract_target_map_from_matrix(df_raw, valid_projs, alias_map):
 
     conflicts = {k: sorted(list(v)) for k, v in conflicts.items()}
     return target_map, conflicts
+def get_status_label(milestone):
+    bucket = get_project_status_bucket(milestone)
+    if bucket == "pause":
+        return "⏸️ 暂停研发"
+    if bucket == "done":
+        return "🏁 已结案"
+    if bucket == "prod":
+        return "🟢 生产期"
+    if bucket == "dev":
+        return "🟡 研发期"
+    return "⚪ 未知阶段"
+
+
 def get_risk_status(milestone, target_date_str="TBD"):
-    ms = str(milestone).strip()
-    target_date_str = str(target_date_str).strip()
+    return get_status_label(milestone), "normal"
+
+
+def get_project_status_bucket(milestone):
+    ms = str(milestone or "").strip()
     if ms == "暂停研发":
-        return "⏸️ 暂停研发", "normal"
-    is_finished = ms in ["生产结束", "项目结束撒花🎉", "✅ 已完成(结束)"]
-    if target_date_str.upper() != "TBD" and target_date_str != "":
+        return "pause"
+    if ms in ["生产结束", "项目结束撒花🎉", "✅ 已完成(结束)"]:
+        return "done"
+    if ms in ["生产中", "下模中"]:
+        return "prod"
+    if "研发" in ms or ms in ["待开定", "已开定", "待立项"]:
+        return "dev"
+    return "unknown"
+
+
+def month_last_day(year, month):
+    if month in [1, 3, 5, 7, 8, 10, 12]:
+        return 31
+    if month == 2:
+        return 29 if (year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)) else 28
+    return 30
+
+
+def parse_schedule_marker_date(schedule_str, marker_mode="target"):
+    s = str(schedule_str or "").strip()
+    if not s or s.upper() in ["TBD", "NONE"] or s in ["-", "—", "无"]:
+        return None
+
+    for fmt in ["%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d"]:
         try:
-            today = datetime.date.today()
-            if len(target_date_str) == 7 and "-" in target_date_str:
-                t_year, t_month = int(target_date_str[:4]), int(target_date_str[5:7])
-                if (today.year > t_year) or (today.year == t_year and today.month > t_month):
-                    if not is_finished: return "🔴 逾期预警", "danger"
-            elif len(target_date_str) >= 10:
-                t_date = datetime.datetime.strptime(target_date_str[:10], "%Y-%m-%d").date()
-                if today > t_date and not is_finished: return "🔴 逾期预警", "danger"
-        except:
+            return datetime.datetime.strptime(s[:10], fmt).date()
+        except Exception:
             pass
-    if is_finished: return "🏁 已结案", "safe"
-    if ms in ["生产中", "下模中"]: return "🟢 生产期", "safe"
-    if "研发" in ms or ms in ["待开定", "已开定", "待立项"]: return "🟡 研发期", "warning"
-    return "⚪ 未知阶段", "normal"
+
+    m_q = re.match(r'^(\d{4}|\d{2})\s*Q([1-4])$', s.upper())
+    if m_q:
+        y_raw = int(m_q.group(1))
+        year = y_raw if y_raw >= 1000 else (2000 + y_raw)
+        quarter = int(m_q.group(2))
+        if marker_mode == "ship":
+            return quarter_to_deadline(f"{year} Q{quarter}")
+        first_month = (quarter - 1) * 3 + 1
+        return datetime.date(year, first_month, 15)
+
+    ym = parse_target_year_month(s)
+    if ym:
+        year, month = int(ym[0]), int(ym[1])
+        if marker_mode == "ship":
+            return datetime.date(year, month, month_last_day(year, month))
+        return datetime.date(year, month, 15)
+
+    return None
+
+
+def get_deadline_alert(milestone, target_text="TBD", ship_text="-", days=5):
+    bucket = get_project_status_bucket(milestone)
+    if bucket not in ["dev", "prod"]:
+        return "✅ 正常", 2
+
+    marker_mode = "target" if bucket == "dev" else "ship"
+    raw_value = target_text if bucket == "dev" else ship_text
+    alert_name = "开定" if bucket == "dev" else "发货"
+    deadline = parse_schedule_marker_date(raw_value, marker_mode=marker_mode)
+    if not deadline:
+        return "✅ 正常", 2
+
+    diff_days = (deadline - datetime.date.today()).days
+    if diff_days < 0:
+        return f"🔴 {alert_name}逾期", 0
+    if diff_days <= int(days):
+        return f"🟨 {alert_name}临期(<={int(days)}天)", 1
+    return "✅ 正常", 2
+
+
+def build_timeline_marker_info(proj_name, proj_label, milestone, target_text, ship_text):
+    bucket = get_project_status_bucket(milestone)
+    if bucket == "dev":
+        mark_dt = parse_schedule_marker_date(target_text, marker_mode="target")
+        if mark_dt:
+            return {
+                "项目": proj_label,
+                "项目原名": proj_name,
+                "日期": mark_dt.strftime("%Y-%m-%d"),
+                "标记类型": "研发开定",
+                "原始时间": str(target_text or "TBD"),
+                "悬浮": f"{proj_name}<br>研发开定：{target_text}"
+            }
+    if bucket == "prod":
+        mark_dt = parse_schedule_marker_date(ship_text, marker_mode="ship")
+        if mark_dt:
+            return {
+                "项目": proj_label,
+                "项目原名": proj_name,
+                "日期": mark_dt.strftime("%Y-%m-%d"),
+                "标记类型": "生产发货",
+                "原始时间": str(ship_text or "-"),
+                "悬浮": f"{proj_name}<br>生产发货：{ship_text}"
+            }
+    return None
 
 
 def render_pm_todo_manager(valid_projs, current_pm):
@@ -1262,6 +1445,12 @@ def render_pm_todo_manager(valid_projs, current_pm):
         td.setdefault("关联项目", "")
         td.setdefault("完成", False)
         td.setdefault("创建", str(today))
+        td.setdefault("最近联动模块", "")
+        td.setdefault("最近联动日期", "")
+        td.setdefault("最近联动项目", "")
+        td.setdefault("最近联动部件", "")
+        td.setdefault("最近联动阶段", "")
+        td.setdefault("最近联动写入时间", "")
         scope_val = str(td.get("所属视角", "")).strip()
         if scope_val not in scope_options:
             td["所属视角"] = "所有人"
@@ -1389,6 +1578,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
             "到期": due_dt.strftime("%Y-%m-%d") if due_dt else "-",
             "提醒": tip,
             "开定识别": infer_todo_target_hint(td, valid_projs),
+            "联动状态": todo_link_status_text(td),
             "删除": False,
             "_due": due_dt or datetime.date.max,
             "_create": str(td.get("创建", ""))
@@ -1421,12 +1611,12 @@ def render_pm_todo_manager(valid_projs, current_pm):
         return todo_list
 
     df_view = pd.DataFrame(view_rows).set_index("_id")
-    editor_disabled = ["到期", "提醒", "开定识别"]
+    editor_disabled = ["到期", "提醒", "开定识别", "联动状态"]
     if current_pm != "所有人":
         editor_disabled.append("所属视角")
 
     edited_df = st.data_editor(
-        df_view[["完成", "任务", "CP/DDL", "关联项目", "所属视角", "到期", "提醒", "开定识别", "删除"]],
+        df_view[["完成", "任务", "CP/DDL", "关联项目", "所属视角", "到期", "提醒", "开定识别", "联动状态", "删除"]],
         hide_index=True,
         use_container_width=True,
         key="todo_editor_global",
@@ -1439,6 +1629,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
             "到期": st.column_config.TextColumn("到期", disabled=True),
             "提醒": st.column_config.TextColumn("提醒", disabled=True),
             "开定识别": st.column_config.TextColumn("开定识别", disabled=True, width="large"),
+            "联动状态": st.column_config.TextColumn("联动状态", disabled=True, width="large"),
             "删除": st.column_config.CheckboxColumn("删除"),
         },
         disabled=editor_disabled
@@ -2408,15 +2599,15 @@ if menu == MENU_DASHBOARD:
                 st.error(f"解析失败: {e}")
     gantt_cat_orders = MACRO_STAGES.copy()
     combined_color_map = {
-        "立项": "#FFB84C", "建模": "#2CD3E1", "设计": "#A555EC",
-        "工程": "#4D96FF", "模具": "#F47C7C", "修模": "#FF7B54",
-        "生产": "#6BCB77", "暂停": "#B2B2B2", "结束": "#1A1A2E"
+        "立项": "#F2C14E", "建模": "#34C6D3", "设计": "#8B5CF6",
+        "工程": "#4F7CFF", "模具": "#FB7185", "修模": "#F97316",
+        "生产": "#37B36B", "暂停": "#94A3B8", "结束": "#334155"
     }
 
     # ── 缓存大盘计算结果（TTL=30s，切模块不重算）──
     @st.cache_data(ttl=30, show_spinner=False)
     def _build_dash(proj_list_key: str, db_hash: str):
-        _table = []; _gantt = []; _ppr = []; _sx = []; _sy = []; _meta = []
+        _table = []; _gantt = []; _ppr = []; _markers = []; _meta = []
         for proj in valid_projs:
             data = db[proj]
             if not data.get('部件列表') and not data.get('Milestone') and not data.get('Target'):
@@ -2425,7 +2616,7 @@ if menu == MENU_DASHBOARD:
             gd=data.get('跟单',''); ms=data.get('Milestone',''); tgt=data.get('Target','TBD')
             ship_itv=data.get('发货区间','-'); r_txt,_=get_risk_status(ms,tgt)
             comps=data.get('部件列表',{})
-            proj_y_label=f"{proj} 📦[{ship_itv}]" if ship_itv and ship_itv!='-' else proj
+            proj_y_label = proj
             if not comps:
                 _table.append({"状态":r_txt,"项目":proj,"跟单":gd,"项目当前阶段":ms,
                     "开定时间":tgt,"预计发货":ship_itv,"断更":"-","最新全盘动态":"无数据"}); continue
@@ -2476,11 +2667,9 @@ if menu == MENU_DASHBOARD:
                 "是否暂停": 1 if str(ms).strip() == "暂停研发" else 0,
                 "是否完结": 1 if str(ms).strip() in ["生产结束", "项目结束撒花🎉", "✅ 已完成(结束)"] else 0
             })
-            try:
-                if tgt and tgt.upper()!='TBD':
-                    pt=datetime.datetime.strptime(f"{tgt}-01" if len(tgt)==7 else tgt[:10],"%Y-%m-%d")
-                    _sx.append(pt.strftime("%Y-%m-%d")); _sy.append(proj_y_label)
-            except: pass
+            marker_info = build_timeline_marker_info(proj, proj_y_label, ms, tgt, ship_itv)
+            if marker_info:
+                _markers.append(marker_info)
             all_logs = sorted(grouped.values(), key=lambda x: x["日期_obj"])
             if all_logs:
                 # 找出暂停时间段：[pause_start, resume_start) 之间的普通日志不产生甘特色块
@@ -2541,7 +2730,7 @@ if menu == MENU_DASHBOARD:
                         if not is_last:
                             cs = ns if ns else log["工序"]
                             sd = log["日期_obj"]; buf = []
-        return _table, _gantt, _ppr, _sx, _sy, _meta
+        return _table, _gantt, _ppr, _markers, _meta
 
     # cache key：项目列表 + 数据指纹（只用非图片字段的哈希）
     import hashlib as _hl
@@ -2549,50 +2738,159 @@ if menu == MENU_DASHBOARD:
         {k:{fk:fv for fk,fv in v.items() if fk not in ("配件清单长图",)}
          for k,v in db.items() if k!="系统配置"},
         ensure_ascii=False, sort_keys=True).encode()).hexdigest()
-    table_data, gantt_data, _ppr_list, star_x, star_y, _meta = _build_dash(",".join(valid_projs), _db_sig)
+    table_data, gantt_data, _ppr_list, timeline_marks, _meta = _build_dash(",".join(valid_projs), _db_sig)
     project_person_roles = set(map(tuple, _ppr_list))
 
 
     st.divider()
     st.subheader("📈 全局进展甘特图")
-    st.markdown("💡 支持按时间区间筛选；并统计建模/设计/工程平均耗时（可选去极值）。")
-    if gantt_data:
-        df_g = pd.DataFrame(gantt_data).sort_values(by=["项目", "Start"])
-        df_g["Start_dt"] = pd.to_datetime(df_g["Start"], errors="coerce")
-        df_g["Finish_dt"] = pd.to_datetime(df_g["Finish"], errors="coerce")
-        d1, d2 = st.columns(2)
-        with d1:
-            gantt_start = st.date_input("甘特开始日期", value=df_g["Start_dt"].min().date() if not df_g["Start_dt"].isna().all() else datetime.date.today(), key="gantt_start")
-        with d2:
-            gantt_end = st.date_input("甘特结束日期", value=df_g["Finish_dt"].max().date() if not df_g["Finish_dt"].isna().all() else datetime.date.today(), key="gantt_end")
-        m = (df_g["Finish_dt"] >= pd.to_datetime(gantt_start)) & (df_g["Start_dt"] <= pd.to_datetime(gantt_end))
-        df_g = df_g[m]
-
-        if _meta:
-            df_meta = pd.DataFrame(_meta).drop_duplicates(subset=["项目标签"])
-            df_meta["最近更新_dt"] = pd.to_datetime(df_meta["最近更新"], errors="coerce").fillna(pd.Timestamp.min)
-            df_meta["有更新"] = (df_meta["最近更新"] != "0001-01-01").astype(int)
-            df_meta = df_meta.sort_values(by=["有更新", "最近更新_dt", "项目标签"], ascending=[False, False, True])
-            y_order = df_meta["项目标签"].tolist()
+    st.caption("研发项目显示开定提醒，生产项目显示发货提醒。提醒会跟随时间窗口过滤，避免把图拉散。")
+    if gantt_data or timeline_marks:
+        df_g = pd.DataFrame(gantt_data).sort_values(by=["项目", "Start"]) if gantt_data else pd.DataFrame(columns=["项目", "工序阶段", "Start", "Finish", "详情"])
+        if not df_g.empty:
+            df_g["Start_dt"] = pd.to_datetime(df_g["Start"], errors="coerce")
+            df_g["Finish_dt"] = pd.to_datetime(df_g["Finish"], errors="coerce")
         else:
-            y_order = sorted(df_g["项目"].unique().tolist())
-        fig = px.timeline(
-            df_g, x_start="Start", x_end="Finish", y="项目",
-            color="工序阶段", hover_name="详情",
-            category_orders={"工序阶段": gantt_cat_orders, "项目": y_order},
-            color_discrete_map=combined_color_map
-        )
-        if star_x:
-            fig.add_trace(go.Scatter(
-                x=star_x, y=star_y, mode='markers',
-                marker=dict(symbol='star', size=24, color='#FFD700',
-                            line=dict(width=2, color='#FF4500')),
-                name='📅 目标开定',
-                hovertemplate='目标开定: %{x}<extra></extra>'
-            ))
-        fig.update_yaxes(autorange="reversed")
-        fig.update_layout(height=max(400, len(df_g['项目'].unique()) * 45))
-        st.plotly_chart(fig, use_container_width=True)
+            df_g["Start_dt"] = pd.Series(dtype="datetime64[ns]")
+            df_g["Finish_dt"] = pd.Series(dtype="datetime64[ns]")
+
+        df_marks = pd.DataFrame(timeline_marks) if timeline_marks else pd.DataFrame(columns=["项目", "项目原名", "日期", "标记类型", "原始时间", "悬浮"])
+        if not df_marks.empty:
+            df_marks["日期_dt"] = pd.to_datetime(df_marks["日期"], errors="coerce")
+        else:
+            df_marks["日期_dt"] = pd.Series(dtype="datetime64[ns]")
+
+        date_candidates = []
+        if not df_g.empty:
+            date_candidates.extend(df_g["Start_dt"].dropna().tolist())
+            date_candidates.extend(df_g["Finish_dt"].dropna().tolist())
+        if not df_marks.empty:
+            date_candidates.extend(df_marks["日期_dt"].dropna().tolist())
+        default_start = min(date_candidates).date() if date_candidates else datetime.date.today()
+        default_end = max(date_candidates).date() if date_candidates else datetime.date.today()
+
+        c1, c2 = st.columns(2)
+        with c1:
+            gantt_start = st.date_input("甘特开始日期", value=default_start, key="gantt_start")
+        with c2:
+            gantt_end = st.date_input("甘特结束日期", value=default_end, key="gantt_end")
+        if gantt_end < gantt_start:
+            gantt_start, gantt_end = gantt_end, gantt_start
+
+        start_ts = pd.to_datetime(gantt_start)
+        end_ts = pd.to_datetime(gantt_end) + pd.Timedelta(days=1)
+        if not df_g.empty:
+            m = (df_g["Finish_dt"] >= start_ts) & (df_g["Start_dt"] <= end_ts)
+            df_g = df_g[m]
+        if not df_marks.empty:
+            m_mark = (df_marks["日期_dt"] >= start_ts) & (df_marks["日期_dt"] <= end_ts)
+            df_marks = df_marks[m_mark]
+
+        visible_projects = set(df_g["项目"].tolist()) | set(df_marks["项目"].tolist())
+        if not visible_projects:
+            st.info("当前时间窗口内暂无甘特段或关键时间标记。")
+        else:
+            if _meta:
+                df_meta = pd.DataFrame(_meta).drop_duplicates(subset=["项目标签"])
+                df_meta = df_meta[df_meta["项目标签"].isin(visible_projects)]
+                df_meta["最近更新_dt"] = pd.to_datetime(df_meta["最近更新"], errors="coerce").fillna(pd.Timestamp.min)
+                df_meta["有更新"] = (df_meta["最近更新"] != "0001-01-01").astype(int)
+                df_meta = df_meta.sort_values(by=["有更新", "最近更新_dt", "项目标签"], ascending=[False, False, True])
+                y_order = df_meta["项目标签"].tolist()
+            else:
+                y_order = sorted(visible_projects)
+
+            if not df_g.empty:
+                fig = px.timeline(
+                    df_g, x_start="Start", x_end="Finish", y="项目",
+                    color="工序阶段", hover_name="详情",
+                    category_orders={"工序阶段": gantt_cat_orders, "项目": y_order},
+                    color_discrete_map=combined_color_map
+                )
+            else:
+                fig = go.Figure()
+
+            fig.update_traces(
+                marker_line_color="rgba(255,255,255,0.92)",
+                marker_line_width=1.0,
+                opacity=0.9,
+                selector=dict(type="bar")
+            )
+
+            if not df_marks.empty:
+                mark_style = {
+                    "研发开定": {
+                        "symbol": "square",
+                        "size": 15,
+                        "color": "#F4B400",
+                        "line": "#A16207",
+                        "name": "开定提醒",
+                        "text": "开",
+                    },
+                    "生产发货": {
+                        "symbol": "square",
+                        "size": 15,
+                        "color": "#2563EB",
+                        "line": "#1D4ED8",
+                        "name": "发货提醒",
+                        "text": "发",
+                    },
+                }
+                for mark_type, style in mark_style.items():
+                    sub = df_marks[df_marks["标记类型"] == mark_type]
+                    if sub.empty:
+                        continue
+                    fig.add_trace(go.Scatter(
+                        x=sub["日期_dt"],
+                        y=sub["项目"],
+                        mode="markers+text",
+                        marker=dict(
+                            symbol=style["symbol"],
+                            size=style["size"],
+                            color=style["color"],
+                            line=dict(width=1.5, color=style["line"])
+                        ),
+                        name=style["name"],
+                        text=[style["text"]] * len(sub),
+                        textposition="middle center",
+                        textfont=dict(size=9, color="#FFFFFF"),
+                        customdata=sub[["悬浮"]].values,
+                        hovertemplate="%{customdata[0]}<extra></extra>"
+                    ))
+
+            fig.update_yaxes(
+                autorange="reversed",
+                categoryorder="array",
+                categoryarray=y_order,
+                showgrid=False,
+                title=None,
+                tickfont=dict(size=12, color="#334155")
+            )
+            fig.update_xaxes(
+                range=[start_ts, end_ts],
+                tickformat="%Y/%m",
+                dtick="M1",
+                showgrid=True,
+                gridcolor="rgba(148,163,184,0.18)",
+                zeroline=False,
+                title=None
+            )
+            fig.update_layout(
+                template="plotly_white",
+                paper_bgcolor="#FCFCFD",
+                plot_bgcolor="#FCFCFD",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, font=dict(size=11), title_text=""),
+                margin=dict(l=8, r=8, t=40, b=8),
+                bargap=0.34,
+                hoverlabel=dict(bgcolor="#FFFFFF", font_size=12),
+                height=max(460, len(y_order) * 30 + 140)
+            )
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("当前窗口项目数", len(y_order))
+            m2.metric("研发开定标记", int((df_marks["标记类型"] == "研发开定").sum()) if not df_marks.empty else 0)
+            m3.metric("生产发货标记", int((df_marks["标记类型"] == "生产发货").sum()) if not df_marks.empty else 0)
+            st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
 
         st.markdown("#### ⏱️ 建模/设计/工程平均耗时（天）")
         trim_outlier = st.checkbox("去掉最大值和最小值（样本>=3时）", value=False, key="trim_stage_avg")
@@ -2614,39 +2912,36 @@ if menu == MENU_DASHBOARD:
     st.subheader("📋 大盘状态明细表")
     if table_data:
         df_table = pd.DataFrame(table_data)
+        df_table["状态"] = df_table["项目当前阶段"].apply(get_status_label)
         df_table["临期预警"] = "✅ 正常"
-        df_table["状态组"] = 2
-        df_table.loc[df_table["状态"].str.contains("研发|生产", na=False), "状态组"] = 0
-        df_table.loc[df_table["状态"].str.contains("暂停", na=False), "状态组"] = 1
-        df_table.loc[df_table["状态"].str.contains("未知", na=False), "状态组"] = 2
-        df_table.loc[df_table["状态"].str.contains("结案", na=False), "状态组"] = 3
-        df_table["开定排序"] = pd.to_datetime(df_table["开定时间"], errors="coerce")
-        df_table["发货排序"] = df_table["预计发货"].apply(lambda x: quarter_to_deadline(x) or datetime.date.max)
-        df_table["发货排序"] = pd.to_datetime(df_table["发货排序"], errors="coerce")
-        df_table["断更天"] = df_table["断更"].str.extract(r'(\d+)').fillna('99999').astype(int)
+        df_table["状态桶"] = df_table["项目当前阶段"].apply(get_project_status_bucket)
+        df_table["状态组"] = df_table["状态桶"].map({"dev": 0, "prod": 0, "pause": 1, "unknown": 2, "done": 3}).fillna(2).astype(int)
+        df_table["开定排序"] = pd.to_datetime(df_table["开定时间"].apply(lambda x: parse_schedule_marker_date(x, marker_mode="target")), errors="coerce")
+        df_table["发货排序"] = pd.to_datetime(df_table["预计发货"].apply(lambda x: parse_schedule_marker_date(x, marker_mode="ship")), errors="coerce")
+        df_table["断更天"] = df_table["断更"].str.extract(r'(\d+)' ).fillna('99999').astype(int)
+        df_table["风险组"] = 2
         df_table["主排序时间"] = pd.Timestamp.max
-        dev_mask = df_table["状态"].str.contains("研发", na=False)
-        prod_mask = df_table["状态"].str.contains("生产", na=False)
+        dev_mask = df_table["状态桶"] == "dev"
+        prod_mask = df_table["状态桶"] == "prod"
         df_table.loc[dev_mask, "主排序时间"] = df_table.loc[dev_mask, "开定排序"].fillna(pd.Timestamp.max)
         df_table.loc[prod_mask, "主排序时间"] = df_table.loc[prod_mask, "发货排序"].fillna(pd.Timestamp.max)
         for i, r in df_table.iterrows():
-            stt = str(r.get("状态", ""))
-            due_target = ("研发" in stt) and is_due_soon(r.get("开定时间", ""), 5)
-            due_ship = ("生产" in stt) and is_due_soon(r.get("预计发货", ""), 5)
-            if due_target and due_ship:
-                df_table.at[i, "临期预警"] = "🟧 开定+发货临期(<=5天)"
-            elif due_target:
-                df_table.at[i, "临期预警"] = "🟨 开定临期(<=5天)"
-            elif due_ship:
-                df_table.at[i, "临期预警"] = "🟨 发货临期(<=5天)"
-            else:
-                df_table.at[i, "临期预警"] = "✅ 正常"
+            warn_txt, warn_rank = get_deadline_alert(
+                r.get("项目当前阶段", ""),
+                r.get("开定时间", ""),
+                r.get("预计发货", ""),
+                5
+            )
+            df_table.at[i, "临期预警"] = warn_txt
+            df_table.at[i, "风险组"] = warn_rank
 
-        df_table = df_table.sort_values(by=["状态组", "主排序时间", "断更天", "项目"], ascending=[True, True, True, True])
-        show_df = df_table.drop(columns=["状态组", "开定排序", "发货排序", "断更天", "主排序时间"])
+        df_table = df_table.sort_values(by=["状态组", "风险组", "主排序时间", "断更天", "项目"], ascending=[True, True, True, True, True])
+        show_df = df_table.drop(columns=["状态桶", "状态组", "开定排序", "发货排序", "断更天", "风险组", "主排序时间"])
 
         def _hl_warn(v):
             s = str(v).strip()
+            if s.startswith("🔴"):
+                return "background-color: #fecaca; color: #991b1b; font-weight: 700"
             if s.startswith("🟧"):
                 return "background-color: #fed7aa; color: #9a3412; font-weight: 700"
             if s.startswith("🟨"):
@@ -2745,13 +3040,36 @@ if menu == MENU_DASHBOARD:
                 return f"{first}（{due_txt}） +{len(arr)-1}项"
             return f"{first}（{due_txt}）"
 
+        def _todo_link_for_proj(proj_name):
+            arr = []
+            for td in db.get("系统配置", {}).get("PM_TODO_LIST", []):
+                if not todo_visible_for_view(td, current_pm):
+                    continue
+                if str(td.get("关联项目", "")).strip() != str(proj_name):
+                    continue
+                arr.append(td)
+            if not arr:
+                return "-"
+            linked = [x for x in arr if str(x.get("最近联动模块", "")).strip() or str(x.get("最近联动日期", "")).strip()]
+            if not linked:
+                return "未落地"
+            linked = sorted(linked, key=lambda x: (str(x.get("最近联动日期", "")), str(x.get("最近联动写入时间", ""))), reverse=True)
+            best = linked[0]
+            dt = str(best.get("最近联动日期", "")).strip()
+            mod = str(best.get("最近联动模块", "")).strip()
+            stg = str(best.get("最近联动阶段", "")).strip()
+            tail = f"/{stg}" if stg else ""
+            return f"{dt} {mod}{tail}".strip()
+
+
         show_df["负责人"] = show_df["项目"].apply(lambda p: str(db.get(p, {}).get("负责人", "")))
         show_df["状态调整"] = show_df["项目"].apply(lambda p: _status_bucket_from_ms(db.get(p, {}).get("Milestone", "")))
         show_df["待办数"] = show_df["项目"].apply(lambda p: int(len(todo_pending_map.get(str(p), []))))
         show_df["待办摘要"] = show_df["项目"].apply(_todo_summary_for_proj)
+        show_df["待办联动"] = show_df["项目"].apply(_todo_link_for_proj)
         show_df["动态修改方式"] = "不修改动态"
         show_df = show_df[[
-            "状态", "状态调整", "项目", "待办数", "待办摘要", "项目当前阶段", "开定时间", "预计发货", "负责人", "跟单",
+            "状态", "状态调整", "项目", "待办数", "待办摘要", "待办联动", "项目当前阶段", "开定时间", "预计发货", "负责人", "跟单",
             "临期预警", "断更", "最新全盘动态", "动态修改方式"
         ]]
 
@@ -2776,7 +3094,7 @@ if menu == MENU_DASHBOARD:
                     required=True
                 ),
             },
-            disabled=["状态", "项目", "待办数", "待办摘要", "临期预警", "断更"]
+            disabled=["状态", "项目", "待办数", "待办摘要", "待办联动", "临期预警", "断更"]
         )
 
         a1, a2 = st.columns([1.2, 1.2])
@@ -3072,6 +3390,40 @@ elif menu == MENU_SPECIFIC:
         else:
             st.caption("当前项目暂无提审待办")
 
+    project_pending_todos = [
+        x for x in todo_list
+        if (not x.get("完成")) and str(x.get("关联项目", "")).strip() == sel_proj
+    ]
+    project_pending_todos = sorted(project_pending_todos, key=lambda x: (todo_due_date(x) or datetime.date.max, str(x.get("创建", ""))))
+
+    with st.container(border=True):
+        st.markdown("**🔗 当前项目待办联动**")
+        if project_pending_todos:
+            todo_option_ids = [str(x.get("_id", "")).strip() for x in project_pending_todos]
+            todo_option_map = {str(x.get("_id", "")).strip(): x for x in project_pending_todos}
+            def _fmt_todo_opt(todo_id):
+                td = todo_option_map.get(todo_id, {})
+                due = todo_due_date(td)
+                due_txt = due.strftime("%m/%d") if due else "无DDL"
+                return f"{str(td.get('任务', '')).strip()} ｜ {due_txt}"
+            pick_todo_id = st.selectbox(
+                "选择一条待办带入交接表单",
+                todo_option_ids,
+                format_func=_fmt_todo_opt,
+                key=f"todo_prefill_pick_{sel_proj}"
+            )
+            pick_todo = todo_option_map.get(pick_todo_id, {})
+            c_l1, c_l2 = st.columns([1.2, 3.8])
+            with c_l1:
+                if st.button("↘ 带入交接表单", key=f"todo_prefill_btn_{sel_proj}", type="secondary"):
+                    st.session_state.todo_handoff_prefill = infer_todo_handoff_prefill(pick_todo, sel_proj)
+                    st.rerun()
+            with c_l2:
+                st.caption("开定识别：" + infer_todo_target_hint(pick_todo, valid_projs))
+                st.caption("最近落地：" + todo_link_status_text(pick_todo))
+        else:
+            st.caption("当前项目暂无关联 To do；你也可以先在左侧 To do 新建后再带入。")
+
     st.divider()
     st.markdown("<div class='pm-subsection-title'>🔬 项目透视矩阵（并行连消追踪）</div>", unsafe_allow_html=True)
     st.markdown("""
@@ -3348,6 +3700,30 @@ elif menu == MENU_SPECIFIC:
         st.markdown("**2. 细分配件交接工作台**")
         st.caption("说明：提审是独立维度，不会自动改变主阶段；仅做一致性校验提醒。")
         fk = st.session_state.form_key
+        handoff_todos = [
+            x for x in db.get("系统配置", {}).get("PM_TODO_LIST", [])
+            if (not x.get("完成")) and todo_visible_for_view(x, current_pm) and str(x.get("关联项目", "")).strip() == sel_proj
+        ]
+        handoff_todo_map = {str(x.get("_id", "")).strip(): x for x in handoff_todos}
+        prefill = st.session_state.get("todo_handoff_prefill")
+        if prefill and str(prefill.get("项目", "")).strip() == sel_proj:
+            if prefill.get("部件"):
+                st.session_state[f"ms_{fk}"] = prefill.get("部件")
+            if prefill.get("阶段") in STAGES_UNIFIED:
+                st.session_state[f"stg_{fk}"] = prefill.get("阶段")
+            if prefill.get("内容"):
+                st.session_state[f"txt_{fk}"] = prefill.get("内容")
+            if prefill.get("todo_ids"):
+                st.session_state[f"todo_link_{fk}"] = prefill.get("todo_ids")
+                st.session_state[f"todo_auto_done_{fk}"] = True
+            st.session_state.todo_handoff_prefill = None
+        todo_default_ids = [
+            tid for tid in st.session_state.get(f"todo_link_{fk}", [])
+            if tid in handoff_todo_map
+        ]
+        st.session_state[f"todo_link_{fk}"] = todo_default_ids
+
+
         existing_comps = list(db[sel_proj].get('部件列表', {}).keys())
         custom_comps   = sorted([c for c in existing_comps if c not in STD_COMPONENTS and "全局" not in c])
         all_comps      = ["➕ 新增细分配件...", "🌐 全局进度 (Overall)"] + STD_COMPONENTS + custom_comps
@@ -3417,6 +3793,20 @@ elif menu == MENU_SPECIFIC:
             with d_col: detail_record_date = st.date_input("🕒 发生日期", datetime.date.today(), key=f"date_{fk}")
             with t_col: log_txt = st.text_area("📝 详细进展 (按需写打回原因)", height=80, key=f"txt_{fk}")
     
+            st.markdown("**(3.5) 关联 To do**")
+            linked_todo_ids = st.multiselect(
+                "本次记录关联哪些待办",
+                options=list(handoff_todo_map.keys()),
+                default=st.session_state.get(f"todo_link_{fk}", []),
+                format_func=lambda x: f"{str(handoff_todo_map.get(x, {}).get('任务', '')).strip()} ｜ {(todo_due_date(handoff_todo_map.get(x, {})).strftime('%m/%d') if todo_due_date(handoff_todo_map.get(x, {})) else '无DDL')}",
+                key=f"todo_link_{fk}"
+            )
+            todo_auto_done = st.checkbox(
+                "保存交接后自动完成所关联 To do",
+                value=bool(st.session_state.get(f"todo_auto_done_{fk}", False) or linked_todo_ids),
+                key=f"todo_auto_done_{fk}"
+            )
+
             st.markdown("**(4) 参考图 (支持连按 Ctrl+V 缓存)**")
             try:
                 from streamlit_paste_button import paste_image_button
@@ -3499,6 +3889,14 @@ elif menu == MENU_SPECIFIC:
     
                         base_log = (f"【{evt_type} | {handoff}】补充: {log_txt}"
                                     if log_txt else f"【{evt_type} | {handoff}】")
+                        todo_names_for_log = [
+                            str(handoff_todo_map.get(str(tid).strip(), {}).get("任务", "")).strip()
+                            for tid in linked_todo_ids
+                            if str(handoff_todo_map.get(str(tid).strip(), {}).get("任务", "")).strip()
+                        ]
+                        if todo_names_for_log:
+                            base_log += " [关联To do] " + "；".join(todo_names_for_log[:3])
+
                         if is_completed:
                             base_log += " [系统]彻底完成"
                         curr_stage_detail = db[sel_proj]["部件列表"][actual_c].get("主流程", STAGES_UNIFIED[0])
@@ -3546,6 +3944,29 @@ elif menu == MENU_SPECIFIC:
                                 })
                                 sub_info["主流程"] = new_stage
     
+                    linked_todo_titles = []
+                    if saved_records > 0 and linked_todo_ids:
+                        todo_all_cfg = db.setdefault("系统配置", {}).setdefault("PM_TODO_LIST", [])
+                        todo_cfg_map = {str(x.get("_id", "")).strip(): x for x in todo_all_cfg}
+                        comp_label = "、".join([
+                            (new_comp_name if c == "➕ 新增细分配件..." and new_comp_name else ("全局进度" if c == "🌐 全局进度 (Overall)" else c))
+                            for c in comps_to_process
+                        ])
+                        write_ts = datetime.datetime.now().isoformat(timespec="seconds")
+                        for todo_id in linked_todo_ids:
+                            td_obj = todo_cfg_map.get(str(todo_id).strip())
+                            if not td_obj:
+                                continue
+                            td_obj["最近联动模块"] = "交接工作台"
+                            td_obj["最近联动日期"] = str(detail_record_date)
+                            td_obj["最近联动项目"] = sel_proj
+                            td_obj["最近联动部件"] = comp_label
+                            td_obj["最近联动阶段"] = new_stage
+                            td_obj["最近联动写入时间"] = write_ts
+                            if todo_auto_done:
+                                td_obj["完成"] = True
+                            linked_todo_titles.append(str(td_obj.get("任务", "")).strip())
+
                     if saved_records <= 0:
                         st.warning("未写入任何记录：请检查提审/阶段 warning，或勾选强制提交。")
                     else:
@@ -3553,7 +3974,10 @@ elif menu == MENU_SPECIFIC:
                         st.session_state.pasted_cache = {}
                         st.session_state.exclude_imgs = set()
                         sync_save_db(sel_proj)
-                        st.success(f"🎉 记录成功！本次写入 {saved_records} 条。")
+                        if linked_todo_ids:
+                            sync_save_db("系统配置")
+                        todo_msg = f"；联动待办 {len(linked_todo_titles)} 条" if linked_todo_titles else ""
+                        st.success(f"🎉 记录成功！本次写入 {saved_records} 条{todo_msg}。")
                         st.rerun()
 
         with st.expander("⏱️ 团队效能与工时", expanded=False):
@@ -4797,6 +5221,7 @@ elif menu == MENU_GUIDE:
         st.markdown(
             "每次收工建议下载全量备份（数据+图片）；换设备后通过上传备份一键恢复。"
         )
+
 
 
 
