@@ -15,6 +15,28 @@ import zipfile
 from collections import Counter
 from decimal import Decimal
 from PIL import Image
+st.set_page_config(
+    page_title="INART PM 系统",
+    page_icon="📌",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+st.markdown(
+    """
+    <style>
+    .stApp [data-testid="stAppViewContainer"] .main .block-container {
+        max-width: 1680px;
+        padding-top: 1.5rem;
+        padding-left: 2rem;
+        padding-right: 2rem;
+    }
+    footer { visibility: hidden; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 
 # --- Bootstrap fallback (for cloud/runtime safety) ---
 DEFAULT_SYS_CFG = {
