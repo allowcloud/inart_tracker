@@ -110,6 +110,27 @@ if "db" not in st.session_state:
 else:
     st.session_state.db = _ensure_db_shape(st.session_state.db)
 
+def _ensure_runtime_state_defaults():
+    defaults = {
+        "parsed_logs": [],
+        "pasted_cache": {},
+        "config_pasted_cache": {},
+        "ai_pasted_cache": {},
+        "exclude_imgs": set(),
+        "config_consumed_hashes": set(),
+        "ai_consumed_hashes": set(),
+        "new_proj_mode": False,
+        "current_proj_context": None,
+        "form_key": 0,
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+
+_ensure_runtime_state_defaults()
+
+
 SYS_CFG = st.session_state.db.setdefault("系统配置", {})
 STAGES_UNIFIED = list(SYS_CFG.get("标准阶段", DEFAULT_SYS_CFG["标准阶段"]))
 STD_COMPONENTS = list(SYS_CFG.get("标准部件", DEFAULT_SYS_CFG["标准部件"]))
