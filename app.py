@@ -1246,6 +1246,85 @@ def get_risk_status(milestone, target_date_str="TBD"):
     return "⚪ 未知阶段", "normal"
 
 
+def get_project_status_bucket(milestone):
+    ms = str(milestone or "").strip()
+    if ms == "暂停研发":
+        return "pause"
+    if ms in ["生产结束", "项目结束撒花🎉", "✅ 已完成(结束)"]:
+        return "done"
+    if ms in ["生产中", "下模中"]:
+        return "prod"
+    if "研发" in ms or ms in ["待开定", "已开定", "待立项"]:
+        return "dev"
+    return "unknown"
+
+
+def month_last_day(year, month):
+    if month in [1, 3, 5, 7, 8, 10, 12]:
+        return 31
+    if month == 2:
+        return 29 if (year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)) else 28
+    return 30
+
+
+def parse_schedule_marker_date(schedule_str, marker_mode="target"):
+    s = str(schedule_str or "").strip()
+    if not s or s.upper() in ["TBD", "NONE"] or s in ["-", "—", "无"]:
+        return None
+
+    for fmt in ["%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d"]:
+        try:
+            return datetime.datetime.strptime(s[:10], fmt).date()
+        except Exception:
+            pass
+
+    m_q = re.match(r'^(\d{4}|\d{2})\s*Q([1-4])$', s.upper())
+    if m_q:
+        y_raw = int(m_q.group(1))
+        year = y_raw if y_raw >= 1000 else (2000 + y_raw)
+        quarter = int(m_q.group(2))
+        if marker_mode == "ship":
+            return quarter_to_deadline(f"{year} Q{quarter}")
+        first_month = (quarter - 1) * 3 + 1
+        return datetime.date(year, first_month, 15)
+
+    ym = parse_target_year_month(s)
+    if ym:
+        year, month = int(ym[0]), int(ym[1])
+        if marker_mode == "ship":
+            return datetime.date(year, month, month_last_day(year, month))
+        return datetime.date(year, month, 15)
+
+    return None
+
+
+def build_timeline_marker_info(proj_name, proj_label, milestone, target_text, ship_text):
+    bucket = get_project_status_bucket(milestone)
+    if bucket == "dev":
+        mark_dt = parse_schedule_marker_date(target_text, marker_mode="target")
+        if mark_dt:
+            return {
+                "项目": proj_label,
+                "项目原名": proj_name,
+                "日期": mark_dt.strftime("%Y-%m-%d"),
+                "标记类型": "研发开定",
+                "原始时间": str(target_text or "TBD"),
+                "悬浮": f"{proj_name}<br>研发开定：{target_text}"
+            }
+    if bucket == "prod":
+        mark_dt = parse_schedule_marker_date(ship_text, marker_mode="ship")
+        if mark_dt:
+            return {
+                "项目": proj_label,
+                "项目原名": proj_name,
+                "日期": mark_dt.strftime("%Y-%m-%d"),
+                "标记类型": "生产发货",
+                "原始时间": str(ship_text or "-"),
+                "悬浮": f"{proj_name}<br>生产发货：{ship_text}"
+            }
+    return None
+
+
 def render_pm_todo_manager(valid_projs, current_pm):
     st.subheader("🗂️ To do List（CP/DDL 合并）")
     cfg = db.setdefault("系统配置", {})
@@ -2408,15 +2487,15 @@ if menu == MENU_DASHBOARD:
                 st.error(f"解析失败: {e}")
     gantt_cat_orders = MACRO_STAGES.copy()
     combined_color_map = {
-        "立项": "#FFB84C", "建模": "#2CD3E1", "设计": "#A555EC",
-        "工程": "#4D96FF", "模具": "#F47C7C", "修模": "#FF7B54",
-        "生产": "#6BCB77", "暂停": "#B2B2B2", "结束": "#1A1A2E"
+        "立项": "#F2C14E", "建模": "#34C6D3", "设计": "#8B5CF6",
+        "工程": "#4F7CFF", "模具": "#FB7185", "修模": "#F97316",
+        "生产": "#37B36B", "暂停": "#94A3B8", "结束": "#334155"
     }
 
     # ── 缓存大盘计算结果（TTL=30s，切模块不重算）──
     @st.cache_data(ttl=30, show_spinner=False)
     def _build_dash(proj_list_key: str, db_hash: str):
-        _table = []; _gantt = []; _ppr = []; _sx = []; _sy = []; _meta = []
+        _table = []; _gantt = []; _ppr = []; _markers = []; _meta = []
         for proj in valid_projs:
             data = db[proj]
             if not data.get('部件列表') and not data.get('Milestone') and not data.get('Target'):
@@ -2425,7 +2504,7 @@ if menu == MENU_DASHBOARD:
             gd=data.get('跟单',''); ms=data.get('Milestone',''); tgt=data.get('Target','TBD')
             ship_itv=data.get('发货区间','-'); r_txt,_=get_risk_status(ms,tgt)
             comps=data.get('部件列表',{})
-            proj_y_label=f"{proj} 📦[{ship_itv}]" if ship_itv and ship_itv!='-' else proj
+            proj_y_label = proj
             if not comps:
                 _table.append({"状态":r_txt,"项目":proj,"跟单":gd,"项目当前阶段":ms,
                     "开定时间":tgt,"预计发货":ship_itv,"断更":"-","最新全盘动态":"无数据"}); continue
@@ -2476,11 +2555,9 @@ if menu == MENU_DASHBOARD:
                 "是否暂停": 1 if str(ms).strip() == "暂停研发" else 0,
                 "是否完结": 1 if str(ms).strip() in ["生产结束", "项目结束撒花🎉", "✅ 已完成(结束)"] else 0
             })
-            try:
-                if tgt and tgt.upper()!='TBD':
-                    pt=datetime.datetime.strptime(f"{tgt}-01" if len(tgt)==7 else tgt[:10],"%Y-%m-%d")
-                    _sx.append(pt.strftime("%Y-%m-%d")); _sy.append(proj_y_label)
-            except: pass
+            marker_info = build_timeline_marker_info(proj, proj_y_label, ms, tgt, ship_itv)
+            if marker_info:
+                _markers.append(marker_info)
             all_logs = sorted(grouped.values(), key=lambda x: x["日期_obj"])
             if all_logs:
                 # 找出暂停时间段：[pause_start, resume_start) 之间的普通日志不产生甘特色块
@@ -2541,7 +2618,7 @@ if menu == MENU_DASHBOARD:
                         if not is_last:
                             cs = ns if ns else log["工序"]
                             sd = log["日期_obj"]; buf = []
-        return _table, _gantt, _ppr, _sx, _sy, _meta
+        return _table, _gantt, _ppr, _markers, _meta
 
     # cache key：项目列表 + 数据指纹（只用非图片字段的哈希）
     import hashlib as _hl
@@ -2549,50 +2626,137 @@ if menu == MENU_DASHBOARD:
         {k:{fk:fv for fk,fv in v.items() if fk not in ("配件清单长图",)}
          for k,v in db.items() if k!="系统配置"},
         ensure_ascii=False, sort_keys=True).encode()).hexdigest()
-    table_data, gantt_data, _ppr_list, star_x, star_y, _meta = _build_dash(",".join(valid_projs), _db_sig)
+    table_data, gantt_data, _ppr_list, timeline_marks, _meta = _build_dash(",".join(valid_projs), _db_sig)
     project_person_roles = set(map(tuple, _ppr_list))
 
 
     st.divider()
     st.subheader("📈 全局进展甘特图")
-    st.markdown("💡 支持按时间区间筛选；并统计建模/设计/工程平均耗时（可选去极值）。")
-    if gantt_data:
-        df_g = pd.DataFrame(gantt_data).sort_values(by=["项目", "Start"])
-        df_g["Start_dt"] = pd.to_datetime(df_g["Start"], errors="coerce")
-        df_g["Finish_dt"] = pd.to_datetime(df_g["Finish"], errors="coerce")
-        d1, d2 = st.columns(2)
-        with d1:
-            gantt_start = st.date_input("甘特开始日期", value=df_g["Start_dt"].min().date() if not df_g["Start_dt"].isna().all() else datetime.date.today(), key="gantt_start")
-        with d2:
-            gantt_end = st.date_input("甘特结束日期", value=df_g["Finish_dt"].max().date() if not df_g["Finish_dt"].isna().all() else datetime.date.today(), key="gantt_end")
-        m = (df_g["Finish_dt"] >= pd.to_datetime(gantt_start)) & (df_g["Start_dt"] <= pd.to_datetime(gantt_end))
-        df_g = df_g[m]
-
-        if _meta:
-            df_meta = pd.DataFrame(_meta).drop_duplicates(subset=["项目标签"])
-            df_meta["最近更新_dt"] = pd.to_datetime(df_meta["最近更新"], errors="coerce").fillna(pd.Timestamp.min)
-            df_meta["有更新"] = (df_meta["最近更新"] != "0001-01-01").astype(int)
-            df_meta = df_meta.sort_values(by=["有更新", "最近更新_dt", "项目标签"], ascending=[False, False, True])
-            y_order = df_meta["项目标签"].tolist()
+    st.caption("研发项目只标开定，生产项目只标发货。时间标记会跟随筛选窗口过滤，不再把图拉散。")
+    if gantt_data or timeline_marks:
+        df_g = pd.DataFrame(gantt_data).sort_values(by=["项目", "Start"]) if gantt_data else pd.DataFrame(columns=["项目", "工序阶段", "Start", "Finish", "详情"])
+        if not df_g.empty:
+            df_g["Start_dt"] = pd.to_datetime(df_g["Start"], errors="coerce")
+            df_g["Finish_dt"] = pd.to_datetime(df_g["Finish"], errors="coerce")
         else:
-            y_order = sorted(df_g["项目"].unique().tolist())
-        fig = px.timeline(
-            df_g, x_start="Start", x_end="Finish", y="项目",
-            color="工序阶段", hover_name="详情",
-            category_orders={"工序阶段": gantt_cat_orders, "项目": y_order},
-            color_discrete_map=combined_color_map
-        )
-        if star_x:
-            fig.add_trace(go.Scatter(
-                x=star_x, y=star_y, mode='markers',
-                marker=dict(symbol='star', size=24, color='#FFD700',
-                            line=dict(width=2, color='#FF4500')),
-                name='📅 目标开定',
-                hovertemplate='目标开定: %{x}<extra></extra>'
-            ))
-        fig.update_yaxes(autorange="reversed")
-        fig.update_layout(height=max(400, len(df_g['项目'].unique()) * 45))
-        st.plotly_chart(fig, use_container_width=True)
+            df_g["Start_dt"] = pd.Series(dtype="datetime64[ns]")
+            df_g["Finish_dt"] = pd.Series(dtype="datetime64[ns]")
+
+        df_marks = pd.DataFrame(timeline_marks) if timeline_marks else pd.DataFrame(columns=["项目", "项目原名", "日期", "标记类型", "原始时间", "悬浮"])
+        if not df_marks.empty:
+            df_marks["日期_dt"] = pd.to_datetime(df_marks["日期"], errors="coerce")
+        else:
+            df_marks["日期_dt"] = pd.Series(dtype="datetime64[ns]")
+
+        date_candidates = []
+        if not df_g.empty:
+            date_candidates.extend(df_g["Start_dt"].dropna().tolist())
+            date_candidates.extend(df_g["Finish_dt"].dropna().tolist())
+        if not df_marks.empty:
+            date_candidates.extend(df_marks["日期_dt"].dropna().tolist())
+        default_start = min(date_candidates).date() if date_candidates else datetime.date.today()
+        default_end = max(date_candidates).date() if date_candidates else datetime.date.today()
+
+        c1, c2 = st.columns(2)
+        with c1:
+            gantt_start = st.date_input("甘特开始日期", value=default_start, key="gantt_start")
+        with c2:
+            gantt_end = st.date_input("甘特结束日期", value=default_end, key="gantt_end")
+        if gantt_end < gantt_start:
+            gantt_start, gantt_end = gantt_end, gantt_start
+
+        start_ts = pd.to_datetime(gantt_start)
+        end_ts = pd.to_datetime(gantt_end) + pd.Timedelta(days=1)
+        if not df_g.empty:
+            m = (df_g["Finish_dt"] >= start_ts) & (df_g["Start_dt"] <= end_ts)
+            df_g = df_g[m]
+        if not df_marks.empty:
+            m_mark = (df_marks["日期_dt"] >= start_ts) & (df_marks["日期_dt"] <= end_ts)
+            df_marks = df_marks[m_mark]
+
+        visible_projects = set(df_g["项目"].tolist()) | set(df_marks["项目"].tolist())
+        if not visible_projects:
+            st.info("当前时间窗口内暂无甘特段或关键时间标记。")
+        else:
+            if _meta:
+                df_meta = pd.DataFrame(_meta).drop_duplicates(subset=["项目标签"])
+                df_meta = df_meta[df_meta["项目标签"].isin(visible_projects)]
+                df_meta["最近更新_dt"] = pd.to_datetime(df_meta["最近更新"], errors="coerce").fillna(pd.Timestamp.min)
+                df_meta["有更新"] = (df_meta["最近更新"] != "0001-01-01").astype(int)
+                df_meta = df_meta.sort_values(by=["有更新", "最近更新_dt", "项目标签"], ascending=[False, False, True])
+                y_order = df_meta["项目标签"].tolist()
+            else:
+                y_order = sorted(visible_projects)
+
+            if not df_g.empty:
+                fig = px.timeline(
+                    df_g, x_start="Start", x_end="Finish", y="项目",
+                    color="工序阶段", hover_name="详情",
+                    category_orders={"工序阶段": gantt_cat_orders, "项目": y_order},
+                    color_discrete_map=combined_color_map
+                )
+            else:
+                fig = go.Figure()
+
+            fig.update_traces(
+                marker_line_color="rgba(255,255,255,0.92)",
+                marker_line_width=1.0,
+                opacity=0.9,
+                selector=dict(type="bar")
+            )
+
+            if not df_marks.empty:
+                mark_style = {
+                    "研发开定": {"symbol": "diamond", "color": "#F4B400", "line": "#B45309", "name": "研发开定"},
+                    "生产发货": {"symbol": "circle", "color": "#2563EB", "line": "#1D4ED8", "name": "生产发货"},
+                }
+                for mark_type, style in mark_style.items():
+                    sub = df_marks[df_marks["标记类型"] == mark_type]
+                    if sub.empty:
+                        continue
+                    fig.add_trace(go.Scatter(
+                        x=sub["日期_dt"],
+                        y=sub["项目"],
+                        mode="markers",
+                        marker=dict(symbol=style["symbol"], size=12, color=style["color"], line=dict(width=1.4, color=style["line"])),
+                        name=style["name"],
+                        customdata=sub[["悬浮"]].values,
+                        hovertemplate="%{customdata[0]}<extra></extra>"
+                    ))
+
+            fig.update_yaxes(
+                autorange="reversed",
+                categoryorder="array",
+                categoryarray=y_order,
+                showgrid=False,
+                title=None,
+                tickfont=dict(size=12, color="#334155")
+            )
+            fig.update_xaxes(
+                range=[start_ts, end_ts],
+                tickformat="%Y/%m",
+                dtick="M1",
+                showgrid=True,
+                gridcolor="rgba(148,163,184,0.18)",
+                zeroline=False,
+                title=None
+            )
+            fig.update_layout(
+                template="plotly_white",
+                paper_bgcolor="#FCFCFD",
+                plot_bgcolor="#FCFCFD",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, font=dict(size=11), title_text=""),
+                margin=dict(l=8, r=8, t=40, b=8),
+                bargap=0.34,
+                hoverlabel=dict(bgcolor="#FFFFFF", font_size=12),
+                height=max(460, len(y_order) * 30 + 140)
+            )
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("当前窗口项目数", len(y_order))
+            m2.metric("研发开定标记", int((df_marks["标记类型"] == "研发开定").sum()) if not df_marks.empty else 0)
+            m3.metric("生产发货标记", int((df_marks["标记类型"] == "生产发货").sum()) if not df_marks.empty else 0)
+            st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
 
         st.markdown("#### ⏱️ 建模/设计/工程平均耗时（天）")
         trim_outlier = st.checkbox("去掉最大值和最小值（样本>=3时）", value=False, key="trim_stage_avg")
