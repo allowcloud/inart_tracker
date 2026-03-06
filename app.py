@@ -16,6 +16,242 @@ from collections import Counter
 from decimal import Decimal
 from PIL import Image
 
+# --- Bootstrap fallback (for cloud/runtime safety) ---
+DEFAULT_SYS_CFG = {
+    "标准部件": ["头雕(表情)", "素体", "手型", "服装", "配件", "地台", "包装"],
+    "标准阶段": [
+        "立项", "建模(含打印/签样)", "涂装", "设计", "工程拆件", "手板/结构板", "官图",
+        "工厂复样(含胶件/上色等)", "大货", "⏸️ 暂停/搁置", "✅ 已完成(结束)"
+    ],
+    "宏观阶段": ["立项", "建模", "设计", "工程", "模具", "修模", "生产", "暂停", "结束"],
+    "排期基线": {"立项": 7, "建模": 42, "设计": 35, "工程": 49, "模具": 28, "修模": 14, "生产": 30},
+    "AI_COMP_KW": {},
+    "AI_STAGE_KW": {},
+    "项目别名": {},
+}
+
+STD_MILESTONES = ["待立项", "研发中", "暂停研发", "下模中", "生产中", "生产结束", "项目结束撒花🎉"]
+HANDOFF_METHODS = ["内部正常推进", "微信", "飞书", "实物/打印件交接", "网盘链接", "当面沟通"]
+STD_COSTS_LIST = ["研发费", "模具费", "大货生产", "包装印刷", "物流运输", "外包设计", "杂项其他"]
+QUOTE_ITEM_DEFAULTS = STD_COSTS_LIST.copy()
+REVIEW_TYPE_OPTIONS = ["(无)", "2D", "3D", "实物", "包装"]
+REVIEW_RESULT_OPTIONS = ["(无)", "待反馈", "通过", "打回"]
+
+MENU_DASHBOARD = "📊 全局大盘与甘特图"
+MENU_SPECIFIC = "🎯 PM 工作台"
+MENU_FASTLOG = "📝 AI速记"
+MENU_PACKING = "📦 包装与入库"
+MENU_COST = "💰 成本台账"
+MENU_HISTORY = "🕰️ 历史溯源 (全局可编)"
+MENU_SETTINGS = "⚙️ 系统维护 (全局配置)"
+MENU_GUIDE = "📖 新手使用指南"
+
+
+def _deep_copy_obj(obj):
+    return json.loads(json.dumps(obj, ensure_ascii=False))
+
+
+class _LocalJsonDBManager:
+    def __init__(self, path="tracker_data_web_v20.json"):
+        self.path = path
+
+    def load(self):
+        if os.path.exists(self.path):
+            for enc in ["utf-8", "utf-8-sig", "gbk"]:
+                try:
+                    with open(self.path, "r", encoding=enc) as f:
+                        data = json.load(f)
+                    if isinstance(data, dict):
+                        return data
+                except Exception:
+                    continue
+        return {"系统配置": _deep_copy_obj(DEFAULT_SYS_CFG)}
+
+    def save(self, data):
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+    def save_one(self, key, value):
+        data = self.load()
+        data[key] = value
+        self.save(data)
+
+
+if "db_manager" not in globals():
+    db_manager = _LocalJsonDBManager(os.environ.get("INART_DATA_FILE", "tracker_data_web_v20.json"))
+
+
+def _ensure_db_shape(db_obj):
+    if not isinstance(db_obj, dict):
+        db_obj = {}
+    cfg = db_obj.setdefault("系统配置", {})
+    for k, v in DEFAULT_SYS_CFG.items():
+        if k not in cfg:
+            cfg[k] = _deep_copy_obj(v)
+    for p, d in list(db_obj.items()):
+        if p == "系统配置":
+            continue
+        if not isinstance(d, dict):
+            db_obj[p] = {}
+            d = db_obj[p]
+        d.setdefault("负责人", "")
+        d.setdefault("跟单", "")
+        d.setdefault("Milestone", "待立项")
+        d.setdefault("Target", "TBD")
+        d.setdefault("发货区间", "")
+        d.setdefault("部件列表", {})
+        d.setdefault("发货数据", {})
+        d.setdefault("成本数据", {})
+    return db_obj
+
+
+if "db" not in st.session_state:
+    st.session_state.db = _ensure_db_shape(db_manager.load())
+else:
+    st.session_state.db = _ensure_db_shape(st.session_state.db)
+
+SYS_CFG = st.session_state.db.setdefault("系统配置", {})
+STAGES_UNIFIED = list(SYS_CFG.get("标准阶段", DEFAULT_SYS_CFG["标准阶段"]))
+STD_COMPONENTS = list(SYS_CFG.get("标准部件", DEFAULT_SYS_CFG["标准部件"]))
+MACRO_STAGES = list(SYS_CFG.get("宏观阶段", DEFAULT_SYS_CFG["宏观阶段"]))
+
+
+def is_pause_stage(stage):
+    s = str(stage or "")
+    return ("暂停" in s) or ("搁置" in s)
+
+
+def quarter_to_deadline(qtxt):
+    s = str(qtxt or "").upper().replace("-", " ").strip()
+    m = re.match(r"^(\d{4})\s*Q([1-4])$", s)
+    if not m:
+        return None
+    y, q = int(m.group(1)), int(m.group(2))
+    month = q * 3
+    if month in [1, 3, 5, 7, 8, 10, 12]:
+        day = 31
+    elif month == 2:
+        day = 29 if (y % 4 == 0 and (y % 100 != 0 or y % 400 == 0)) else 28
+    else:
+        day = 30
+    return datetime.date(y, month, day)
+
+
+def get_macro_phase(detail_stage):
+    s = str(detail_stage or "").strip()
+    if any(x in s for x in ["完成", "结束", "撒花"]):
+        return "结束"
+    if is_pause_stage(s):
+        return "暂停"
+    if any(x in s for x in ["大货", "复样", "量产", "生产", "下模"]):
+        return "生产"
+    if any(x in s for x in ["手板", "结构", "拆件", "工程"]):
+        return "工程"
+    if "模具" in s:
+        return "模具"
+    if any(x in s for x in ["设计", "官图"]):
+        return "设计"
+    if any(x in s for x in ["建模", "打印"]):
+        return "建模"
+    if "立项" in s:
+        return "立项"
+    return "工程"
+
+
+def validate_transition_warning(curr_stage, new_stage, stages):
+    try:
+        if not curr_stage or not new_stage or new_stage == curr_stage:
+            return ""
+        if is_pause_stage(new_stage):
+            return ""
+        if curr_stage in stages and new_stage in stages:
+            c_idx = stages.index(curr_stage)
+            n_idx = stages.index(new_stage)
+            if n_idx + 1 < c_idx:
+                return f"阶段逆行：当前[{curr_stage}] -> 目标[{new_stage}]"
+        return ""
+    except Exception:
+        return ""
+
+
+def validate_review_with_stage(review_type, stage, comp_name, stages):
+    rt = str(review_type or "").strip()
+    stg = str(stage or "").strip()
+    comp = str(comp_name or "").strip()
+    if not rt or rt == "(无)":
+        return ""
+    if rt == "2D":
+        return ""
+    if rt == "3D":
+        if any(k in stg for k in ["设计", "工程", "建模"]):
+            return ""
+        return "3D提审通常应在设计/工程（或建模后）阶段"
+    if rt == "实物":
+        if any(k in stg for k in ["手板", "结构", "复样", "大货"]):
+            return ""
+        return "实物提审通常应在手板/结构或后续生产阶段"
+    if rt == "包装":
+        if ("包装" in comp) or ("包装" in stg):
+            return ""
+        return "包装提审建议用于包装相关部件/阶段"
+    return ""
+
+
+def infer_review_type_from_text(text):
+    s = str(text or "").lower()
+    if "提审" not in s and "review" not in s and "过审" not in s and "打回" not in s:
+        return "(无)"
+    if "2d" in s:
+        return "2D"
+    if "3d" in s:
+        return "3D"
+    if "包装" in s:
+        return "包装"
+    if any(k in s for k in ["实物", "手板", "打样"]):
+        return "实物"
+    return "(无)"
+
+
+def infer_review_result_from_text(text):
+    s = str(text or "").lower()
+    has_review_ctx = any(k in s for k in ["提审", "review", "过审", "打回"])
+    if not has_review_ctx:
+        return "(无)"
+    if any(k in s for k in ["打回", "驳回", "退回", "reject"]):
+        return "打回"
+    if any(k in s for k in ["通过", "过审", "pass", "approved"]):
+        return "通过"
+    return "待反馈"
+
+
+def infer_review_round_from_text(text):
+    s = str(text or "")
+    m = re.search(r"第\s*(\d+)\s*轮", s)
+    if m:
+        return int(m.group(1))
+    m2 = re.search(r"\b(\d+)\s*轮\b", s)
+    if m2:
+        return int(m2.group(1))
+    return ""
+
+
+def normalize_review_round(v):
+    try:
+        iv = int(v)
+        return iv if iv > 0 else ""
+    except Exception:
+        return ""
+
+
+def sync_save_db(changed_proj=None):
+    try:
+        if "db" not in st.session_state:
+            return
+        db_manager.save(st.session_state.db)
+    except Exception as e:
+        st.warning(f"保存失败: {e}")
+
+# --- End bootstrap fallback ---
 # ==========================================
 # 核心架构：压缩引擎
 # ==========================================
@@ -4156,6 +4392,7 @@ elif menu == MENU_GUIDE:
         st.markdown(
             "每次收工建议下载全量备份（数据+图片）；换设备后通过上传备份一键恢复。"
         )
+
 
 
 
