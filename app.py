@@ -2632,7 +2632,7 @@ if menu == MENU_DASHBOARD:
 
     st.divider()
     st.subheader("📈 全局进展甘特图")
-    st.caption("研发项目只标开定，生产项目只标发货。时间标记会跟随筛选窗口过滤，不再把图拉散。")
+    st.caption("研发项目显示开定提醒，生产项目显示发货提醒。提醒会跟随时间窗口过滤，避免把图拉散。")
     if gantt_data or timeline_marks:
         df_g = pd.DataFrame(gantt_data).sort_values(by=["项目", "Start"]) if gantt_data else pd.DataFrame(columns=["项目", "工序阶段", "Start", "Finish", "详情"])
         if not df_g.empty:
@@ -2707,8 +2707,22 @@ if menu == MENU_DASHBOARD:
 
             if not df_marks.empty:
                 mark_style = {
-                    "研发开定": {"symbol": "diamond", "color": "#F4B400", "line": "#B45309", "name": "研发开定"},
-                    "生产发货": {"symbol": "circle", "color": "#2563EB", "line": "#1D4ED8", "name": "生产发货"},
+                    "研发开定": {
+                        "symbol": "square",
+                        "size": 15,
+                        "color": "#F4B400",
+                        "line": "#A16207",
+                        "name": "开定提醒",
+                        "text": "开",
+                    },
+                    "生产发货": {
+                        "symbol": "square",
+                        "size": 15,
+                        "color": "#2563EB",
+                        "line": "#1D4ED8",
+                        "name": "发货提醒",
+                        "text": "发",
+                    },
                 }
                 for mark_type, style in mark_style.items():
                     sub = df_marks[df_marks["标记类型"] == mark_type]
@@ -2717,9 +2731,17 @@ if menu == MENU_DASHBOARD:
                     fig.add_trace(go.Scatter(
                         x=sub["日期_dt"],
                         y=sub["项目"],
-                        mode="markers",
-                        marker=dict(symbol=style["symbol"], size=12, color=style["color"], line=dict(width=1.4, color=style["line"])),
+                        mode="markers+text",
+                        marker=dict(
+                            symbol=style["symbol"],
+                            size=style["size"],
+                            color=style["color"],
+                            line=dict(width=1.5, color=style["line"])
+                        ),
                         name=style["name"],
+                        text=[style["text"]] * len(sub),
+                        textposition="middle center",
+                        textfont=dict(size=9, color="#FFFFFF"),
                         customdata=sub[["悬浮"]].values,
                         hovertemplate="%{customdata[0]}<extra></extra>"
                     ))
@@ -4961,6 +4983,7 @@ elif menu == MENU_GUIDE:
         st.markdown(
             "每次收工建议下载全量备份（数据+图片）；换设备后通过上传备份一键恢复。"
         )
+
 
 
 
