@@ -99,9 +99,74 @@ class _LocalJsonDBManager:
         self.save(data)
 
 
-if "db_manager" not in globals():
-    db_manager = _LocalJsonDBManager(os.environ.get("INART_DATA_FILE", "tracker_data_web_v20.json"))
+class _MongoDBManager:
+    def __init__(self, uri):
+        from pymongo import MongoClient
+        from pymongo.errors import PyMongoError
+        self.PyMongoError = PyMongoError
+        self.client = MongoClient(
+            uri,
+            serverSelectionTimeoutMS=10000,
+            connectTimeoutMS=10000,
+            socketTimeoutMS=10000,
+            maxPoolSize=5,
+        )
+        self.col = self.client["inart_pm"]["projects"]
 
+    def load(self):
+        try:
+            docs = list(self.col.find({}, {"_id": 0}))
+            data = {}
+            for doc in docs:
+                key = doc.get("_doc_key")
+                if key:
+                    data[key] = doc.get("payload", {})
+            return data
+        except self.PyMongoError as e:
+            st.warning(f"Mongo 读取失败，已回退本地模式: {e}")
+            return {}
+
+    def save(self, data):
+        try:
+            from pymongo import UpdateOne
+            ops = [
+                UpdateOne({"_doc_key": key}, {"$set": {"_doc_key": key, "payload": value}}, upsert=True)
+                for key, value in data.items()
+            ]
+            if ops:
+                self.col.bulk_write(ops, ordered=False)
+        except self.PyMongoError as e:
+            st.warning(f"Mongo 保存失败: {e}")
+
+    def save_one(self, key, value):
+        try:
+            self.col.replace_one(
+                {"_doc_key": key},
+                {"_doc_key": key, "payload": value},
+                upsert=True,
+            )
+        except self.PyMongoError as e:
+            st.warning(f"Mongo 保存失败 [{key}]: {e}")
+
+
+def _get_mongo_uri():
+    try:
+        return st.secrets.get("MONGO_URI", "") or os.environ.get("MONGO_URI", "")
+    except Exception:
+        return os.environ.get("MONGO_URI", "")
+
+
+@st.cache_resource(show_spinner=False)
+def _get_cached_mongo_manager(uri):
+    return _MongoDBManager(uri)
+
+
+if "db_manager" not in globals():
+    mongo_uri = _get_mongo_uri()
+    if mongo_uri:
+        db_manager = _get_cached_mongo_manager(mongo_uri)
+    else:
+        db_manager = _LocalJsonDBManager(os.environ.get("INART_DATA_FILE", "tracker_data_web_v20.json"))
 
 def _ensure_db_shape(db_obj):
     if not isinstance(db_obj, dict):
@@ -290,7 +355,12 @@ def sync_save_db(changed_proj=None):
     try:
         if "db" not in st.session_state:
             return
-        db_manager.save(st.session_state.db)
+        if changed_proj:
+            if changed_proj in st.session_state.db:
+                db_manager.save_one(changed_proj, st.session_state.db[changed_proj])
+            db_manager.save_one("系统配置", st.session_state.db["系统配置"])
+        else:
+            db_manager.save(st.session_state.db)
     except Exception as e:
         st.warning(f"保存失败: {e}")
 
