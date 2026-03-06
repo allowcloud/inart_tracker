@@ -74,6 +74,9 @@ def _deep_copy_obj(obj):
 
 
 class _LocalJsonDBManager:
+    backend_name = "Local JSON"
+    attachment_mode = "local-file"
+
     def __init__(self, path="tracker_data_web_v20.json"):
         self.path = path
 
@@ -98,12 +101,51 @@ class _LocalJsonDBManager:
         data[key] = value
         self.save(data)
 
+    def save_file_bytes(self, file_bytes, filename="", prefix="upload"):
+        if not os.path.exists(IMG_DIR):
+            os.makedirs(IMG_DIR)
+        ext = os.path.splitext(filename or "")[1].lower() or ".jpg"
+        fname = f"{prefix}_{uuid.uuid4().hex}{ext}"
+        fpath = os.path.join(IMG_DIR, fname)
+        with open(fpath, "wb") as f:
+            f.write(file_bytes)
+        return f"FILE:{fname}"
+
+    def read_file_bytes(self, ref):
+        if not isinstance(ref, str) or not ref.startswith("FILE:"):
+            return None
+        file_path = os.path.join(IMG_DIR, ref.replace("FILE:", "", 1))
+        if not os.path.exists(file_path):
+            return None
+        with open(file_path, "rb") as f:
+            return f.read()
+
+    def import_file_bytes(self, ref, file_bytes, filename=""):
+        if not os.path.exists(IMG_DIR):
+            os.makedirs(IMG_DIR)
+        if isinstance(ref, str) and ref.startswith("FILE:"):
+            fname = ref.replace("FILE:", "", 1)
+        else:
+            ext = os.path.splitext(filename or "")[1].lower() or ".jpg"
+            fname = f"restore_{uuid.uuid4().hex}{ext}"
+        fpath = os.path.join(IMG_DIR, fname)
+        with open(fpath, "wb") as f:
+            f.write(file_bytes)
+        return f"FILE:{fname}"
+
 
 class _MongoDBManager:
+    backend_name = "MongoDB"
+    attachment_mode = "gridfs"
+
     def __init__(self, uri):
         from pymongo import MongoClient
         from pymongo.errors import PyMongoError
+        from gridfs import GridFS, NoFile
+        from bson import ObjectId
         self.PyMongoError = PyMongoError
+        self.NoFile = NoFile
+        self.ObjectId = ObjectId
         self.client = MongoClient(
             uri,
             serverSelectionTimeoutMS=10000,
@@ -111,7 +153,9 @@ class _MongoDBManager:
             socketTimeoutMS=10000,
             maxPoolSize=5,
         )
-        self.col = self.client["inart_pm"]["projects"]
+        self.db = self.client["inart_pm"]
+        self.col = self.db["projects"]
+        self.fs = GridFS(self.db, collection="attachments")
 
     def load(self):
         try:
@@ -147,6 +191,58 @@ class _MongoDBManager:
             )
         except self.PyMongoError as e:
             st.warning(f"Mongo 保存失败 [{key}]: {e}")
+
+    def save_file_bytes(self, file_bytes, filename="", prefix="upload"):
+        try:
+            safe_name = filename or f"{prefix}_{uuid.uuid4().hex}.jpg"
+            file_id = self.fs.put(
+                file_bytes,
+                filename=safe_name,
+                contentType="image/jpeg",
+                createdAt=datetime.datetime.utcnow(),
+            )
+            return f"GRIDFS:{file_id}"
+        except self.PyMongoError as e:
+            st.warning(f"Mongo 附件保存失败: {e}")
+            return ""
+
+    def read_file_bytes(self, ref):
+        if not isinstance(ref, str) or not ref.startswith("GRIDFS:"):
+            return None
+        raw_id = ref.replace("GRIDFS:", "", 1)
+        try:
+            file_id = self.ObjectId(raw_id)
+        except Exception:
+            file_id = raw_id
+        try:
+            return self.fs.get(file_id).read()
+        except self.NoFile:
+            return None
+        except self.PyMongoError as e:
+            st.warning(f"Mongo 附件读取失败: {e}")
+            return None
+
+    def import_file_bytes(self, ref, file_bytes, filename=""):
+        if not isinstance(ref, str) or not ref.startswith("GRIDFS:"):
+            return self.save_file_bytes(file_bytes, filename=filename, prefix="restore")
+        raw_id = ref.replace("GRIDFS:", "", 1)
+        try:
+            file_id = self.ObjectId(raw_id)
+        except Exception:
+            return self.save_file_bytes(file_bytes, filename=filename, prefix="restore")
+        try:
+            if not self.fs.exists(file_id):
+                self.fs.put(
+                    file_bytes,
+                    _id=file_id,
+                    filename=filename or f"{raw_id}.jpg",
+                    contentType="image/jpeg",
+                    createdAt=datetime.datetime.utcnow(),
+                )
+            return ref
+        except self.PyMongoError as e:
+            st.warning(f"Mongo 附件恢复失败: {e}")
+            return self.save_file_bytes(file_bytes, filename=filename, prefix="restore")
 
 
 def _get_mongo_uri():
@@ -368,40 +464,210 @@ def sync_save_db(changed_proj=None):
 # ==========================================
 # 核心架构：压缩引擎
 # ==========================================
-IMG_DIR = "img_assets"  # 仅保留供旧数据兼容读取，新数据不再写入
+IMG_DIR = "img_assets"  # 仅保留供旧数据兼容读取，新数据默认走引用
 
-def compress_to_b64(img_data, max_size=(800, 800), quality=50):
+
+def compress_to_image_bytes(img_data, max_size=(1400, 1400), quality=68):
     try:
-        if isinstance(img_data, bytes): img = Image.open(io.BytesIO(img_data))
-        else: img = Image.open(img_data)
-        if img.mode in ("RGBA", "P"): img = img.convert("RGB")
+        if isinstance(img_data, Image.Image):
+            img = img_data.copy()
+        elif isinstance(img_data, bytes):
+            img = Image.open(io.BytesIO(img_data))
+        elif hasattr(img_data, "read"):
+            if hasattr(img_data, "seek"):
+                img_data.seek(0)
+            raw = img_data.read()
+            if hasattr(img_data, "seek"):
+                img_data.seek(0)
+            img = Image.open(io.BytesIO(raw))
+        else:
+            img = Image.open(img_data)
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
         img.thumbnail(max_size, Image.Resampling.LANCZOS)
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=quality, optimize=True)
-        return base64.b64encode(buf.getvalue()).decode()
-    except Exception: return ""
+        return buf.getvalue()
+    except Exception:
+        return b""
+
+
+def compress_to_b64(img_data, max_size=(800, 800), quality=50):
+    raw = compress_to_image_bytes(img_data, max_size=max_size, quality=quality)
+    return base64.b64encode(raw).decode() if raw else ""
+
+
+def is_attachment_ref(value):
+    return isinstance(value, str) and (value.startswith("FILE:") or value.startswith("GRIDFS:"))
+
+
+def read_binary_ref(ref):
+    if not ref:
+        return None
+    if isinstance(ref, str) and ref.startswith("GRIDFS:") and hasattr(db_manager, "read_file_bytes"):
+        return db_manager.read_file_bytes(ref)
+    if isinstance(ref, str) and ref.startswith("FILE:"):
+        file_path = os.path.join(IMG_DIR, ref.replace("FILE:", "", 1))
+        if os.path.exists(file_path):
+            with open(file_path, "rb") as f:
+                return f.read()
+        return None
+    if isinstance(ref, str):
+        try:
+            return base64.b64decode(ref)
+        except Exception:
+            return None
+    return None
+
 
 def render_image(img_str, **kwargs):
-    if not img_str: return
-    if img_str.startswith("FILE:"):
-        file_path = os.path.join(IMG_DIR, img_str.replace("FILE:", ""))
-        if os.path.exists(file_path): st.image(file_path, **kwargs)
-        else: st.caption("⚠️ 图片为旧版本地文件，云端不可用，请重新上传。")
-    else:
-        try: st.image(base64.b64decode(img_str), **kwargs)
-        except: pass
+    if not img_str:
+        return
+    raw = read_binary_ref(img_str)
+    if raw is not None:
+        st.image(raw, **kwargs)
+        return
+    if isinstance(img_str, str) and img_str.startswith("FILE:"):
+        st.caption("⚠️ 图片为本地文件引用，当前环境未找到对应文件。")
+    elif isinstance(img_str, str) and img_str.startswith("GRIDFS:"):
+        st.caption("⚠️ 持久附件引用存在，但当前无法读取。")
+
+
+def save_image_ref_data(img_data, filename="", prefix="upload"):
+    raw = compress_to_image_bytes(img_data)
+    if not raw:
+        return ""
+    safe_name = filename or f"{prefix}.jpg"
+    if hasattr(db_manager, "save_file_bytes"):
+        return db_manager.save_file_bytes(raw, filename=safe_name, prefix=prefix)
+    if not os.path.exists(IMG_DIR):
+        os.makedirs(IMG_DIR)
+    ext = os.path.splitext(safe_name)[1].lower() or ".jpg"
+    fname = f"{prefix}_{uuid.uuid4().hex}{ext}"
+    with open(os.path.join(IMG_DIR, fname), "wb") as f:
+        f.write(raw)
+    return f"FILE:{fname}"
+
 
 def save_uploaded_file_ref(file_obj, prefix="upload"):
     if file_obj is None:
         return ""
-    if not os.path.exists(IMG_DIR):
-        os.makedirs(IMG_DIR)
-    ext = os.path.splitext(getattr(file_obj, 'name', '') or '')[1].lower() or '.jpg'
-    fname = f"{prefix}_{uuid.uuid4().hex}{ext}"
-    fpath = os.path.join(IMG_DIR, fname)
-    with open(fpath, 'wb') as f:
-        f.write(file_obj.read())
-    return f"FILE:{fname}"
+    file_name = getattr(file_obj, "name", "") or f"{prefix}.jpg"
+    return save_image_ref_data(file_obj, filename=file_name, prefix=prefix)
+
+
+def get_storage_backend_name():
+    return getattr(db_manager, "backend_name", "Unknown")
+
+
+def get_storage_attachment_mode():
+    return getattr(db_manager, "attachment_mode", "legacy")
+
+
+def derive_attachment_filename(ref):
+    if isinstance(ref, str) and ref.startswith("FILE:"):
+        return ref.replace("FILE:", "", 1)
+    if isinstance(ref, str) and ref.startswith("GRIDFS:"):
+        return f"{ref.replace('GRIDFS:', '', 1)}.jpg"
+    return f"attachment_{uuid.uuid4().hex}.jpg"
+
+
+def iter_attachment_refs_in_db(db_obj):
+    seen = set()
+    for p_name, p_data in db_obj.items():
+        if p_name == "系统配置" or not isinstance(p_data, dict):
+            continue
+        for c_data in p_data.get("部件列表", {}).values():
+            for log in c_data.get("日志流", []):
+                imgs = log.get("图片", [])
+                if isinstance(imgs, str):
+                    imgs = [imgs] if imgs else []
+                for img in imgs:
+                    if is_attachment_ref(img) and img not in seen:
+                        seen.add(img)
+                        yield img
+        drafts = p_data.get("配件清单长图", [])
+        if isinstance(drafts, str):
+            drafts = [drafts] if drafts else []
+        for img in drafts:
+            if is_attachment_ref(img) and img not in seen:
+                seen.add(img)
+                yield img
+
+
+def attachment_backup_path(ref):
+    if isinstance(ref, str) and ref.startswith("FILE:"):
+        return f"img_assets/{ref.replace('FILE:', '', 1)}"
+    if isinstance(ref, str) and ref.startswith("GRIDFS:"):
+        return f"attachments/gridfs/{ref.replace('GRIDFS:', '', 1)}.jpg"
+    return f"attachments/misc/{uuid.uuid4().hex}.bin"
+
+
+def iter_attachment_backup_candidates(ref):
+    if isinstance(ref, str) and ref.startswith("FILE:"):
+        fname = ref.replace("FILE:", "", 1)
+        return [f"img_assets/{fname}", f"attachments/file/{fname}"]
+    if isinstance(ref, str) and ref.startswith("GRIDFS:"):
+        fid = ref.replace("GRIDFS:", "", 1)
+        return [f"attachments/gridfs/{fid}.jpg"]
+    return []
+
+
+def import_attachment_ref(ref, file_bytes, filename=""):
+    safe_name = filename or derive_attachment_filename(ref)
+    if get_storage_attachment_mode() == "gridfs":
+        if isinstance(ref, str) and ref.startswith("GRIDFS:") and hasattr(db_manager, "import_file_bytes"):
+            return db_manager.import_file_bytes(ref, file_bytes, filename=safe_name)
+        return db_manager.save_file_bytes(file_bytes, filename=safe_name, prefix="restore")
+    if hasattr(db_manager, "import_file_bytes"):
+        return db_manager.import_file_bytes(ref, file_bytes, filename=safe_name)
+    return save_image_ref_data(file_bytes, filename=safe_name, prefix="restore")
+
+
+def replace_attachment_refs_in_db(db_obj, ref_map):
+    if not ref_map:
+        return db_obj
+    for p_name, p_data in db_obj.items():
+        if p_name == "系统配置" or not isinstance(p_data, dict):
+            continue
+        for c_data in p_data.get("部件列表", {}).values():
+            for log in c_data.get("日志流", []):
+                imgs = log.get("图片", [])
+                if isinstance(imgs, list):
+                    log["图片"] = [ref_map.get(img, img) for img in imgs]
+                elif isinstance(imgs, str):
+                    log["图片"] = ref_map.get(imgs, imgs)
+        drafts = p_data.get("配件清单长图", [])
+        if isinstance(drafts, list):
+            p_data["配件清单长图"] = [ref_map.get(img, img) for img in drafts]
+        elif isinstance(drafts, str):
+            p_data["配件清单长图"] = ref_map.get(drafts, drafts)
+    return db_obj
+
+
+def restore_attachments_from_zip(db_obj, zf):
+    ref_map = {}
+    restored = 0
+    missing = 0
+    for ref in list(iter_attachment_refs_in_db(db_obj)):
+        file_bytes = None
+        for arcname in iter_attachment_backup_candidates(ref):
+            if arcname in zf.namelist():
+                file_bytes = zf.read(arcname)
+                break
+        if file_bytes is None:
+            missing += 1
+            continue
+        new_ref = import_attachment_ref(ref, file_bytes, filename=derive_attachment_filename(ref))
+        if new_ref:
+            if new_ref != ref:
+                ref_map[ref] = new_ref
+            restored += 1
+        else:
+            missing += 1
+    if ref_map:
+        replace_attachment_refs_in_db(db_obj, ref_map)
+    return db_obj, restored, missing
 
 def norm_text(s):
     return re.sub(r'\s+', '', str(s or '').strip()).lower()
@@ -1358,9 +1624,10 @@ def render_pm_batch_fastlog_integrated(visible_projects, default_proj=""):
         if files:
             for i, f in enumerate(files):
                 target = file_bind.get(i, "全部记录")
-                b64 = compress_to_b64(f.getvalue())
-                if b64:
-                    images_by_target.setdefault(target, []).append(b64)
+                img_ref = save_uploaded_file_ref(f, prefix="pm_batch")
+                if img_ref:
+                    images_by_target.setdefault(target, []).append(img_ref)
+
 
         saved_count = 0
         skipped_count = 0
@@ -1536,9 +1803,10 @@ def render_pm_fastlog_integrated(sel_proj):
         if files:
             for i, f in enumerate(files):
                 target = file_bind.get(i, "全部记录")
-                b64 = compress_to_b64(f.getvalue())
-                if b64:
-                    images_by_target.setdefault(target, []).append(b64)
+                img_ref = save_uploaded_file_ref(f, prefix="pm_fast")
+                if img_ref:
+                    images_by_target.setdefault(target, []).append(img_ref)
+
 
         saved_count = 0
         skipped_count = 0
@@ -1952,6 +2220,14 @@ st.sidebar.title("🚀 INART PM 系统")
 pm_list    = ["所有人", "Mo", "越", "袁"]
 current_pm = st.sidebar.selectbox("👤 视角切换", pm_list)
 
+backend_name = get_storage_backend_name()
+attachment_mode = get_storage_attachment_mode()
+attachment_label = "GridFS 持久附件" if attachment_mode == "gridfs" else "本地文件引用"
+backend_icon = "🟢" if backend_name == "MongoDB" else "🟡"
+st.sidebar.caption(f"{backend_icon} 当前存储：{backend_name} | 附件：{attachment_label}")
+if backend_name != "MongoDB":
+    st.sidebar.warning("当前处于本地兜底模式。Cloud 重启或重新部署后，本地 JSON / 本地附件不保证保留。")
+
 db          = st.session_state.db
 valid_projs = get_visible_projects(db, current_pm)
 
@@ -1967,13 +2243,12 @@ st.sidebar.markdown("### ⚙️ 数据备份与恢复")
 try:
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        json_bytes = json.dumps(st.session_state.db, ensure_ascii=False, indent=4).encode('utf-8')
+        json_bytes = json.dumps(st.session_state.db, ensure_ascii=False, indent=4).encode("utf-8")
         zf.writestr("database.json", json_bytes)
-        if os.path.exists("img_assets"):
-            for img_name in os.listdir("img_assets"):
-                img_path = os.path.join("img_assets", img_name)
-                if os.path.isfile(img_path):
-                    zf.write(img_path, arcname=f"img_assets/{img_name}")
+        for ref in iter_attachment_refs_in_db(st.session_state.db):
+            raw = read_binary_ref(ref)
+            if raw:
+                zf.writestr(attachment_backup_path(ref), raw)
     zip_buffer.seek(0)
     st.sidebar.download_button(
         "💾 下载全量备份 (数据+图片)", data=zip_buffer,
@@ -1983,9 +2258,11 @@ try:
 except Exception as e:
     st.sidebar.warning(f"备份生成失败: {e}")
 
-restore_file = st.sidebar.file_uploader("📂 上传备份以恢复", type=['zip', 'json'])
+restore_file = st.sidebar.file_uploader("📂 上传备份以恢复", type=["zip", "json"])
 if restore_file is not None and st.sidebar.button("⚠️ 确认覆盖恢复", type="primary"):
     try:
+        restored_attachment_count = 0
+        missing_attachment_count = 0
         if restore_file.name.endswith(".zip"):
             with zipfile.ZipFile(restore_file, "r") as zf:
                 if "database.json" in zf.namelist():
@@ -1994,22 +2271,20 @@ if restore_file is not None and st.sidebar.button("⚠️ 确认覆盖恢复", t
                 else:
                     st.sidebar.error("❌ 压缩包内未找到 database.json！")
                     st.stop()
-                if not os.path.exists("img_assets"):
-                    os.makedirs("img_assets")
-                for item in zf.namelist():
-                    if item.startswith("img_assets/") and not item.endswith('/'):
-                        zf.extract(item, path=".")
+                restored_data, restored_attachment_count, missing_attachment_count = restore_attachments_from_zip(restored_data, zf)
         else:
             restored_data = json.load(restore_file)
         db_manager.save(restored_data)
         st.session_state.db = restored_data
-        st.sidebar.success("🎉 恢复成功！请手动刷新网页！")
+        msg = f"🎉 恢复成功！已恢复 {restored_attachment_count} 个附件。"
+        if missing_attachment_count > 0:
+            msg += f" 另有 {missing_attachment_count} 个附件未在备份包中找到。"
+        st.sidebar.success(msg + " 请手动刷新网页！")
     except Exception as e:
         st.sidebar.error(f"解析失败: {e}")
 
-# ==========================================
-# 模块 1：大盘与甘特图
-# ==========================================
+
+
 if menu == MENU_DASHBOARD:
     st.title(f"📊 全局大盘与进度甘特图 ({current_pm} 的视角)")
 
@@ -3040,14 +3315,18 @@ elif menu == MENU_SPECIFIC:
     
             if config_files or st.session_state.config_pasted_cache:
                 if st.button("💾 保存图片为底稿", type="secondary"):
-                    b64_drafts = []
+                    draft_refs = []
                     if config_files:
                         for f in config_files:
-                            b64_drafts.append(compress_to_b64(f.read()))
+                            img_ref = save_uploaded_file_ref(f, prefix="config_draft")
+                            if img_ref:
+                                draft_refs.append(img_ref)
                     for k, img_obj in st.session_state.config_pasted_cache.items():
-                        b64_drafts.append(compress_to_b64(img_obj))
+                        img_ref = save_image_ref_data(img_obj, filename=f"config_draft_{k}.jpg", prefix="config_draft")
+                        if img_ref:
+                            draft_refs.append(img_ref)
                         st.session_state.config_consumed_hashes.add(k)
-                    db[sel_proj]["配件清单长图"] = db[sel_proj].get("配件清单长图", []) + b64_drafts
+                    db[sel_proj]["配件清单长图"] = db[sel_proj].get("配件清单长图", []) + draft_refs
                     st.session_state.config_pasted_cache = {}
                     sync_save_db(sel_proj)
                     st.success("✅ 保存成功！")
@@ -3193,13 +3472,14 @@ elif menu == MENU_SPECIFIC:
                     st.error("❌ 新增名称为空！")
                 else:
                     new_owner_final = ", ".join([f"{k}-{v}" for k, v in role_vals.items() if v])
-                    img_b64_list    = []
+                    img_ref_list    = []
                     for img_info in preview_imgs:
                         if img_info["type"] == "paste":
-                            img_b64_list.append(compress_to_b64(img_info["data"]))
+                            img_ref = save_image_ref_data(img_info["data"], filename=f"detail_{img_info['id']}.jpg", prefix="detail")
                         else:
-                            img_info["data"].seek(0)
-                            img_b64_list.append(compress_to_b64(img_info["data"].read()))
+                            img_ref = save_uploaded_file_ref(img_info["data"], prefix="detail")
+                        if img_ref:
+                            img_ref_list.append(img_ref)
     
                     global_pause_cascade = ("🌐 全局进度 (Overall)" in comps_to_process and is_pause_stage(new_stage))
                     saved_records = 0
@@ -3235,7 +3515,7 @@ elif menu == MENU_SPECIFIC:
                         if new_stage == "立项":
                             db[sel_proj]["部件列表"][actual_c]['日志流'].append({
                                 "日期": str(detail_record_date), "流转": evt_type,
-                                "工序": "立项", "事件": base_log, "图片": img_b64_list,
+                                "工序": "立项", "事件": base_log, "图片": img_ref_list,
                                 "提审类型": review_type, "提审结果": review_result, "提审轮次": int(review_round) if review_type != "(无)" else ""
                             })
                             saved_records += 1
@@ -3248,7 +3528,7 @@ elif menu == MENU_SPECIFIC:
                         else:
                             db[sel_proj]["部件列表"][actual_c]['日志流'].append({
                                 "日期": str(detail_record_date), "流转": evt_type,
-                                "工序": new_stage, "事件": base_log, "图片": img_b64_list,
+                                "工序": new_stage, "事件": base_log, "图片": img_ref_list,
                                 "提审类型": review_type, "提审结果": review_result, "提审轮次": int(review_round) if review_type != "(无)" else ""
                             })
                             saved_records += 1
@@ -3578,13 +3858,18 @@ elif menu == MENU_FASTLOG:
         force_ai_submit = st.checkbox("⚠️ 允许强制提交（忽略阶段/提审 warning）", value=False, key="ai_force_submit")
         if st.button("💾 确认入库", type="primary"):
             td          = str(global_ai_date)
-            ai_b64_list = []
+            ai_ref_list = []
             if ai_files:
                 for f in ai_files:
-                    ai_b64_list.append(compress_to_b64(f.read()))
+                    img_ref = save_uploaded_file_ref(f, prefix="ai_note")
+                    if img_ref:
+                        ai_ref_list.append(img_ref)
             for k, img_obj in st.session_state.ai_pasted_cache.items():
-                ai_b64_list.append(compress_to_b64(img_obj))
+                img_ref = save_image_ref_data(img_obj, filename=f"ai_note_{k}.jpg", prefix="ai_note")
+                if img_ref:
+                    ai_ref_list.append(img_ref)
                 st.session_state.ai_consumed_hashes.add(k)
+
 
             learned_count = 0
             for log in edited_logs:
@@ -3622,7 +3907,7 @@ elif menu == MENU_FASTLOG:
                     final_stage = curr_stage
                 db[p]["部件列表"][target_comp]['日志流'].append({
                     "日期": td, "流转": "AI速记",
-                    "工序": final_stage, "事件": log['事件'], "图片": ai_b64_list,
+                    "工序": final_stage, "事件": log['事件'], "图片": ai_ref_list,
                     "提审类型": log.get("提审类型", "(无)"), "提审结果": log.get("提审结果", "(无)"),
                     "提审轮次": normalize_review_round(log.get("提审轮次", ""))
                 })
@@ -4366,32 +4651,37 @@ elif menu == MENU_SETTINGS:
             st.session_state.db["系统配置"]["排期基线"] = new_days
             sync_save_db()
             st.success("已更新默认计划基线！")
-            st.rerun()
-
     with st.expander("🧹 数据库瘦身 & Base64 图片迁移工具", expanded=True):
-        st.warning("⚠️ 如果 JSON 文件很大，说明旧版 Base64 图片还留在数据库里。点击下方按钮一键迁移，JSON 将大幅缩小。")
+        target_label = "GridFS 持久附件" if get_storage_attachment_mode() == "gridfs" else "本地文件引用"
+        st.warning(f"⚠️ 如果 JSON 文件很大，说明旧版 Base64 图片还留在数据库里。点击下方按钮可一键迁移到【{target_label}】。")
         json_str     = json.dumps(st.session_state.db, ensure_ascii=False)
-        json_size_mb = len(json_str.encode('utf-8')) / 1024 / 1024
+        json_size_mb = len(json_str.encode("utf-8")) / 1024 / 1024
         b64_count = 0; file_count = 0
         for p_name, p_data in st.session_state.db.items():
             if p_name == "系统配置" or not isinstance(p_data, dict): continue
             for c_data in p_data.get("部件列表", {}).values():
                 for log in c_data.get("日志流", []):
-                    for img in log.get("图片", []):
+                    imgs = log.get("图片", [])
+                    if isinstance(imgs, str):
+                        imgs = [imgs] if imgs else []
+                    for img in imgs:
                         if isinstance(img, str):
-                            if img.startswith("FILE:"): file_count += 1
-                            elif len(img) > 100:        b64_count  += 1
-            for img in p_data.get("配件清单长图", []):
+                            if is_attachment_ref(img): file_count += 1
+                            elif len(img) > 100:      b64_count  += 1
+            drafts = p_data.get("配件清单长图", [])
+            if isinstance(drafts, str):
+                drafts = [drafts] if drafts else []
+            for img in drafts:
                 if isinstance(img, str):
-                    if img.startswith("FILE:"): file_count += 1
-                    elif len(img) > 100:        b64_count  += 1
+                    if is_attachment_ref(img): file_count += 1
+                    elif len(img) > 100:      b64_count  += 1
         col_s1, col_s2, col_s3 = st.columns(3)
-        col_s1.metric("📦 JSON 当前体积",      f"{json_size_mb:.1f} MB")
+        col_s1.metric("📦 JSON 当前体积", f"{json_size_mb:.1f} MB")
         col_s2.metric("🖼️ 待迁移 Base64 图片", f"{b64_count} 张")
-        col_s3.metric("✅ 已迁移文件图片",      f"{file_count} 张")
+        col_s3.metric("✅ 已迁移附件引用", f"{file_count} 张")
 
         if b64_count > 0:
-            if st.button("🚀 一键迁移：将所有 Base64 图片转存为本地文件", type="primary"):
+            if st.button(f"🚀 一键迁移：将所有 Base64 图片转存为{target_label}", type="primary"):
                 migrated = 0; errors = 0
                 progress = st.progress(0, text="迁移中...")
                 all_refs = []
@@ -4400,38 +4690,40 @@ elif menu == MENU_SETTINGS:
                     for c_data in p_data.get("部件列表", {}).values():
                         for log in c_data.get("日志流", []):
                             imgs = log.get("图片", [])
+                            if isinstance(imgs, str):
+                                continue
                             for idx, img in enumerate(imgs):
-                                if isinstance(img, str) and not img.startswith("FILE:") and len(img) > 100:
+                                if isinstance(img, str) and not is_attachment_ref(img) and len(img) > 100:
                                     all_refs.append((imgs, idx))
-                    for idx, img in enumerate(p_data.get("配件清单长图", [])):
-                        if isinstance(img, str) and not img.startswith("FILE:") and len(img) > 100:
-                            all_refs.append((p_data["配件清单长图"], idx))
+                    drafts = p_data.get("配件清单长图", [])
+                    if isinstance(drafts, list):
+                        for idx, img in enumerate(drafts):
+                            if isinstance(img, str) and not is_attachment_ref(img) and len(img) > 100:
+                                all_refs.append((drafts, idx))
                 total = len(all_refs)
-                if not os.path.exists(IMG_DIR): os.makedirs(IMG_DIR)
                 for i, (container, idx) in enumerate(all_refs):
                     try:
-                        b64_str    = container[idx]
-                        img_bytes  = base64.b64decode(b64_str)
-                        file_name  = f"migrated_{uuid.uuid4().hex}.jpg"
-                        file_path  = os.path.join(IMG_DIR, file_name)
-                        img        = Image.open(io.BytesIO(img_bytes))
-                        if img.mode in ("RGBA", "P"): img = img.convert("RGB")
-                        img.thumbnail((1000, 1000), Image.Resampling.LANCZOS)
-                        img.save(file_path, format="JPEG", quality=70)
-                        container[idx] = f"FILE:{file_name}"
-                        migrated += 1
-                    except:
+                        b64_str = container[idx]
+                        img_bytes = base64.b64decode(b64_str)
+                        new_ref = save_image_ref_data(img_bytes, filename=f"migrated_{uuid.uuid4().hex}.jpg", prefix="migrated")
+                        if new_ref:
+                            container[idx] = new_ref
+                            migrated += 1
+                        else:
+                            errors += 1
+                    except Exception:
                         errors += 1
-                    progress.progress((i + 1) / total, text=f"迁移中... {i+1}/{total}")
+                    progress.progress((i + 1) / max(total, 1), text=f"迁移中... {i+1}/{max(total, 1)}")
                 sync_save_db()
                 new_json_str  = json.dumps(st.session_state.db, ensure_ascii=False)
-                new_size_mb   = len(new_json_str.encode('utf-8')) / 1024 / 1024
+                new_size_mb   = len(new_json_str.encode("utf-8")) / 1024 / 1024
                 saved_mb      = json_size_mb - new_size_mb
-                st.success(f"🎉 迁移完成！成功 {migrated} 张，失败 {errors} 张。"
-                           f"JSON 从 {json_size_mb:.1f}MB → {new_size_mb:.1f}MB，节省 {saved_mb:.1f}MB！")
+                st.success(f"🎉 迁移完成！成功 {migrated} 张，失败 {errors} 张。JSON 从 {json_size_mb:.1f}MB → {new_size_mb:.1f}MB，节省 {saved_mb:.1f}MB！")
                 st.rerun()
         else:
             st.success("✅ 数据库已是最优状态，无需迁移！")
+            st.success("? ???????????????")
+            st.success("? ???????????????")
 
         st.divider()
         st.markdown("#### 🗜️ 图片重新压缩（进一步缩小 img_assets 目录）")
