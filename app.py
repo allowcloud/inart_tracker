@@ -192,6 +192,146 @@ if "is_hidden_system_log" not in globals():
     def is_hidden_system_log(log_obj):
         return False
 
+def save_uploaded_file_ref(file_obj, prefix="upload"):
+    if file_obj is None:
+        return ""
+    if not os.path.exists(IMG_DIR):
+        os.makedirs(IMG_DIR)
+    ext = os.path.splitext(getattr(file_obj, 'name', '') or '')[1].lower() or '.jpg'
+    fname = f"{prefix}_{uuid.uuid4().hex}{ext}"
+    fpath = os.path.join(IMG_DIR, fname)
+    with open(fpath, 'wb') as f:
+        f.write(file_obj.read())
+    return f"FILE:{fname}"
+
+def norm_text(s):
+    return re.sub(r'\s+', '', str(s or '').strip()).lower()
+
+def resolve_alias_project(name, project_alias_map):
+    n = norm_text(name)
+    if not n:
+        return name
+    return project_alias_map.get(n, name)
+
+def get_visible_projects(db_obj, current_pm):
+    """按负责人过滤 + 别名去重：若A被映射到已存在的B，则默认隐藏A。"""
+    alias_map = db_obj.get("系统配置", {}).get("项目别名", {})
+    raw = [p for p, d in db_obj.items()
+           if p != "系统配置" and
+           (current_pm == "所有人" or str(d.get('负责人', '')).strip() == current_pm)]
+    out = []
+    for p in raw:
+        canonical = resolve_alias_project(p, alias_map)
+        if canonical != p and canonical in db_obj:
+            continue
+        out.append(p)
+
+    def _latest_log_date(proj_name):
+        latest = datetime.date.min
+        for comp in db_obj.get(proj_name, {}).get("部件列表", {}).values():
+            for lg in comp.get("日志流", []):
+                if is_hidden_system_log(lg):
+                    continue
+                try:
+                    dt = datetime.datetime.strptime(lg.get("日期", ""), "%Y-%m-%d").date()
+                except:
+                    continue
+                if dt > latest:
+                    latest = dt
+        return latest
+
+    def _is_paused(proj_name):
+        pd = db_obj.get(proj_name, {})
+        if str(pd.get("Milestone", "")).strip() == "暂停研发":
+            return True
+        comps = pd.get("部件列表", {})
+        gk = next((k for k in comps.keys() if "全局" in k), "全局进度")
+        return is_pause_stage(comps.get(gk, {}).get("主流程", ""))
+
+    def _is_finished(proj_name):
+        return str(db_obj.get(proj_name, {}).get("Milestone", "")).strip() in ["生产结束", "项目结束撒花🎉", "✅ 已完成(结束)"]
+
+    # 项目列表排序：进行中在前，暂停在中，完结在后；同组按最近更新倒序
+    out.sort(key=lambda p: (
+        1 if _is_paused(p) else (2 if _is_finished(p) else 0),
+        -_latest_log_date(p).toordinal(),
+        p
+    ))
+    return out
+
+def is_hidden_system_log(log_obj):
+    evt = str((log_obj or {}).get("事件", ""))
+    return "[系统自动追踪]" in evt
+
+def collect_stage_activity(raw_logs, stages):
+    """从日志提取阶段活跃/完成状态，降低主循环缩进复杂度（防 merge 缩进回归）。"""
+    active_stages = set(); completed_stages = set()
+    for log in raw_logs:
+        stg = log.get('工序', ''); evt = log.get('事件', '')
+        if stg in stages:
+            active_stages.add(stg)
+            if any(k in evt for k in ["彻底完成", "OK", "通过", "完结", "结束", "撒花"]):
+                active_stages.discard(stg); completed_stages.add(stg)
+    if active_stages or completed_stages:
+        active_stages.discard("立项"); completed_stages.add("立项")
+    return active_stages, completed_stages
+
+def get_project_production_start_date(proj_data):
+    """推断项目进入生产期（工厂复样/大货或里程碑设为生产中）的起始日期。"""
+    comps = (proj_data or {}).get("部件列表", {})
+    global_key = next((k for k in comps.keys() if "全局" in k), "全局进度")
+    global_logs = comps.get(global_key, {}).get("日志流", [])
+    date_candidates = []
+    for log in global_logs:
+        evt = str(log.get("事件", ""))
+        stg = str(log.get("工序", ""))
+        is_prod_hint = (
+            stg in ["工厂复样(含胶件/上色等)", "大货"] or
+            "阶段:生产中" in evt
+        )
+        if not is_prod_hint:
+            continue
+        try:
+            dt = datetime.datetime.strptime(log.get("日期", ""), "%Y-%m-%d").date()
+        except:
+            continue
+        date_candidates.append(dt)
+    if not date_candidates:
+        return None
+    return min(date_candidates)
+
+def is_late_added_component(comp_name, comp_info, production_start_date, factory_idx, stages):
+    """区分生产期后新增零件：允许其独立从早期阶段重新走。"""
+    if "全局" in str(comp_name):
+        return False
+    if not production_start_date:
+        return False
+
+    cur_stage = str((comp_info or {}).get("主流程", "")).strip()
+    cur_idx = stages.index(cur_stage) if cur_stage in stages else 0
+    if cur_idx >= factory_idx:
+        return False
+
+    logs = [lg for lg in (comp_info or {}).get("日志流", []) if not is_hidden_system_log(lg)]
+    if not logs:
+        return True
+
+    first_dt = None
+    for lg in logs:
+        try:
+            dt = datetime.datetime.strptime(lg.get("日期", ""), "%Y-%m-%d").date()
+        except:
+            continue
+        first_dt = dt if first_dt is None else min(first_dt, dt)
+    if first_dt is None:
+        return False
+    return first_dt >= production_start_date
+
+# 防御式兜底：若后续 merge 冲突误删了函数定义，至少保证运行期不 NameError
+if "is_hidden_system_log" not in globals():
+    def is_hidden_system_log(log_obj):
+        return False
+
 # ==========================================
 # 1. 页面基础配置与核心变量
 # ==========================================
@@ -3312,16 +3452,6 @@ if menu == MENU_DASHBOARD:
             show_df.style.map(_hl_warn, subset=["开定延迟预警", "发货延迟预警"]),
             use_container_width=True
         )
-
-            if skipped_dynamic_confirm:
-                st.warning(f"以下项目修改了【最新全盘动态】但未确认动态修改方式，已跳过：{', '.join(sorted(set(skipped_dynamic_confirm)))}")
-            if changed_projects:
-                for cp in sorted(set(changed_projects)):
-                    sync_save_db(cp)
-                st.success(f"已更新 {len(set(changed_projects))} 个项目。")
-                st.rerun()
-            else:
-                st.info("未检测到变更。")
 
         with st.expander("只读预览（含临期预警样式）", expanded=False):
             st.dataframe(

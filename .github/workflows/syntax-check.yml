@@ -16,6 +16,9 @@ jobs:
       - name: Python compile check
         run: |
           python -m py_compile app.py app_backup_before_sync.py project_admin.py
+      - name: Indentation sanity check
+        run: |
+          python -m tabnanny app.py app_backup_before_sync.py project_admin.py
       - name: Conflict marker check
         run: |
           if grep -R -n -E '^(<<<<<<<|=======|>>>>>>>)' -- . ; then
