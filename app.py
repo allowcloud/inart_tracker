@@ -1,4 +1,4 @@
-﻿import streamlit as st
+import streamlit as st
 import json
 import os
 import datetime
@@ -42,11 +42,11 @@ st.markdown(
 DEFAULT_SYS_CFG = {
     "标准部件": ["头雕(表情)", "素体", "手型", "服装", "配件", "地台", "包装"],
     "标准阶段": [
-        "立项", "建模(含打印/签样)", "涂装", "设计", "工程拆件", "手板/结构板", "官图",
+        "立项", "建模(含打印/签样)", "涂装", "设计", "工程拆件", "手板/结构板", "官图", "开模",
         "工厂复样(含胶件/上色等)", "大货", "⏸️ 暂停/搁置", "✅ 已完成(结束)"
     ],
-    "宏观阶段": ["立项", "建模", "设计", "工程", "模具", "修模", "生产", "暂停", "结束"],
-    "排期基线": {"立项": 7, "建模": 42, "设计": 35, "工程": 49, "模具": 28, "修模": 14, "生产": 30},
+    "宏观阶段": ["立项", "建模", "设计", "工程", "开模", "修模", "生产", "暂停", "结束"],
+    "排期基线": {"立项": 7, "建模": 42, "设计": 35, "工程": 49, "开模": 28, "修模": 14, "生产": 30},
     "AI_COMP_KW": {},
     "AI_STAGE_KW": {},
     "项目别名": {},
@@ -321,6 +321,28 @@ STD_COMPONENTS = list(SYS_CFG.get("标准部件", DEFAULT_SYS_CFG["标准部件"
 MACRO_STAGES = list(SYS_CFG.get("宏观阶段", DEFAULT_SYS_CFG["宏观阶段"]))
 
 
+def ensure_ordered_value(seq, value, after=None, before=None):
+    arr = list(seq or [])
+    if value in arr:
+        return arr
+    if after and after in arr:
+        arr.insert(arr.index(after) + 1, value)
+        return arr
+    if before and before in arr:
+        arr.insert(arr.index(before), value)
+        return arr
+    arr.append(value)
+    return arr
+
+
+STAGES_UNIFIED = ensure_ordered_value(STAGES_UNIFIED, "开模", after="官图")
+MACRO_STAGES = ["开模" if str(x) == "模具" else str(x) for x in MACRO_STAGES]
+MACRO_STAGES = ensure_ordered_value(list(dict.fromkeys(MACRO_STAGES)), "开模", before="修模")
+SYS_CFG.setdefault("排期基线", DEFAULT_SYS_CFG["排期基线"].copy())
+if "模具" in SYS_CFG["排期基线"] and "开模" not in SYS_CFG["排期基线"]:
+    SYS_CFG["排期基线"]["开模"] = SYS_CFG["排期基线"].get("模具", 28)
+SYS_CFG["排期基线"].setdefault("开模", 28)
+
 def is_pause_stage(stage):
     s = str(stage or "")
     return ("暂停" in s) or ("搁置" in s)
@@ -344,24 +366,27 @@ def quarter_to_deadline(qtxt):
 
 def get_macro_phase(detail_stage):
     s = str(detail_stage or "").strip()
-    if any(x in s for x in ["完成", "结束", "撒花"]):
-        return "结束"
+    if not s:
+        return ""
     if is_pause_stage(s):
         return "暂停"
+    if any(x in s for x in ["完成", "结束", "撒花"]):
+        return "结束"
+    if any(x in s for x in ["修模", "改模"]):
+        return "修模"
+    if any(x in s for x in ["开模", "模具", "试模", "钢模"]):
+        return "开模"
     if any(x in s for x in ["大货", "复样", "量产", "生产", "下模"]):
         return "生产"
-    if any(x in s for x in ["手板", "结构", "拆件", "工程"]):
+    if any(x in s for x in ["手板", "结构", "拆件", "工程", "官图"]):
         return "工程"
-    if "模具" in s:
-        return "模具"
-    if any(x in s for x in ["设计", "官图"]):
+    if "设计" in s:
         return "设计"
-    if any(x in s for x in ["建模", "打印"]):
+    if any(x in s for x in ["建模", "打印", "涂装"]):
         return "建模"
     if "立项" in s:
         return "立项"
-    return "工程"
-
+    return "建模" if "资料" in s else ""
 
 def validate_transition_warning(curr_stage, new_stage, stages):
     try:
@@ -1067,6 +1092,128 @@ def todo_link_status_text(td):
     return " / ".join(parts)
 
 
+def collect_role_person_options():
+    labels = []
+    name_map = {}
+    for proj_name, proj_data in db.items():
+        if proj_name == "系统配置" or not isinstance(proj_data, dict):
+            continue
+        for comp_data in proj_data.get("部件列表", {}).values():
+            owner_str = str(comp_data.get("负责人", "")).strip()
+            for pair in re.split(r'[,，|/]+', owner_str):
+                pair = pair.strip()
+                if not pair or pair == "未分配":
+                    continue
+                if '-' in pair:
+                    role, person = pair.split('-', 1)
+                elif ':' in pair:
+                    role, person = pair.split(':', 1)
+                else:
+                    role, person = "综合", pair
+                role = role.strip()
+                person = person.strip()
+                if not person:
+                    continue
+                label = f"{role}-{person}" if role and role != "综合" else person
+                if label not in labels:
+                    labels.append(label)
+                key = norm_text(person)
+                info = name_map.setdefault(key, {"display": person, "labels": []})
+                if label not in info["labels"]:
+                    info["labels"].append(label)
+    labels = sorted(labels, key=lambda x: (x.split('-', 1)[0] if '-' in x else "综合", x.split('-', 1)[-1]))
+    return labels, name_map
+
+
+def split_people_text(raw_text):
+    return [x.strip() for x in re.split(r'[,，;；、/|\n]+', str(raw_text or "")) if x.strip()]
+
+
+def normalize_people_text(raw_text):
+    uniq = []
+    for token in split_people_text(raw_text):
+        if token not in uniq:
+            uniq.append(token)
+    return ", ".join(uniq)
+
+
+def infer_todo_people_bundle(td):
+    td_obj = td or {}
+    labels, name_map = collect_role_person_options()
+    label_map = {norm_text(label): label for label in labels}
+    matched, ambiguous, unknown = [], [], []
+
+    def add_match(label):
+        if label and label not in matched:
+            matched.append(label)
+
+    def add_amb(msg):
+        if msg and msg not in ambiguous:
+            ambiguous.append(msg)
+
+    def add_unknown(token):
+        if token and token not in unknown:
+            unknown.append(token)
+
+    for token in split_people_text(td_obj.get("关联人员", "")):
+        token_norm = norm_text(token)
+        if token_norm in label_map:
+            add_match(label_map[token_norm])
+            continue
+        info = name_map.get(token_norm)
+        if info:
+            if len(info["labels"]) == 1:
+                add_match(info["labels"][0])
+            else:
+                add_amb(f"{info['display']} -> {' / '.join(info['labels'][:3])}")
+        else:
+            add_unknown(token)
+
+    free_text = f"{str(td_obj.get('任务', '')).strip()} {todo_cpddl_text(td_obj)}".strip()
+    txt_norm = norm_text(free_text)
+    for label in labels:
+        label_norm = norm_text(label)
+        if label_norm and label_norm in txt_norm:
+            add_match(label)
+    for name_key, info in name_map.items():
+        display = info["display"]
+        if not ((display and display in free_text) or (name_key and name_key in txt_norm)):
+            continue
+        if any(label in matched for label in info["labels"]):
+            continue
+        if len(info["labels"]) == 1:
+            add_match(info["labels"][0])
+        else:
+            add_amb(f"{display} -> {' / '.join(info['labels'][:3])}")
+
+    for pat in [
+        r'(?:-|给|找|催|问|和|跟|让|owner[:：\-]?)\s*([A-Za-z][A-Za-z0-9_\-]{1,20}|[\u4e00-\u9fa5]{2,4})',
+        r'([A-Za-z][A-Za-z0-9_\-]{1,20}|[\u4e00-\u9fa5]{2,4})\s*(?:确认|跟进|处理|回复|反馈)'
+    ]:
+        for m in re.finditer(pat, free_text):
+            candidate = str(m.group(1)).strip()
+            candidate_norm = norm_text(candidate)
+            if candidate_norm in label_map or candidate_norm in name_map:
+                continue
+            if any(candidate in label for label in matched):
+                continue
+            add_unknown(candidate)
+
+    return {"labels": matched, "ambiguous": ambiguous, "unknown": unknown}
+
+
+def format_todo_people_hint(td):
+    bundle = infer_todo_people_bundle(td)
+    notes = []
+    if bundle["labels"]:
+        notes.append("已识别：" + " / ".join(bundle["labels"][:3]))
+    if bundle["ambiguous"]:
+        notes.append("待确认：" + "；".join(bundle["ambiguous"][:2]))
+    if bundle["unknown"]:
+        notes.append("待补充：" + " / ".join(bundle["unknown"][:2]))
+    return " | ".join(notes) if notes else "未识别到人员"
+
+
 def infer_todo_handoff_prefill(td, proj_name):
     td_obj = td or {}
     proj = str(proj_name or "").strip()
@@ -1075,22 +1222,22 @@ def infer_todo_handoff_prefill(td, proj_name):
     comp_hits = []
     proj_comps = list(db.get(proj, {}).get("部件列表", {}).keys())
     for comp in proj_comps:
-        if "全局" in comp:
-            continue
         variants = {str(comp).strip()}
         if " - " in str(comp):
             variants.add(str(comp).split(" - ", 1)[1].strip())
+        if "全局" in str(comp):
+            variants.add("全局")
+            variants.add("整体")
         for std_comp in STD_COMPONENTS:
             if str(comp).startswith(std_comp):
                 variants.add(std_comp)
                 variants.add(re.sub(r"\(.*?\)", "", std_comp).strip())
-        hit = False
-        for vv in [v for v in variants if v]:
-            if vv in txt or norm_text(vv) in txt_norm:
-                hit = True
-                break
-        if hit and comp not in comp_hits:
-            comp_hits.append(comp)
+        if any(v and ((v in txt) or (norm_text(v) in txt_norm)) for v in variants):
+            if "全局" in str(comp):
+                if "🌐 全局进度 (Overall)" not in comp_hits:
+                    comp_hits.append("🌐 全局进度 (Overall)")
+            elif comp not in comp_hits:
+                comp_hits.append(comp)
 
     if not comp_hits:
         for std_comp in STD_COMPONENTS:
@@ -1098,16 +1245,18 @@ def infer_todo_handoff_prefill(td, proj_name):
             if (base and base in txt) or (norm_text(std_comp) in txt_norm):
                 comp_hits.append(std_comp)
                 break
+    if not comp_hits and any(k in txt for k in ["全局", "整体", "项目", "大盘"]):
+        comp_hits = ["🌐 全局进度 (Overall)"]
 
     stage_guess = ""
     stage_kw = [
-        ("开定", "立项"), ("立项", "立项"), ("建模", "建模(含打印/签样)"),
-        ("打印", "建模(含打印/签样)"), ("涂装", "涂装"), ("设计", "设计"),
-        ("官图", "官图"), ("拆件", "工程拆件"), ("工程", "工程拆件"),
+        ("开定", "立项"), ("立项", "立项"), ("资料", "建模(含打印/签样)"),
+        ("建模", "建模(含打印/签样)"), ("打印", "建模(含打印/签样)"), ("涂装", "涂装"),
+        ("设计", "设计"), ("官图", "官图"), ("拆件", "工程拆件"), ("工程", "工程拆件"),
         ("结构件", "工程拆件"), ("手板", "手板/结构板"), ("结构板", "手板/结构板"),
+        ("开模", "开模"), ("模具", "开模"), ("试模", "开模"),
         ("复样", "工厂复样(含胶件/上色等)"), ("上色", "工厂复样(含胶件/上色等)"),
-        ("大货", "大货"), ("包装", "包装"), ("暂停", "⏸️ 暂停/搁置"),
-        ("完成", "✅ 已完成(结束)")
+        ("大货", "大货"), ("暂停", "⏸️ 暂停/搁置"), ("完成", "✅ 已完成(结束)"), ("结束", "✅ 已完成(结束)")
     ]
     for kw, stage_name in stage_kw:
         if kw in txt:
@@ -1115,27 +1264,497 @@ def infer_todo_handoff_prefill(td, proj_name):
             break
     if not stage_guess:
         for stg in STAGES_UNIFIED:
-            if norm_text(stg) and norm_text(stg) in txt_norm:
+            stg_norm = norm_text(stg)
+            if stg_norm and stg_norm in txt_norm:
                 stage_guess = stg
                 break
+
+    people_bundle = infer_todo_people_bundle(td_obj)
+    role_map = {}
+    for label in people_bundle["labels"]:
+        if '-' not in label:
+            continue
+        role, person = label.split('-', 1)
+        role = role.strip()
+        person = person.strip()
+        if role in ["建模", "设计", "工程", "监修", "打印", "涂装"] and person:
+            role_map[role] = person
 
     log_txt = str(td_obj.get("任务", "")).strip()
     cpddl = todo_cpddl_text(td_obj)
     if cpddl:
         log_txt = f"{log_txt} | {cpddl}" if log_txt else cpddl
     if not log_txt:
-        log_txt = "To do 联动更新"
-
-    if not comp_hits:
-        comp_hits = ["🌐 全局进度 (Overall)"]
+        log_txt = "To do 联动补充"
 
     return {
         "项目": proj,
         "todo_ids": [str(td_obj.get("_id", "")).strip()] if str(td_obj.get("_id", "")).strip() else [],
-        "部件": comp_hits,
+        "部件": comp_hits or ["🌐 全局进度 (Overall)"],
         "阶段": stage_guess,
         "内容": log_txt,
+        "角色映射": role_map,
     }
+
+
+def add_months(base_date, delta_months):
+    year = base_date.year + (base_date.month - 1 + delta_months) // 12
+    month = (base_date.month - 1 + delta_months) % 12 + 1
+    day = min(base_date.day, month_last_day(year, month))
+    return datetime.date(year, month, day)
+
+
+def _parse_log_date(log_obj):
+    try:
+        return datetime.datetime.strptime(str((log_obj or {}).get("日期", "")), "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def infer_current_macro_stages(proj_data):
+    proj_obj = proj_data or {}
+    current = set()
+    for comp_info in proj_obj.get("部件列表", {}).values():
+        macro = get_macro_phase(comp_info.get("主流程", ""))
+        if macro and macro not in ["立项", "暂停", "结束"]:
+            current.add(macro)
+    milestone = str(proj_obj.get("Milestone", "")).strip()
+    if milestone == "暂停研发":
+        current.add("暂停")
+    elif milestone == "下模中":
+        current.add("开模")
+    elif milestone == "生产中":
+        current.add("生产")
+    elif milestone in ["研发中", "待开定", "已开定", "待立项"] and not current:
+        current.add("建模")
+    return current
+
+
+def build_project_stage_segments(proj_label, proj_data):
+    comps = (proj_data or {}).get("部件列表", {})
+    stage_records = {k: [] for k in ["立项", "建模", "设计", "工程", "开模", "修模", "生产", "暂停", "结束"]}
+    all_records = []
+    today = datetime.date.today()
+
+    for comp_name, comp_info in comps.items():
+        for log in comp_info.get("日志流", []):
+            if is_hidden_system_log(log):
+                continue
+            dt_obj = _parse_log_date(log)
+            if not dt_obj:
+                continue
+            raw_stage = str(log.get("工序", comp_info.get("主流程", ""))).strip()
+            macro = get_macro_phase(raw_stage)
+            if not macro:
+                continue
+            evt = str(log.get("事件", "")).strip()
+            entry = {
+                "date": dt_obj,
+                "stage": macro,
+                "component": comp_name,
+                "event": evt,
+                "review_type": str(log.get("提审类型", "")).strip(),
+                "review_result": str(log.get("提审结果", "")).strip(),
+                "review_round": str(log.get("提审轮次", "")).strip(),
+                "raw_stage": raw_stage,
+            }
+            stage_records.setdefault(macro, []).append(entry)
+            all_records.append(entry)
+
+    if not all_records:
+        return []
+
+    all_records = sorted(all_records, key=lambda x: (x["date"], x["stage"], x["component"], x["event"]))
+    first_date = all_records[0]["date"]
+    latest_date = all_records[-1]["date"]
+    unique_dates = sorted({x["date"] for x in all_records})
+    second_date = next((d for d in unique_dates if d > first_date), None)
+    current_macros = infer_current_macro_stages(proj_data)
+    milestone = str((proj_data or {}).get("Milestone", "")).strip()
+
+    if not stage_records["立项"]:
+        stage_records["立项"].append({
+            "date": first_date,
+            "stage": "立项",
+            "component": "全局进度",
+            "event": "项目首次出现，立项按 1 天展示",
+            "review_type": "",
+            "review_result": "",
+            "review_round": "",
+            "raw_stage": "立项",
+            "synthetic": True,
+        })
+
+    if not stage_records["建模"] and milestone not in ["暂停研发", "生产结束", "项目结束撒花🎉", "✅ 已完成(结束)"]:
+        if len(unique_dates) > 1 or milestone in ["研发中", "待开定", "已开定", "下模中", "生产中"]:
+            build_seed = second_date or (first_date + datetime.timedelta(days=1))
+            stage_records["建模"].append({
+                "date": build_seed,
+                "stage": "建模",
+                "component": "全局进度",
+                "event": "立项后默认转入建模（甘特自动归类）",
+                "review_type": "",
+                "review_result": "",
+                "review_round": "",
+                "raw_stage": "建模(含打印/签样)",
+                "synthetic": True,
+            })
+
+    if "开模" in current_macros and not stage_records["开模"]:
+        mold_seed = max(
+            [max([x["date"] for x in stage_records[s]]) for s in ["建模", "设计", "工程"] if stage_records[s]],
+            default=second_date or (first_date + datetime.timedelta(days=1))
+        )
+        stage_records["开模"].append({
+            "date": mold_seed,
+            "stage": "开模",
+            "component": "全局进度",
+            "event": "里程碑已进入开模/下模，甘特自动补足开模阶段",
+            "review_type": "",
+            "review_result": "",
+            "review_round": "",
+            "raw_stage": "开模",
+            "synthetic": True,
+        })
+
+    if "生产" in current_macros and not stage_records["生产"]:
+        prod_seed = max(
+            [max([x["date"] for x in stage_records[s]]) for s in ["开模", "修模", "工程", "设计", "建模"] if stage_records[s]],
+            default=latest_date
+        )
+        stage_records["生产"].append({
+            "date": prod_seed,
+            "stage": "生产",
+            "component": "全局进度",
+            "event": "里程碑已进入生产，甘特自动补足生产阶段",
+            "review_type": "",
+            "review_result": "",
+            "review_round": "",
+            "raw_stage": "生产",
+            "synthetic": True,
+        })
+
+    mold_start = min([x["date"] for x in stage_records["开模"]], default=None)
+    segments = []
+
+    def _detail_lines(records, prefix_note=""):
+        lines = []
+        if prefix_note:
+            lines.append(prefix_note)
+        for rec in sorted(records, key=lambda x: (x["date"], x["component"], x["event"])):
+            rv_txt = ""
+            if rec.get("review_type") and rec["review_type"] != "(无)":
+                rv_txt = f" | 提审:{rec['review_type']}"
+                if rec.get("review_result") and rec["review_result"] != "(无)":
+                    rv_txt += f"/{rec['review_result']}"
+                if rec.get("review_round"):
+                    rv_txt += f"/第{rec['review_round']}轮"
+            evt = rec.get("event") or rec.get("raw_stage") or "阶段记录"
+            lines.append(f"• [{rec['date']}] [{rec['component']}] {evt}{rv_txt}")
+        return "<br>".join(lines)
+
+    launch_records = stage_records["立项"]
+    if launch_records:
+        launch_start = min(x["date"] for x in launch_records)
+        segments.append({
+            "项目": proj_label,
+            "工序阶段": "立项",
+            "Start": launch_start.strftime("%Y-%m-%d"),
+            "Finish": (launch_start + datetime.timedelta(days=1)).strftime("%Y-%m-%d"),
+            "详情": _detail_lines(launch_records, "• 立项固定按 1 天展示；后续补资料默认归入建模口径"),
+        })
+
+    for stage in ["建模", "设计", "工程", "开模", "修模", "生产"]:
+        records = stage_records.get(stage, [])
+        if not records:
+            continue
+        start_dt = min(x["date"] for x in records)
+        finish_dt = max(x["date"] for x in records) + datetime.timedelta(days=1)
+        if stage in current_macros:
+            finish_dt = max(finish_dt, today + datetime.timedelta(days=1))
+        if stage in ["建模", "设计", "工程"] and mold_start and start_dt < mold_start:
+            finish_dt = min(finish_dt, mold_start)
+        if finish_dt <= start_dt:
+            finish_dt = start_dt + datetime.timedelta(days=1)
+        segments.append({
+            "项目": proj_label,
+            "工序阶段": stage,
+            "Start": start_dt.strftime("%Y-%m-%d"),
+            "Finish": finish_dt.strftime("%Y-%m-%d"),
+            "详情": _detail_lines(records),
+        })
+
+    pause_dates = sorted({x["date"] for x in stage_records.get("暂停", [])})
+    resume_dates = sorted({x["date"] for x in all_records if x["stage"] != "暂停"})
+    for pause_dt in pause_dates:
+        resume_dt = next((d for d in resume_dates if d > pause_dt), None)
+        finish_dt = resume_dt or (today + datetime.timedelta(days=1))
+        if finish_dt <= pause_dt:
+            finish_dt = pause_dt + datetime.timedelta(days=1)
+        records = [x for x in stage_records.get("暂停", []) if x["date"] == pause_dt]
+        segments.append({
+            "项目": proj_label,
+            "工序阶段": "暂停",
+            "Start": pause_dt.strftime("%Y-%m-%d"),
+            "Finish": finish_dt.strftime("%Y-%m-%d"),
+            "详情": _detail_lines(records),
+        })
+
+    end_records = stage_records.get("结束", [])
+    if end_records:
+        end_dt = min(x["date"] for x in end_records)
+        segments.append({
+            "项目": proj_label,
+            "工序阶段": "结束",
+            "Start": end_dt.strftime("%Y-%m-%d"),
+            "Finish": (end_dt + datetime.timedelta(days=1)).strftime("%Y-%m-%d"),
+            "详情": _detail_lines(end_records),
+        })
+
+    return segments
+
+
+def render_pm_todo_manager(valid_projs, current_pm):
+    st.subheader("🗂️ To do List（CP/DDL 合并）")
+    st.caption("To do 只保留任务、DDL/CP、关联项目、关联人员。图片统一在进度明细里补，避免待办面板过重。")
+    cfg = db.setdefault("系统配置", {})
+    todo_all = cfg.setdefault("PM_TODO_LIST", [])
+    todo_proj_options = ["(不关联项目)"] + valid_projs
+    scope_options = [x for x in dict.fromkeys(["所有人", current_pm, *[str(db.get(p, {}).get("负责人", "")).strip() for p in valid_projs], "Mo", "越", "袁"]) if x]
+    role_person_options, _ = collect_role_person_options()
+
+    touched = False
+    today = datetime.date.today()
+    for td in todo_all:
+        if not str(td.get("_id", "")).strip():
+            td["_id"] = uuid.uuid4().hex[:10]
+            touched = True
+        td.setdefault("任务", "")
+        td.setdefault("关联项目", "")
+        td.setdefault("关联人员", "")
+        td.setdefault("完成", False)
+        td.setdefault("创建", str(today))
+        td.setdefault("最近联动模块", "")
+        td.setdefault("最近联动日期", "")
+        td.setdefault("最近联动项目", "")
+        td.setdefault("最近联动部件", "")
+        td.setdefault("最近联动阶段", "")
+        td.setdefault("最近联动写入时间", "")
+        scope_val = str(td.get("所属视角", "")).strip()
+        if scope_val not in scope_options:
+            td["所属视角"] = current_pm if current_pm != "所有人" else "所有人"
+            touched = True
+        merged = todo_cpddl_text(td)
+        if str(td.get("CPDDL", "")).strip() != merged:
+            td["CPDDL"] = merged
+            touched = True
+        if str(td.get("CP", "")).strip() != merged:
+            td["CP"] = merged
+            touched = True
+        due_dt = extract_deadline_from_text(merged)
+        due_txt = str(due_dt) if due_dt else ""
+        if str(td.get("DDL", "")).strip() != due_txt:
+            td["DDL"] = due_txt
+            touched = True
+        normalized_people = normalize_people_text(td.get("关联人员", ""))
+        if str(td.get("关联人员", "")).strip() != normalized_people:
+            td["关联人员"] = normalized_people
+            touched = True
+    if touched:
+        sync_save_db("系统配置")
+
+    todo_list = [td for td in todo_all if todo_visible_for_view(td, current_pm)]
+    pending = [x for x in todo_list if not x.get("完成")]
+    overdue = [x for x in pending if todo_due_date(x) and (todo_due_date(x) - today).days < 0]
+    near_due = [x for x in pending if todo_due_date(x) and 0 <= (todo_due_date(x) - today).days <= 3]
+    linked_pending = [x for x in pending if str(x.get("关联项目", "")).strip()]
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("未完成", len(pending))
+    m2.metric("已逾期", len(overdue))
+    m3.metric("3天内到期", len(near_due))
+    m4.metric("已关联项目", len(linked_pending))
+
+    with st.container(border=True):
+        st.markdown("##### 新增待办")
+        st.caption("支持先选关联人员；如果你只写“宇涵”，系统会优先匹配历史库里的“设计-宇涵”等唯一人选。")
+        c1, c2, c3, c4 = st.columns([2.5, 1.6, 1.5, 1.0])
+        with c1:
+            todo_title = st.text_input("任务", key="todo_title_global", placeholder="例：3/7 金克丝 T2 结构件确认")
+        with c2:
+            todo_cpddl = st.text_input("CP/DDL(合并)", key="todo_cpddl_global", placeholder="例：3/7 结构件确认")
+        with c3:
+            todo_ref_proj = st.selectbox("关联项目", todo_proj_options, key="todo_ref_global")
+        with c4:
+            if current_pm == "所有人":
+                todo_scope = st.selectbox("所属视角", scope_options, key="todo_scope_global")
+            else:
+                todo_scope = current_pm
+                st.text_input("所属视角", value=current_pm, key="todo_scope_ro", disabled=True)
+
+        p1, p2 = st.columns([2.2, 1.6])
+        with p1:
+            todo_people_sel = st.multiselect("关联人员（可多选/留空）", role_person_options, key="todo_people_global")
+        with p2:
+            todo_people_manual = st.text_input("补充人员(可手填)", key="todo_people_manual_global", placeholder="例：设计-宇涵 / 宇涵")
+
+        people_input = normalize_people_text(", ".join(todo_people_sel + split_people_text(todo_people_manual)))
+        tmp_td = {
+            "任务": todo_title,
+            "CPDDL": todo_cpddl,
+            "关联项目": "" if todo_ref_proj == "(不关联项目)" else todo_ref_proj,
+            "关联人员": people_input,
+        }
+        st.caption("开定识别：" + infer_todo_target_hint(tmp_td, valid_projs))
+        st.caption("人员识别：" + format_todo_people_hint(tmp_td))
+        people_bundle = infer_todo_people_bundle(tmp_td)
+        if not people_input and (people_bundle["ambiguous"] or people_bundle["unknown"]):
+            st.warning("人员没有唯一识别，建议在 To do 里直接补充【关联人员】；图片和细节再放到下方进度明细。")
+
+        if st.button("➕ 添加", key="todo_add_global", type="primary"):
+            if not todo_title.strip():
+                st.warning("请先填写任务内容。")
+            else:
+                due_dt = extract_deadline_from_text(todo_cpddl)
+                final_people = people_input or ", ".join(people_bundle["labels"])
+                todo_all.append({
+                    "_id": uuid.uuid4().hex[:10],
+                    "任务": todo_title.strip(),
+                    "CPDDL": todo_cpddl.strip(),
+                    "CP": todo_cpddl.strip(),
+                    "DDL": str(due_dt) if due_dt else "",
+                    "关联项目": "" if todo_ref_proj == "(不关联项目)" else todo_ref_proj,
+                    "关联人员": final_people,
+                    "所属视角": todo_scope,
+                    "完成": False,
+                    "创建": str(today),
+                })
+                cfg["PM_TODO_LIST"] = todo_all
+                sync_save_db("系统配置")
+                st.success("To do 已添加。")
+                st.rerun()
+
+    st.markdown("##### 当前 To do")
+    if not todo_list:
+        st.info("当前视角下暂无 To do。")
+        return todo_list
+
+    def _todo_alert_text(td):
+        due = todo_due_date(td)
+        if not due:
+            return "🟣 无DDL"
+        diff = (due - today).days
+        if diff < 0:
+            return f"🔴 已逾期{abs(diff)}天"
+        if diff <= 1:
+            return "🟧 今日/明日"
+        if diff <= 3:
+            return "🟨 近期待办"
+        return "🟢 正常"
+
+    rows = []
+    sorted_items = sorted(
+        todo_list,
+        key=lambda x: (
+            bool(x.get("完成")),
+            todo_due_date(x) or datetime.date.max,
+            str(x.get("创建", "")),
+            str(x.get("任务", "")),
+        ),
+    )
+    for td in sorted_items:
+        rows.append({
+            "_id": str(td.get("_id", "")),
+            "完成": bool(td.get("完成", False)),
+            "任务": str(td.get("任务", "")),
+            "CP/DDL": todo_cpddl_text(td),
+            "关联项目": str(td.get("关联项目", "")),
+            "关联人员": str(td.get("关联人员", "")),
+            "人员识别": format_todo_people_hint(td),
+            "所属视角": todo_scope_of(td),
+            "到期": str(todo_due_date(td) or "-"),
+            "提醒": _todo_alert_text(td),
+            "开定识别": infer_todo_target_hint(td, valid_projs),
+            "联动状态": todo_link_status_text(td),
+            "删除": False,
+        })
+    editor_df = pd.DataFrame(rows)
+    edited_df = st.data_editor(
+        editor_df,
+        use_container_width=True,
+        hide_index=True,
+        num_rows="fixed",
+        column_config={
+            "_id": st.column_config.TextColumn("_id", disabled=True, width="small"),
+            "完成": st.column_config.CheckboxColumn("完成", width="small"),
+            "任务": st.column_config.TextColumn("任务", required=True, width="large"),
+            "CP/DDL": st.column_config.TextColumn("CP/DDL", width="medium"),
+            "关联项目": st.column_config.SelectboxColumn("关联项目", options=todo_proj_options, width="medium"),
+            "关联人员": st.column_config.TextColumn("关联人员", width="medium", help="支持逗号分隔多个角色-姓名；留空时系统会按文本尝试识别"),
+            "人员识别": st.column_config.TextColumn("人员识别", disabled=True, width="large"),
+            "所属视角": st.column_config.SelectboxColumn("所属视角", options=scope_options, width="small"),
+            "到期": st.column_config.TextColumn("到期", disabled=True, width="small"),
+            "提醒": st.column_config.TextColumn("提醒", disabled=True, width="small"),
+            "开定识别": st.column_config.TextColumn("开定识别", disabled=True, width="large"),
+            "联动状态": st.column_config.TextColumn("联动状态", disabled=True, width="medium"),
+            "删除": st.column_config.CheckboxColumn("删除", width="small"),
+        },
+        disabled=["_id", "到期", "提醒", "开定识别", "联动状态", "人员识别"],
+        key="todo_editor_df",
+    )
+
+    if st.button("💾 保存 To do 状态", key="todo_save_global"):
+        id_map = {str(td.get("_id", "")): td for td in todo_all}
+        delete_ids = set()
+        skipped = 0
+        for row in edited_df.to_dict("records"):
+            rid = str(row.get("_id", "")).strip()
+            td = id_map.get(rid)
+            if not td:
+                continue
+            if bool(row.get("删除", False)):
+                delete_ids.add(rid)
+                continue
+            title = str(row.get("任务", "")).strip()
+            if not title:
+                skipped += 1
+                continue
+            cpddl = str(row.get("CP/DDL", "")).strip()
+            ref_proj = str(row.get("关联项目", "")).strip()
+            ref_proj = "" if ref_proj == "(不关联项目)" else ref_proj
+            people_raw = normalize_people_text(row.get("关联人员", ""))
+            people_td = {
+                "任务": title,
+                "CPDDL": cpddl,
+                "关联项目": ref_proj,
+                "关联人员": people_raw,
+            }
+            people_bundle = infer_todo_people_bundle(people_td)
+            if not people_raw and people_bundle["labels"]:
+                people_raw = ", ".join(people_bundle["labels"])
+
+            td["任务"] = title
+            td["CPDDL"] = cpddl
+            td["CP"] = cpddl
+            due_dt = extract_deadline_from_text(cpddl)
+            td["DDL"] = str(due_dt) if due_dt else ""
+            td["关联项目"] = ref_proj
+            td["关联人员"] = people_raw
+            td["完成"] = bool(row.get("完成", False))
+            scope_val = str(row.get("所属视角", td.get("所属视角", "所有人"))).strip()
+            if current_pm != "所有人" and not scope_val:
+                scope_val = current_pm
+            td["所属视角"] = scope_val if scope_val in scope_options else (current_pm if current_pm != "所有人" else "所有人")
+
+        todo_all[:] = [x for x in todo_all if str(x.get("_id", "")).strip() not in delete_ids and str(x.get("任务", "")).strip()]
+        cfg["PM_TODO_LIST"] = todo_all
+        sync_save_db("系统配置")
+        st.success(f"To do 已保存：保留 {len(todo_all)} 条，删除 {len(delete_ids)} 条，跳过 {skipped} 条空任务。")
+        st.rerun()
+
+    st.caption("建议：To do 先做轻量提醒；图片、附件、流转详情统一在【细分配件交接工作台】里补充。")
+    return [td for td in todo_all if todo_visible_for_view(td, current_pm)]
+
 
 def _csv_cell_text(v):
     s = str(v if v is not None else "").strip()
@@ -1313,372 +1932,6 @@ def _extract_target_map_from_matrix(df_raw, valid_projs, alias_map):
 
     conflicts = {k: sorted(list(v)) for k, v in conflicts.items()}
     return target_map, conflicts
-def get_status_label(milestone):
-    bucket = get_project_status_bucket(milestone)
-    if bucket == "pause":
-        return "⏸️ 暂停研发"
-    if bucket == "done":
-        return "🏁 已结案"
-    if bucket == "prod":
-        return "🟢 生产期"
-    if bucket == "dev":
-        return "🟡 研发期"
-    return "⚪ 未知阶段"
-
-
-def get_risk_status(milestone, target_date_str="TBD"):
-    return get_status_label(milestone), "normal"
-
-
-def get_project_status_bucket(milestone):
-    ms = str(milestone or "").strip()
-    if ms == "暂停研发":
-        return "pause"
-    if ms in ["生产结束", "项目结束撒花🎉", "✅ 已完成(结束)"]:
-        return "done"
-    if ms in ["生产中", "下模中"]:
-        return "prod"
-    if "研发" in ms or ms in ["待开定", "已开定", "待立项"]:
-        return "dev"
-    return "unknown"
-
-
-def month_last_day(year, month):
-    if month in [1, 3, 5, 7, 8, 10, 12]:
-        return 31
-    if month == 2:
-        return 29 if (year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)) else 28
-    return 30
-
-
-def parse_schedule_marker_date(schedule_str, marker_mode="target"):
-    s = str(schedule_str or "").strip()
-    if not s or s.upper() in ["TBD", "NONE"] or s in ["-", "—", "无"]:
-        return None
-
-    for fmt in ["%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d"]:
-        try:
-            return datetime.datetime.strptime(s[:10], fmt).date()
-        except Exception:
-            pass
-
-    m_q = re.match(r'^(\d{4}|\d{2})\s*Q([1-4])$', s.upper())
-    if m_q:
-        y_raw = int(m_q.group(1))
-        year = y_raw if y_raw >= 1000 else (2000 + y_raw)
-        quarter = int(m_q.group(2))
-        if marker_mode == "ship":
-            return quarter_to_deadline(f"{year} Q{quarter}")
-        first_month = (quarter - 1) * 3 + 1
-        return datetime.date(year, first_month, 15)
-
-    ym = parse_target_year_month(s)
-    if ym:
-        year, month = int(ym[0]), int(ym[1])
-        if marker_mode == "ship":
-            return datetime.date(year, month, month_last_day(year, month))
-        return datetime.date(year, month, 15)
-
-    return None
-
-
-def get_deadline_alert(milestone, target_text="TBD", ship_text="-", days=5):
-    bucket = get_project_status_bucket(milestone)
-    if bucket not in ["dev", "prod"]:
-        return "✅ 正常", 2
-
-    marker_mode = "target" if bucket == "dev" else "ship"
-    raw_value = target_text if bucket == "dev" else ship_text
-    alert_name = "开定" if bucket == "dev" else "发货"
-    deadline = parse_schedule_marker_date(raw_value, marker_mode=marker_mode)
-    if not deadline:
-        return "✅ 正常", 2
-
-    diff_days = (deadline - datetime.date.today()).days
-    if diff_days < 0:
-        return f"🔴 {alert_name}逾期", 0
-    if diff_days <= int(days):
-        return f"🟨 {alert_name}临期(<={int(days)}天)", 1
-    return "✅ 正常", 2
-
-
-def build_timeline_marker_info(proj_name, proj_label, milestone, target_text, ship_text):
-    bucket = get_project_status_bucket(milestone)
-    if bucket == "dev":
-        mark_dt = parse_schedule_marker_date(target_text, marker_mode="target")
-        if mark_dt:
-            return {
-                "项目": proj_label,
-                "项目原名": proj_name,
-                "日期": mark_dt.strftime("%Y-%m-%d"),
-                "标记类型": "研发开定",
-                "原始时间": str(target_text or "TBD"),
-                "悬浮": f"{proj_name}<br>研发开定：{target_text}"
-            }
-    if bucket == "prod":
-        mark_dt = parse_schedule_marker_date(ship_text, marker_mode="ship")
-        if mark_dt:
-            return {
-                "项目": proj_label,
-                "项目原名": proj_name,
-                "日期": mark_dt.strftime("%Y-%m-%d"),
-                "标记类型": "生产发货",
-                "原始时间": str(ship_text or "-"),
-                "悬浮": f"{proj_name}<br>生产发货：{ship_text}"
-            }
-    return None
-
-
-def render_pm_todo_manager(valid_projs, current_pm):
-    st.subheader("🗂️ To do List（CP/DDL 合并）")
-    cfg = db.setdefault("系统配置", {})
-    todo_all = cfg.setdefault("PM_TODO_LIST", [])
-    todo_proj_options = ["(不关联项目)"] + valid_projs
-    scope_options = ["所有人", "Mo", "越", "袁"]
-
-    touched = False
-    today = datetime.date.today()
-    for td in todo_all:
-        if not str(td.get("_id", "")).strip():
-            td["_id"] = uuid.uuid4().hex[:10]
-            touched = True
-        td.setdefault("关联项目", "")
-        td.setdefault("完成", False)
-        td.setdefault("创建", str(today))
-        td.setdefault("最近联动模块", "")
-        td.setdefault("最近联动日期", "")
-        td.setdefault("最近联动项目", "")
-        td.setdefault("最近联动部件", "")
-        td.setdefault("最近联动阶段", "")
-        td.setdefault("最近联动写入时间", "")
-        scope_val = str(td.get("所属视角", "")).strip()
-        if scope_val not in scope_options:
-            td["所属视角"] = "所有人"
-            touched = True
-        merged = todo_cpddl_text(td)
-        if str(td.get("CPDDL", "")).strip() != merged:
-            td["CPDDL"] = merged
-            touched = True
-        if str(td.get("CP", "")).strip() != merged:
-            td["CP"] = merged
-            touched = True
-        due_dt = extract_deadline_from_text(merged)
-        due_txt = str(due_dt) if due_dt else ""
-        if str(td.get("DDL", "")).strip() != due_txt:
-            td["DDL"] = due_txt
-            touched = True
-    if touched:
-        sync_save_db("系统配置")
-
-    todo_list = [td for td in todo_all if todo_visible_for_view(td, current_pm)]
-
-    pending = [x for x in todo_list if not x.get("完成")]
-    overdue_today = [x for x in pending if (todo_due_date(x) is not None and (todo_due_date(x) - today).days <= 0)]
-    due_tomorrow = [x for x in pending if (todo_due_date(x) is not None and (todo_due_date(x) - today).days == 1)]
-    linked_pending = [x for x in pending if str(x.get("关联项目", "")).strip()]
-
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("未完成", len(pending))
-    m2.metric("今日/逾期", len(overdue_today))
-    m3.metric("明日到期", len(due_tomorrow))
-    m4.metric("已关联项目", len(linked_pending))
-
-    with st.container(border=True):
-        st.markdown("##### ➕ 新增任务")
-        st.caption("任务必填；CP/DDL 合并填写（如 3/7 结构件确认）。关联项目后会联动到全局大盘明细表。")
-        t1, t2, t3, t4, t5 = st.columns([2.6, 2.0, 1.6, 1.2, 0.9])
-        with t1:
-            todo_title = st.text_input("任务", key="todo_title_global", placeholder="如：金克丝 T2 结构件")
-        with t2:
-            todo_cpddl = st.text_input("CP/DDL(合并)", key="todo_cpddl_global", placeholder="如：3/7 结构件确认")
-        with t3:
-            todo_ref_proj = st.selectbox("关联项目", todo_proj_options, key="todo_ref_global")
-        with t4:
-            if current_pm == "所有人":
-                todo_scope = st.selectbox("所属视角", scope_options, key="todo_scope_global")
-            else:
-                todo_scope = current_pm
-                st.text_input("所属视角", value=current_pm, disabled=True, key="todo_scope_global_ro")
-        with t5:
-            st.write("")
-            if st.button("➕ 添加", key="todo_add_global", type="primary"):
-                if not todo_title.strip():
-                    st.warning("请先填写任务名称。")
-                else:
-                    due_dt = extract_deadline_from_text(todo_cpddl)
-                    todo_all.append({
-                        "_id": uuid.uuid4().hex[:10],
-                        "任务": todo_title.strip(),
-                        "CPDDL": todo_cpddl.strip(),
-                        "CP": todo_cpddl.strip(),
-                        "DDL": str(due_dt) if due_dt else "",
-                        "关联项目": "" if todo_ref_proj == "(不关联项目)" else todo_ref_proj,
-                        "所属视角": todo_scope,
-                        "完成": False,
-                        "创建": str(today)
-                    })
-                    cfg["PM_TODO_LIST"] = todo_all
-                    sync_save_db("系统配置")
-                    st.rerun()
-
-        title_hints = []
-        if todo_title.strip():
-            for p in valid_projs:
-                p_short = re.sub(r'^(1/6|1/4|1/12|1/3|1/1)\s*', '', str(p)).strip()
-                if p_short and p_short in todo_title:
-                    p_t = str(db.get(p, {}).get("Target", "")).strip()
-                    if p_t and p_t.upper() != "TBD":
-                        title_hints.append(f"{p}→{p_t}")
-        if title_hints:
-            st.caption("🔎 关键节点联想：" + " | ".join(title_hints[:4]))
-
-        tmp_hint_td = {"任务": todo_title, "CPDDL": todo_cpddl, "关联项目": "" if todo_ref_proj == "(不关联项目)" else todo_ref_proj}
-        if (todo_title or todo_cpddl):
-            st.caption("🧭 开定识别：" + infer_todo_target_hint(tmp_hint_td, valid_projs))
-
-    if not todo_list:
-        st.info("当前视角下暂无 To do。先在上方新增任务。")
-        return todo_list
-
-    st.markdown("##### 🧾 任务清单")
-    f1, f2 = st.columns([2.2, 1.8])
-    with f1:
-        view_mode = st.radio("视图", ["未完成", "全部", "仅临期(<=1天)", "已完成"], horizontal=True, key="todo_view_mode")
-    with f2:
-        proj_filter = st.selectbox("项目筛选", ["全部项目", "(未关联项目)"] + valid_projs, key="todo_proj_filter")
-
-    rows = []
-    for td in todo_list:
-        rid = str(td.get("_id", "")).strip() or uuid.uuid4().hex[:10]
-        td["_id"] = rid
-        due_dt = todo_due_date(td)
-        dd = (due_dt - today).days if due_dt else None
-        if td.get("完成"):
-            tip = "✅ 已完成"
-        elif dd is None:
-            tip = "⚪ 无DDL"
-        elif dd <= 0:
-            tip = "🔴 今日/逾期"
-        elif dd == 1:
-            tip = "🟡 明日到期"
-        elif dd <= 5:
-            tip = "🟨 近期待办"
-        else:
-            tip = "🟢 正常"
-
-        ref_proj = str(td.get("关联项目", "")).strip() or "(未关联项目)"
-        cpddl = todo_cpddl_text(td)
-        rows.append({
-            "_id": rid,
-            "完成": bool(td.get("完成")),
-            "任务": str(td.get("任务", "")).strip(),
-            "CP/DDL": cpddl,
-            "关联项目": ref_proj,
-            "所属视角": todo_scope_of(td),
-            "到期": due_dt.strftime("%Y-%m-%d") if due_dt else "-",
-            "提醒": tip,
-            "开定识别": infer_todo_target_hint(td, valid_projs),
-            "联动状态": todo_link_status_text(td),
-            "删除": False,
-            "_due": due_dt or datetime.date.max,
-            "_create": str(td.get("创建", ""))
-        })
-
-    rows = sorted(rows, key=lambda r: (1 if r["完成"] else 0, r["_due"], r["_create"]))
-
-    view_rows = []
-    for r in rows:
-        if proj_filter == "(未关联项目)" and r["关联项目"] != "(未关联项目)":
-            continue
-        if proj_filter not in ["全部项目", "(未关联项目)"] and r["关联项目"] != proj_filter:
-            continue
-        if view_mode == "未完成" and r["完成"]:
-            continue
-        if view_mode == "已完成" and not r["完成"]:
-            continue
-        if view_mode == "仅临期(<=1天)":
-            if r["完成"]:
-                continue
-            d0 = r.get("_due")
-            if (not d0) or d0 == datetime.date.max:
-                continue
-            if (d0 - today).days > 1:
-                continue
-        view_rows.append(r)
-
-    if not view_rows:
-        st.info("当前筛选条件下没有任务。")
-        return todo_list
-
-    df_view = pd.DataFrame(view_rows).set_index("_id")
-    editor_disabled = ["到期", "提醒", "开定识别", "联动状态"]
-    if current_pm != "所有人":
-        editor_disabled.append("所属视角")
-
-    edited_df = st.data_editor(
-        df_view[["完成", "任务", "CP/DDL", "关联项目", "所属视角", "到期", "提醒", "开定识别", "联动状态", "删除"]],
-        hide_index=True,
-        use_container_width=True,
-        key="todo_editor_global",
-        column_config={
-            "完成": st.column_config.CheckboxColumn("完成"),
-            "任务": st.column_config.TextColumn("任务", required=True, width="large"),
-            "CP/DDL": st.column_config.TextColumn("CP/DDL", width="medium"),
-            "关联项目": st.column_config.SelectboxColumn("关联项目", options=todo_proj_options, required=True),
-            "所属视角": st.column_config.SelectboxColumn("所属视角", options=scope_options, required=True),
-            "到期": st.column_config.TextColumn("到期", disabled=True),
-            "提醒": st.column_config.TextColumn("提醒", disabled=True),
-            "开定识别": st.column_config.TextColumn("开定识别", disabled=True, width="large"),
-            "联动状态": st.column_config.TextColumn("联动状态", disabled=True, width="large"),
-            "删除": st.column_config.CheckboxColumn("删除"),
-        },
-        disabled=editor_disabled
-    )
-
-    c_save, c_hint = st.columns([1.2, 2.8])
-    with c_save:
-        if st.button("💾 保存To do变更", key="todo_save_global", type="primary"):
-            origin_map = {str(td.get("_id", "")): td for td in todo_all}
-            delete_ids = set()
-            skipped = 0
-            for rid, row in edited_df.iterrows():
-                rid = str(rid)
-                td = origin_map.get(rid)
-                if not td:
-                    continue
-                if bool(row.get("删除", False)):
-                    delete_ids.add(rid)
-                    continue
-
-                title = str(row.get("任务", "")).strip()
-                if not title:
-                    skipped += 1
-                    continue
-                cpddl = str(row.get("CP/DDL", "")).strip()
-                ref_proj = str(row.get("关联项目", "")).strip()
-                if ref_proj == "(不关联项目)" or ref_proj not in valid_projs:
-                    ref_proj = ""
-
-                td["任务"] = title
-                td["CPDDL"] = cpddl
-                td["CP"] = cpddl
-                due_dt = extract_deadline_from_text(cpddl)
-                td["DDL"] = str(due_dt) if due_dt else ""
-                td["关联项目"] = ref_proj
-                td["完成"] = bool(row.get("完成", False))
-                if current_pm == "所有人":
-                    scope_val = str(row.get("所属视角", td.get("所属视角", "所有人"))).strip()
-                    td["所属视角"] = scope_val if scope_val in scope_options else "所有人"
-
-            todo_all[:] = [x for x in todo_all if str(x.get("_id", "")) not in delete_ids and str(x.get("任务", "")).strip()]
-            cfg["PM_TODO_LIST"] = todo_all
-            sync_save_db("系统配置")
-            st.success(f"To do 已保存：更新 {len(edited_df) - len(delete_ids)} 条，删除 {len(delete_ids)} 条，跳过空任务 {skipped} 条。")
-            st.rerun()
-    with c_hint:
-        st.caption("提示：可直接改任务/CPDDL/项目关联；勾选删除后保存即删除。非所有人视角下，任务默认归属当前负责人。")
-
-    return todo_list
 
 def render_pm_batch_fastlog_integrated(visible_projects, default_proj=""):
     st.subheader("📝 批量速记（多项目）")
@@ -1695,7 +1948,7 @@ def render_pm_batch_fastlog_integrated(visible_projects, default_proj=""):
         "定价": "立项", "评估": "立项", "打印": "建模(含打印/签样)",
         "模型": "建模(含打印/签样)", "缩放": "建模(含打印/签样)", "建模": "建模(含打印/签样)",
         "涂": "涂装", "色": "涂装", "设计": "设计", "原画": "设计",
-        "拆件": "工程拆件", "官图": "官图", "大货": "大货",
+        "拆件": "工程拆件", "官图": "官图", "开模": "开模", "模具": "开模", "试模": "开模", "大货": "大货",
         "完成": "✅ 已完成(结束)", "结束": "✅ 已完成(结束)"
     }
     comp_kw = {**COMP_KW, **SYS_CFG.get("AI_COMP_KW", {})}
@@ -1905,7 +2158,7 @@ def render_pm_fastlog_integrated(sel_proj):
         "定价": "立项", "评估": "立项", "打印": "建模(含打印/签样)",
         "模型": "建模(含打印/签样)", "缩放": "建模(含打印/签样)", "建模": "建模(含打印/签样)",
         "涂": "涂装", "色": "涂装", "设计": "设计", "原画": "设计",
-        "拆件": "工程拆件", "官图": "官图", "大货": "大货",
+        "拆件": "工程拆件", "官图": "官图", "开模": "开模", "模具": "开模", "试模": "开模", "大货": "大货",
         "完成": "✅ 已完成(结束)", "结束": "✅ 已完成(结束)"
     }
     comp_kw = {**COMP_KW, **SYS_CFG.get("AI_COMP_KW", {})}
@@ -2600,153 +2853,103 @@ if menu == MENU_DASHBOARD:
     gantt_cat_orders = MACRO_STAGES.copy()
     combined_color_map = {
         "立项": "#F2C14E", "建模": "#34C6D3", "设计": "#8B5CF6",
-        "工程": "#4F7CFF", "模具": "#FB7185", "修模": "#F97316",
+        "工程": "#4F7CFF", "开模": "#FB7185", "修模": "#F97316",
         "生产": "#37B36B", "暂停": "#94A3B8", "结束": "#334155"
     }
 
-    # ── 缓存大盘计算结果（TTL=30s，切模块不重算）──
     @st.cache_data(ttl=30, show_spinner=False)
     def _build_dash(proj_list_key: str, db_hash: str):
-        _table = []; _gantt = []; _ppr = []; _markers = []; _meta = []
+        _table, _gantt, _ppr, _markers, _meta = [], [], [], [], []
         for proj in valid_projs:
             data = db[proj]
-            if not data.get('部件列表') and not data.get('Milestone') and not data.get('Target'):
-                _table.append({"状态":"⚪ 未知阶段","项目":proj,"跟单":"","项目当前阶段":"待立项",
-                    "开定时间":"TBD","预计发货":"-","断更":"-","最新全盘动态":"无数据"}); continue
-            gd=data.get('跟单',''); ms=data.get('Milestone',''); tgt=data.get('Target','TBD')
-            ship_itv=data.get('发货区间','-'); r_txt,_=get_risk_status(ms,tgt)
-            comps=data.get('部件列表',{})
-            proj_y_label = proj
-            if not comps:
-                _table.append({"状态":r_txt,"项目":proj,"跟单":gd,"项目当前阶段":ms,
-                    "开定时间":tgt,"预计发货":ship_itv,"断更":"-","最新全盘动态":"无数据"}); continue
-            latest_date_obj=None; latest_event_str="无数据"; latest_comp_name="-"; latest_sort_key=None; grouped={}
-            for c_name,info in comps.items():
-                for pair in re.split(r'[,，|]',str(info.get('负责人','')).strip()):
-                    pair=pair.strip()
-                    if not pair or pair=='未分配': continue
-                    if '-' in pair: rp,pp=pair.split('-',1); _ppr.append((proj,pp.strip(),rp.strip()))
-                    elif ':' in pair: rp,pp=pair.split(':',1); _ppr.append((proj,pp.strip(),rp.strip()))
-                    else: _ppr.append((proj,pair,"综合"))
-                logs=[lg for lg in info.get('日志流',[]) if not is_hidden_system_log(lg)]
-                if logs:
-                    try:
-                        last_log = logs[-1]
-                        l_dt=datetime.datetime.strptime(last_log['日期'],"%Y-%m-%d").date()
-                        l_write_ts = str(last_log.get("写入时间", ""))
-                        sort_key = (l_dt, l_write_ts)
-                        if latest_sort_key is None or sort_key > latest_sort_key:
-                            latest_sort_key = sort_key
-                            latest_date_obj=l_dt; latest_event_str=last_log.get('事件', ''); latest_comp_name=c_name
-                    except: pass
+            comps = data.get('部件列表', {})
+            milestone = data.get('Milestone', '')
+            target = data.get('Target', 'TBD')
+            ship_itv = data.get('发货区间', '-')
+            gd = data.get('跟单', '')
+            status_txt, _ = get_risk_status(milestone, target)
+
+            if not comps and not milestone and not target:
+                _table.append({
+                    "状态": "⚪ 未知阶段", "项目": proj, "跟单": "", "项目当前阶段": "待立项",
+                    "开定时间": "TBD", "预计发货": "-", "断更": "-", "最新全盘动态": "无数据"
+                })
+                continue
+
+            latest_date_obj = None
+            latest_event_str = "无数据"
+            latest_comp_name = "-"
+            latest_sort_key = None
+
+            for c_name, info in comps.items():
+                for pair in re.split(r'[,，|]', str(info.get('负责人', '')).strip()):
+                    pair = pair.strip()
+                    if not pair or pair == '未分配':
+                        continue
+                    if '-' in pair:
+                        rp, pp = pair.split('-', 1)
+                        _ppr.append((proj, pp.strip(), rp.strip()))
+                    elif ':' in pair:
+                        rp, pp = pair.split(':', 1)
+                        _ppr.append((proj, pp.strip(), rp.strip()))
+                    else:
+                        _ppr.append((proj, pair, '综合'))
+
+                logs = [lg for lg in info.get('日志流', []) if not is_hidden_system_log(lg)]
                 for log in logs:
-                    log_stage = log.get('工序', info.get('主流程', '未知'))
-                    macro_stage = get_macro_phase(log_stage)
-                    try:
-                        dt_obj = datetime.datetime.strptime(log['日期'], "%Y-%m-%d")
-                        evt    = log['事件']
-                        k = (dt_obj, macro_stage, evt)
-                        if k not in grouped:
-                            grouped[k] = {"日期_obj": dt_obj, "日期_str": log['日期'],
-                                          "工序": macro_stage, "事件": evt,
-                                          "部件": [c_name], "is_pause": is_pause_stage(macro_stage),
-                                          "提审类型": log.get("提审类型", ""), "提审结果": log.get("提审结果", "")}
-                        elif c_name not in grouped[k]["部件"]:
-                            grouped[k]["部件"].append(c_name)
-                    except: pass
-            dt_txt=f"{(datetime.date.today()-latest_date_obj).days} 天" if latest_date_obj else "-"
-            ce=latest_event_str
-            if "补充:" in ce: ce=ce.split("补充:")[-1].split("[系统]")[0].strip()
-            elif "】" in ce: ce=ce.split("】")[-1].split("[系统]")[0].strip()
-            _table.append({"状态":r_txt,"项目":proj,"跟单":gd,"项目当前阶段":ms,
-                "开定时间":tgt,"预计发货":ship_itv,"断更":dt_txt,"最新全盘动态":f"[{latest_comp_name}] {ce}"})
+                    dt_obj = _parse_log_date(log)
+                    if not dt_obj:
+                        continue
+                    sort_key = (dt_obj, str(log.get("写入时间", "")))
+                    if latest_sort_key is None or sort_key > latest_sort_key:
+                        latest_sort_key = sort_key
+                        latest_date_obj = dt_obj
+                        latest_event_str = str(log.get('事件', '')).strip() or '无数据'
+                        latest_comp_name = c_name
+
+            dt_txt = f"{(datetime.date.today() - latest_date_obj).days} 天" if latest_date_obj else "-"
+            ce = latest_event_str
+            if "补充:" in ce:
+                ce = ce.split("补充:")[-1].split("[系统]")[0].strip()
+            elif "】" in ce:
+                ce = ce.split("】")[-1].split("[系统]")[0].strip()
+
+            _table.append({
+                "状态": status_txt,
+                "项目": proj,
+                "跟单": gd,
+                "项目当前阶段": milestone,
+                "开定时间": target,
+                "预计发货": ship_itv,
+                "断更": dt_txt,
+                "最新全盘动态": f"[{latest_comp_name}] {ce}" if latest_comp_name != "-" else ce,
+            })
             _meta.append({
                 "项目": proj,
-                "项目标签": proj_y_label,
+                "项目标签": proj,
                 "最近更新": latest_date_obj.strftime("%Y-%m-%d") if latest_date_obj else "0001-01-01",
-                "是否暂停": 1 if str(ms).strip() == "暂停研发" else 0,
-                "是否完结": 1 if str(ms).strip() in ["生产结束", "项目结束撒花🎉", "✅ 已完成(结束)"] else 0
+                "是否暂停": 1 if str(milestone).strip() == "暂停研发" else 0,
+                "是否完结": 1 if str(milestone).strip() in ["生产结束", "项目结束撒花🎉", "✅ 已完成(结束)"] else 0,
             })
-            marker_info = build_timeline_marker_info(proj, proj_y_label, ms, tgt, ship_itv)
+            marker_info = build_timeline_marker_info(proj, proj, milestone, target, ship_itv)
             if marker_info:
                 _markers.append(marker_info)
-            all_logs = sorted(grouped.values(), key=lambda x: x["日期_obj"])
-            if all_logs:
-                # 找出暂停时间段：[pause_start, resume_start) 之间的普通日志不产生甘特色块
-                # 暂停节点：工序=="暂停" 的日志日期
-                # 恢复节点：暂停之后第一条非暂停日志日期
-                pause_intervals = []  # list of (pause_dt, resume_dt or None)
-                in_pause = False; pause_start = None
-                for lg in all_logs:
-                    if lg["is_pause"] and not in_pause:
-                        in_pause = True; pause_start = lg["日期_obj"]
-                    elif not lg["is_pause"] and in_pause:
-                        pause_intervals.append((pause_start, lg["日期_obj"]))
-                        in_pause = False; pause_start = None
-                if in_pause and pause_start:
-                    pause_intervals.append((pause_start, None))  # 还未恢复
-
-                def in_pause_period(dt):
-                    """日志日期是否落在某个暂停区间内（暂停后、恢复前）"""
-                    for ps, pe in pause_intervals:
-                        if dt > ps and (pe is None or dt < pe):
-                            return True
-                    return False
-
-                cs = all_logs[0]["工序"]; sd = all_logs[0]["日期_obj"]; buf = []
-                for i, log in enumerate(all_logs):
-                    # 暂停区间内的非暂停日志（系统自动追踪等）跳过，不产生甘特色块
-                    if log["工序"] != "暂停" and in_pause_period(log["日期_obj"]):
-                        continue
-                    rv_type = str(log.get("提审类型", "")).strip()
-                    rv_res = str(log.get("提审结果", "")).strip()
-                    rv_txt = ""
-                    if rv_type and rv_type != "(无)":
-                        rv_txt = f" | 提审:{rv_type}"
-                        if rv_res and rv_res != "(无)":
-                            rv_txt += f"/{rv_res}"
-                        rv_round = str(log.get("提审轮次", "")).strip()
-                        if rv_round:
-                            rv_txt += f"/第{rv_round}轮"
-                    buf.append(f"[{log['日期_str']}] [{', '.join(log['部件'])}] {log['事件']}{rv_txt}")
-                    is_last  = (i == len(all_logs) - 1)
-                    # 看下一条有效日志（同样跳过暂停区间内的）
-                    ns = None
-                    for j in range(i + 1, len(all_logs)):
-                        nxt = all_logs[j]
-                        if nxt["工序"] == "暂停" or not in_pause_period(nxt["日期_obj"]):
-                            ns = nxt["工序"]; break
-                    if is_last or ns != cs:
-                        # 暂停在甘特图里只占 1 天体量：暂停当天有色块，后续保持留白直到恢复
-                        if cs == "暂停":
-                            ed = sd + datetime.timedelta(days=1)
-                        else:
-                            ed = log["日期_obj"]
-                            if sd == ed: ed += datetime.timedelta(days=1)
-                        _gantt.append({"项目": proj_y_label, "工序阶段": cs,
-                                       "Start": sd.strftime("%Y-%m-%d"),
-                                       "Finish": ed.strftime("%Y-%m-%d"),
-                                       "详情": "<br>".join([f"• {e}" for e in buf])})
-                        if not is_last:
-                            cs = ns if ns else log["工序"]
-                            sd = log["日期_obj"]; buf = []
+            _gantt.extend(build_project_stage_segments(proj, data))
         return _table, _gantt, _ppr, _markers, _meta
 
-    # cache key：项目列表 + 数据指纹（只用非图片字段的哈希）
     import hashlib as _hl
     _db_sig = _hl.md5(json.dumps(
-        {k:{fk:fv for fk,fv in v.items() if fk not in ("配件清单长图",)}
-         for k,v in db.items() if k!="系统配置"},
+        {k: {fk: fv for fk, fv in v.items() if fk not in ("配件清单长图",)}
+         for k, v in db.items() if k != "系统配置"},
         ensure_ascii=False, sort_keys=True).encode()).hexdigest()
     table_data, gantt_data, _ppr_list, timeline_marks, _meta = _build_dash(",".join(valid_projs), _db_sig)
     project_person_roles = set(map(tuple, _ppr_list))
 
-
     st.divider()
     st.subheader("📈 全局进展甘特图")
-    st.caption("研发项目显示开定提醒，生产项目显示发货提醒。提醒会跟随时间窗口过滤，避免把图拉散。")
+    st.caption("立项固定按 1 天展示；建模/设计/工程/开模允许并行重叠。研发项目标开定提醒，生产项目标发货提醒。")
     if gantt_data or timeline_marks:
-        df_g = pd.DataFrame(gantt_data).sort_values(by=["项目", "Start"]) if gantt_data else pd.DataFrame(columns=["项目", "工序阶段", "Start", "Finish", "详情"])
+        df_g = pd.DataFrame(gantt_data).sort_values(by=["项目", "Start", "工序阶段"]) if gantt_data else pd.DataFrame(columns=["项目", "工序阶段", "Start", "Finish", "详情"])
         if not df_g.empty:
             df_g["Start_dt"] = pd.to_datetime(df_g["Start"], errors="coerce")
             df_g["Finish_dt"] = pd.to_datetime(df_g["Finish"], errors="coerce")
@@ -2760,35 +2963,34 @@ if menu == MENU_DASHBOARD:
         else:
             df_marks["日期_dt"] = pd.Series(dtype="datetime64[ns]")
 
-        date_candidates = []
-        if not df_g.empty:
-            date_candidates.extend(df_g["Start_dt"].dropna().tolist())
-            date_candidates.extend(df_g["Finish_dt"].dropna().tolist())
-        if not df_marks.empty:
-            date_candidates.extend(df_marks["日期_dt"].dropna().tolist())
-        default_start = min(date_candidates).date() if date_candidates else datetime.date.today()
-        default_end = max(date_candidates).date() if date_candidates else datetime.date.today()
+        today = datetime.date.today()
+        month_anchor = today.replace(day=1)
+        auto_start = add_months(month_anchor, -2)
+        auto_end_seed = add_months(month_anchor, 3)
+        auto_end = datetime.date(auto_end_seed.year, auto_end_seed.month, month_last_day(auto_end_seed.year, auto_end_seed.month))
+        if st.session_state.get("gantt_window_profile") != "half_year_v3":
+            st.session_state["gantt_start"] = auto_start
+            st.session_state["gantt_end"] = auto_end
+            st.session_state["gantt_window_profile"] = "half_year_v3"
 
         c1, c2 = st.columns(2)
         with c1:
-            gantt_start = st.date_input("甘特开始日期", value=default_start, key="gantt_start")
+            gantt_start = st.date_input("甘特开始日期", value=st.session_state.get("gantt_start", auto_start), key="gantt_start")
         with c2:
-            gantt_end = st.date_input("甘特结束日期", value=default_end, key="gantt_end")
+            gantt_end = st.date_input("甘特结束日期", value=st.session_state.get("gantt_end", auto_end), key="gantt_end")
         if gantt_end < gantt_start:
             gantt_start, gantt_end = gantt_end, gantt_start
 
         start_ts = pd.to_datetime(gantt_start)
         end_ts = pd.to_datetime(gantt_end) + pd.Timedelta(days=1)
         if not df_g.empty:
-            m = (df_g["Finish_dt"] >= start_ts) & (df_g["Start_dt"] <= end_ts)
-            df_g = df_g[m]
+            df_g = df_g[(df_g["Finish_dt"] >= start_ts) & (df_g["Start_dt"] <= end_ts)].copy()
         if not df_marks.empty:
-            m_mark = (df_marks["日期_dt"] >= start_ts) & (df_marks["日期_dt"] <= end_ts)
-            df_marks = df_marks[m_mark]
+            df_marks = df_marks[(df_marks["日期_dt"] >= start_ts) & (df_marks["日期_dt"] <= end_ts)].copy()
 
         visible_projects = set(df_g["项目"].tolist()) | set(df_marks["项目"].tolist())
         if not visible_projects:
-            st.info("当前时间窗口内暂无甘特段或关键时间标记。")
+            st.info("当前时间窗口内暂无甘特段或关键时间标记。你可以调整时间区间查看历史或更远期排程。")
         else:
             if _meta:
                 df_meta = pd.DataFrame(_meta).drop_duplicates(subset=["项目标签"])
@@ -2813,28 +3015,14 @@ if menu == MENU_DASHBOARD:
             fig.update_traces(
                 marker_line_color="rgba(255,255,255,0.92)",
                 marker_line_width=1.0,
-                opacity=0.9,
+                opacity=0.78,
                 selector=dict(type="bar")
             )
 
             if not df_marks.empty:
                 mark_style = {
-                    "研发开定": {
-                        "symbol": "square",
-                        "size": 15,
-                        "color": "#F4B400",
-                        "line": "#A16207",
-                        "name": "开定提醒",
-                        "text": "开",
-                    },
-                    "生产发货": {
-                        "symbol": "square",
-                        "size": 15,
-                        "color": "#2563EB",
-                        "line": "#1D4ED8",
-                        "name": "发货提醒",
-                        "text": "发",
-                    },
+                    "研发开定": {"symbol": "square", "size": 15, "color": "#F4B400", "line": "#A16207", "name": "开定提醒", "text": "开"},
+                    "生产发货": {"symbol": "square", "size": 15, "color": "#2563EB", "line": "#1D4ED8", "name": "发货提醒", "text": "发"},
                 }
                 for mark_type, style in mark_style.items():
                     sub = df_marks[df_marks["标记类型"] == mark_type]
@@ -2844,12 +3032,7 @@ if menu == MENU_DASHBOARD:
                         x=sub["日期_dt"],
                         y=sub["项目"],
                         mode="markers+text",
-                        marker=dict(
-                            symbol=style["symbol"],
-                            size=style["size"],
-                            color=style["color"],
-                            line=dict(width=1.5, color=style["line"])
-                        ),
+                        marker=dict(symbol=style["symbol"], size=style["size"], color=style["color"], line=dict(width=1.5, color=style["line"])),
                         name=style["name"],
                         text=[style["text"]] * len(sub),
                         textposition="middle center",
@@ -2873,7 +3056,7 @@ if menu == MENU_DASHBOARD:
                 showgrid=True,
                 gridcolor="rgba(148,163,184,0.18)",
                 zeroline=False,
-                title=None
+                title=None,
             )
             fig.update_layout(
                 template="plotly_white",
@@ -2881,9 +3064,9 @@ if menu == MENU_DASHBOARD:
                 plot_bgcolor="#FCFCFD",
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, font=dict(size=11), title_text=""),
                 margin=dict(l=8, r=8, t=40, b=8),
-                bargap=0.34,
+                bargap=0.28,
                 hoverlabel=dict(bgcolor="#FFFFFF", font_size=12),
-                height=max(460, len(y_order) * 30 + 140)
+                height=max(460, len(y_order) * 30 + 140),
             )
 
             m1, m2, m3 = st.columns(3)
@@ -2903,7 +3086,7 @@ if menu == MENU_DASHBOARD:
             vals = [int(v) for v in vals if v >= 1]
             if trim_outlier and len(vals) >= 3:
                 vals = sorted(vals)[1:-1]
-            avg = round(sum(vals)/len(vals), 2) if vals else 0
+            avg = round(sum(vals) / len(vals), 2) if vals else 0
             rows.append({"阶段": stg, "样本数": len(vals), "平均耗时(天)": avg})
         st.dataframe(pd.DataFrame(rows), use_container_width=True)
     else:
@@ -3420,6 +3603,7 @@ elif menu == MENU_SPECIFIC:
                     st.rerun()
             with c_l2:
                 st.caption("开定识别：" + infer_todo_target_hint(pick_todo, valid_projs))
+                st.caption("人员识别：" + format_todo_people_hint(pick_todo))
                 st.caption("最近落地：" + todo_link_status_text(pick_todo))
         else:
             st.caption("当前项目暂无关联 To do；你也可以先在左侧 To do 新建后再带入。")
@@ -3713,6 +3897,10 @@ elif menu == MENU_SPECIFIC:
                 st.session_state[f"stg_{fk}"] = prefill.get("阶段")
             if prefill.get("内容"):
                 st.session_state[f"txt_{fk}"] = prefill.get("内容")
+            role_map = prefill.get("角色映射", {}) if isinstance(prefill, dict) else {}
+            for role_name, person_name in role_map.items():
+                if role_name and person_name:
+                    st.session_state[f"role_{role_name}_{fk}"] = person_name
             if prefill.get("todo_ids"):
                 st.session_state[f"todo_link_{fk}"] = prefill.get("todo_ids")
                 st.session_state[f"todo_auto_done_{fk}"] = True
@@ -4017,7 +4205,7 @@ elif menu == MENU_FASTLOG:
                 "模型": "建模(含打印/签样)", "缩放": "建模(含打印/签样)",
                 "修": "建模(含打印/签样)", "建模": "建模(含打印/签样)",
                 "涂": "涂装", "色": "涂装", "设计": "设计", "原画": "设计",
-                "拆件": "工程拆件", "官图": "官图", "大货": "大货",
+                "拆件": "工程拆件", "官图": "官图", "开模": "开模", "模具": "开模", "试模": "开模", "大货": "大货",
                 "完成": "✅ 已完成(结束)", "结束": "✅ 已完成(结束)"}
     RESUME_KWS = ["resume", "恢复", "重启", "继续推进", "解除暂停", "复工"]
 
