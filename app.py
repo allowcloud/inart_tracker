@@ -4138,32 +4138,24 @@ elif menu == MENU_SPECIFIC:
         with d_col: detail_record_date = st.date_input("🕒 发生日期", datetime.date.today(), key=f"date_{fk}")
         with t_col: log_txt = st.text_area("📝 详细进展 (按需写打回原因)", height=80, key=f"txt_{fk}")
 
-        st.markdown("**(4) 参考图 (支持连按 Ctrl+V 缓存)**")
+        st.markdown("**(4) ??? (???? Ctrl+V ??)**")
         try:
             from streamlit_paste_button import paste_image_button
             paste_result = paste_image_button(
-                "📋 剪贴板捕获区",
+                "?? ??????",
                 background_color="#f1f5f9", hover_background_color="#e2e8f0",
                 key=f"paste_log_{sel_proj}_{fk}"
             )
-
-            st.markdown("**(4) 参考图 (支持连按 Ctrl+V 缓存)**")
-            try:
-                from streamlit_paste_button import paste_image_button
-                paste_result = paste_image_button(
-                    "📋 剪贴板捕获区",
-                    background_color="#f1f5f9", hover_background_color="#e2e8f0",
-                    key=f"paste_log_{sel_proj}_{fk}"
-                )
-                if paste_result is not None and hasattr(paste_result, 'image_data') \
-                        and paste_result.image_data is not None:
-                    buffered = io.BytesIO()
-                    paste_result.image_data.save(buffered, format="PNG")
-                    h_key = hashlib.md5(buffered.getvalue()).hexdigest()
-                    if h_key not in st.session_state.pasted_cache:
-                        st.session_state.pasted_cache[h_key] = paste_result.image_data
-            except ImportError:
-                pass
+            if paste_result is not None and hasattr(paste_result, 'image_data') \
+                    and paste_result.image_data is not None:
+                buffered = io.BytesIO()
+                paste_result.image_data.save(buffered, format="PNG")
+                h_key = hashlib.md5(buffered.getvalue()).hexdigest()
+                if h_key not in st.session_state.pasted_cache:
+                    st.session_state.pasted_cache[h_key] = paste_result.image_data
+        except ImportError:
+            pass
+    
     
             img_files = st.file_uploader("或选择文件上传", type=['png', 'jpg', 'jpeg'],
                                          accept_multiple_files=True, key=f"up_log_{sel_proj}_{fk}")
