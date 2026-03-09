@@ -68,6 +68,9 @@ def get_visible_projects(db_obj, current_pm):
             for lg in comp.get("日志流", []):
                 if is_hidden_system_log(lg):
                     continue
+                evt = str((lg or {}).get("事件", "")).strip()
+                if "[属性更新]" in evt:
+                    continue
                 try:
                     dt = datetime.datetime.strptime(lg.get("日期", ""), "%Y-%m-%d").date()
                 except:
@@ -174,12 +177,28 @@ if "is_hidden_system_log" not in globals():
 # 全局 CSS：减少白屏闪烁、优化表格渲染
 st.markdown("""
 <style>
+:root {
+    --pm-border: #dbe3ef;
+    --pm-bg: #f5f8fc;
+    --pm-card: #ffffff;
+    --pm-text-soft: #475569;
+    --pm-accent: #0f766e;
+}
 /* 防止切页时整页白屏 */
 .stSpinner > div { margin-top: 20vh; }
+/* 全局背景更柔和，减轻长时间浏览疲劳 */
+[data-testid="stAppViewContainer"] {
+    background: linear-gradient(180deg, #f8fbff 0%, var(--pm-bg) 100%);
+}
 /* 表格行高压缩，显示更多数据 */
 [data-testid="stDataFrame"] table td { padding: 4px 8px !important; font-size: 13px; }
-/* 侧边栏按钮间距 */
-section[data-testid="stSidebar"] .stButton button { width: 100%; }
+[data-testid="stDataEditor"] [role="gridcell"] { font-size: 13px; }
+/* 侧边栏视觉优化 */
+section[data-testid="stSidebar"] { background: linear-gradient(180deg, #f7fafc 0%, #edf4ff 100%); }
+section[data-testid="stSidebar"] .stButton button { width: 100%; border-radius: 8px; }
+/* 指标卡片更清晰 */
+[data-testid="stMetric"] { border: 1px solid var(--pm-border); border-radius: 10px; padding: 6px 10px; background: var(--pm-card); }
+[data-testid="stMetric"] [data-testid="stMetricLabel"] { color: var(--pm-text-soft); }
 /* 隐藏 streamlit 页脚 */
 footer { visibility: hidden; }
 </style>
@@ -1136,14 +1155,45 @@ def todo_sort_key(td, today=None):
     return (0, 1, 99999, datetime.date.max.toordinal(), created.toordinal(), task)
 
 def todo_scope_of(td):
-    s = str((td or {}).get("所属视角", "")).strip()
-    return s if s else "所有人"
+    scope = str((td or {}).get("所属视角", "")).strip()
+    if scope and scope != "所有人":
+        return scope
+    creator_scope = str((td or {}).get("创建者视角", "")).strip()
+    if creator_scope and creator_scope != "所有人":
+        return creator_scope
+    return "未分配"
+
 
 def todo_visible_for_view(td, pm_view):
     scope = todo_scope_of(td)
     if pm_view == "所有人":
         return True
-    return scope in ["所有人", pm_view]
+    return scope == pm_view
+
+
+def build_todo_scope_options(current_pm):
+    scope_vals = []
+    for proj_name, proj_data in db.items():
+        if proj_name == "系统配置" or not isinstance(proj_data, dict):
+            continue
+        owner = str(proj_data.get("负责人", "")).strip()
+        if owner and owner != "所有人":
+            scope_vals.append(owner)
+
+    todo_all = db.get("系统配置", {}).get("PM_TODO_LIST", [])
+    for td in todo_all:
+        scope = str((td or {}).get("所属视角", "")).strip()
+        creator = str((td or {}).get("创建者视角", "")).strip()
+        if scope and scope != "所有人":
+            scope_vals.append(scope)
+        if creator and creator != "所有人":
+            scope_vals.append(creator)
+
+    if current_pm and current_pm != "所有人":
+        scope_vals.insert(0, current_pm)
+    scope_vals.append("未分配")
+    return list(dict.fromkeys([x for x in scope_vals if x and x != "所有人"]))
+
 
 def parse_target_year_month(target_str):
     s = str(target_str or "").strip()
@@ -1825,7 +1875,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
     cfg = db.setdefault("系统配置", {})
     todo_all = cfg.setdefault("PM_TODO_LIST", [])
     todo_proj_options = ["(不关联项目)"] + valid_projs
-    scope_options = [x for x in dict.fromkeys(["所有人", current_pm, *[str(db.get(p, {}).get("负责人", "")).strip() for p in valid_projs], "Mo", "越", "袁"]) if x]
+    scope_options = build_todo_scope_options(current_pm)
     role_person_options, _ = collect_role_person_options()
 
     touched = False
@@ -1846,9 +1896,19 @@ def render_pm_todo_manager(valid_projs, current_pm):
         td.setdefault("最近联动部件", "")
         td.setdefault("最近联动阶段", "")
         td.setdefault("最近联动写入时间", "")
+        td.setdefault("创建者视角", "")
         scope_val = str(td.get("所属视角", "")).strip()
-        if scope_val not in scope_options:
-            td["所属视角"] = current_pm if current_pm != "所有人" else "所有人"
+        creator_scope = str(td.get("创建者视角", "")).strip()
+        normalized_scope = scope_val
+        if (not normalized_scope) or normalized_scope == "所有人":
+            normalized_scope = creator_scope if creator_scope and creator_scope != "所有人" else "未分配"
+        if normalized_scope not in scope_options and normalized_scope:
+            scope_options.append(normalized_scope)
+        if scope_val != normalized_scope:
+            td["所属视角"] = normalized_scope
+            touched = True
+        if (not creator_scope) and normalized_scope not in ["", "未分配", "所有人"]:
+            td["创建者视角"] = normalized_scope
             touched = True
         merged = todo_cpddl_text(td)
         if str(td.get("CPDDL", "")).strip() != merged:
@@ -1931,7 +1991,8 @@ def render_pm_todo_manager(valid_projs, current_pm):
                     "DDL": str(due_dt) if due_dt else "",
                     "关联项目": "" if todo_ref_proj == "(不关联项目)" else todo_ref_proj,
                     "关联人员": final_people,
-                    "所属视角": todo_scope,
+                    "所属视角": (str(todo_scope).strip() or "未分配"),
+                    "创建者视角": (current_pm if current_pm != "所有人" else (str(todo_scope).strip() or "未分配")),
                     "完成": False,
                     "完成时间": "",
                     "创建": str(today),
@@ -2036,10 +2097,14 @@ def render_pm_todo_manager(valid_projs, current_pm):
             td["关联项目"] = ref_proj
             td["关联人员"] = people_raw
             td["完成"] = new_done
-            scope_val = str(row.get("所属视角", td.get("所属视角", "所有人"))).strip()
-            if current_pm != "所有人" and not scope_val:
+            scope_val = str(row.get("所属视角", td.get("所属视角", "未分配"))).strip()
+            if current_pm != "所有人":
                 scope_val = current_pm
-            td["所属视角"] = scope_val if scope_val in scope_options else (current_pm if current_pm != "所有人" else "所有人")
+            if (not scope_val) or scope_val == "所有人":
+                scope_val = "未分配"
+            td["所属视角"] = scope_val if scope_val in scope_options else scope_val
+            if (not str(td.get("创建者视角", "")).strip()) and scope_val not in ["", "未分配", "所有人"]:
+                td["创建者视角"] = scope_val
             if new_done and not prev_done:
                 done_date = datetime.date.today()
                 td["完成时间"] = str(done_date)
@@ -3129,11 +3194,11 @@ valid_projs = get_visible_projects(db, current_pm)
 render_sidebar_todo_panel(current_pm)
 
 
-menu = st.sidebar.radio("模块导航", [
-    MENU_DASHBOARD, MENU_SPECIFIC,
+menu = st.sidebar.radio("📂 功能导航", [
+    MENU_DASHBOARD, MENU_SPECIFIC, MENU_FASTLOG,
     MENU_HISTORY, MENU_SETTINGS, MENU_GUIDE
 ])
-st.sidebar.caption("说明：原【速记/包装入库/成本台账】已并入【🎯 PM 工作台】")
+st.sidebar.caption("建议流程：先看全局，再进 PM 工作台；手机端可用 AI 速记做晚间复盘。")
 
 # 备份与恢复
 st.sidebar.divider()
@@ -3581,6 +3646,136 @@ if menu == MENU_DASHBOARD:
         df_table = df_table.sort_values(by=["状态组", "开定排序", "发货排序", "断更天", "项目"], ascending=[True, True, True, True, True])
         show_df = df_table.drop(columns=["状态组", "开定排序", "发货排序", "断更天"])
 
+        with st.expander("\u26a1 \u5927\u76d8\u5feb\u901f\u7f16\u8f91\uff08\u9636\u6bb5/\u5f00\u5b9a/\u53d1\u8d27/\u8ddf\u5355\uff09", expanded=True):
+            st.caption("\u9002\u5408\u6bcf\u65e5\u6536\u53e3\uff1a\u76f4\u63a5\u5728\u5927\u76d8\u6539\u5173\u952e\u5b57\u6bb5\uff0c\u51cf\u5c11\u5728 PM \u5de5\u4f5c\u53f0\u9010\u4e2a\u5207\u6362\u3002")
+
+            quick_edit_df = show_df[["\u9879\u76ee", "\u9879\u76ee\u5f53\u524d\u9636\u6bb5", "\u5f00\u5b9a\u65f6\u95f4", "\u9884\u8ba1\u53d1\u8d27", "\u8ddf\u5355"]].copy()
+            if current_pm == "\u6240\u6709\u4eba":
+                quick_edit_df.insert(
+                    1,
+                    "\u8d1f\u8d23\u4eba",
+                    [str(db.get(str(p).strip(), {}).get("\u8d1f\u8d23\u4eba", "")).strip() for p in quick_edit_df["\u9879\u76ee"].tolist()],
+                )
+
+            owner_options = list(
+                dict.fromkeys(
+                    [
+                        "Mo",
+                        "\u8d8a",
+                        "\u8881",
+                        *[
+                            str((db.get(p, {}) or {}).get("\u8d1f\u8d23\u4eba", "")).strip()
+                            for p in valid_projs
+                            if str((db.get(p, {}) or {}).get("\u8d1f\u8d23\u4eba", "")).strip()
+                        ],
+                    ]
+                )
+            )
+
+            quick_column_config = {
+                "\u9879\u76ee": st.column_config.TextColumn("\u9879\u76ee", disabled=True, width="large"),
+                "\u9879\u76ee\u5f53\u524d\u9636\u6bb5": st.column_config.SelectboxColumn("\u9879\u76ee\u5f53\u524d\u9636\u6bb5", options=STD_MILESTONES, width="small"),
+                "\u5f00\u5b9a\u65f6\u95f4": st.column_config.TextColumn("\u5f00\u5b9a\u65f6\u95f4", width="small", help="\u652f\u6301 2026-05 / 26.5 / 2026 Q2 / TBD"),
+                "\u9884\u8ba1\u53d1\u8d27": st.column_config.TextColumn("\u9884\u8ba1\u53d1\u8d27", width="small", help="\u652f\u6301 2026 Q2 / 2026-06 / -"),
+                "\u8ddf\u5355": st.column_config.TextColumn("\u8ddf\u5355", width="small"),
+            }
+            if current_pm == "\u6240\u6709\u4eba":
+                quick_column_config["\u8d1f\u8d23\u4eba"] = st.column_config.SelectboxColumn("\u8d1f\u8d23\u4eba", options=owner_options, width="small")
+
+            edited_quick_df = st.data_editor(
+                quick_edit_df,
+                width='stretch',
+                hide_index=True,
+                num_rows="fixed",
+                column_config=quick_column_config,
+                disabled=["\u9879\u76ee"],
+                key="dashboard_quick_editor",
+            )
+
+            if st.button("\U0001f4be \u4fdd\u5b58\u5927\u76d8\u5feb\u901f\u7f16\u8f91", type="primary", key="btn_dash_quick_save"):
+                changed_projects = []
+                changed_count = 0
+                today_str = str(datetime.date.today())
+
+                def _normalize_target_text(v):
+                    s = str(v or "").strip()
+                    if s.upper() == "TBD" or s in ["-", "\u2014", "\u65e0", "\u6682\u65e0"]:
+                        return ""
+                    return s
+
+                def _normalize_ship_text(v):
+                    s = str(v or "").strip()
+                    if s.upper() == "TBD" or s in ["-", "\u2014", "\u65e0", "\u6682\u65e0"]:
+                        return ""
+                    return s
+
+                for row in edited_quick_df.to_dict("records"):
+                    proj = str(row.get("\u9879\u76ee", "")).strip()
+                    if not proj or proj not in db or proj == "\u7cfb\u7edf\u914d\u7f6e":
+                        continue
+
+                    proj_data = db[proj]
+                    old_pm = str(proj_data.get("\u8d1f\u8d23\u4eba", "")).strip()
+                    old_ms = str(proj_data.get("Milestone", "")).strip() or "\u5f85\u7acb\u9879"
+                    old_target_raw = str(proj_data.get("Target", "")).strip()
+                    old_ship_raw = str(proj_data.get("\u53d1\u8d27\u533a\u95f4", "")).strip()
+                    old_gd = str(proj_data.get("\u8ddf\u5355", "")).strip()
+
+                    new_pm = old_pm
+                    if current_pm == "\u6240\u6709\u4eba":
+                        new_pm = str(row.get("\u8d1f\u8d23\u4eba", old_pm)).strip() or old_pm
+                    new_ms = str(row.get("\u9879\u76ee\u5f53\u524d\u9636\u6bb5", old_ms)).strip() or old_ms
+                    if new_ms not in STD_MILESTONES:
+                        new_ms = old_ms
+                    old_target_norm = _normalize_target_text(old_target_raw)
+                    old_ship_norm = _normalize_ship_text(old_ship_raw)
+                    new_target_norm = _normalize_target_text(row.get("\u5f00\u5b9a\u65f6\u95f4", old_target_raw))
+                    new_ship_norm = _normalize_ship_text(row.get("\u9884\u8ba1\u53d1\u8d27", old_ship_raw))
+                    new_gd = str(row.get("\u8ddf\u5355", old_gd)).strip()
+
+                    change_items = []
+                    if current_pm == "\u6240\u6709\u4eba" and old_pm != new_pm:
+                        change_items.append(("\u8d1f\u8d23\u4eba", old_pm or "\u672a\u5206\u914d", new_pm or "\u672a\u5206\u914d"))
+                    if old_ms != new_ms:
+                        change_items.append(("\u9636\u6bb5", old_ms or "-", new_ms or "-"))
+                    if old_target_norm != new_target_norm:
+                        change_items.append(("\u5f00\u5b9a", old_target_norm or "TBD", new_target_norm or "TBD"))
+                    if old_ship_norm != new_ship_norm:
+                        change_items.append(("\u53d1\u8d27", old_ship_norm or "-", new_ship_norm or "-"))
+                    if old_gd != new_gd:
+                        change_items.append(("\u8ddf\u5355", old_gd or "-", new_gd or "-"))
+                    if not change_items:
+                        continue
+
+                    proj_data["\u8d1f\u8d23\u4eba"] = new_pm
+                    proj_data["Milestone"] = new_ms
+                    proj_data["Target"] = new_target_norm or "TBD"
+                    proj_data["\u53d1\u8d27\u533a\u95f4"] = new_ship_norm
+                    proj_data["\u8ddf\u5355"] = new_gd
+
+                    comps = proj_data.setdefault("\u90e8\u4ef6\u5217\u8868", {})
+                    global_key = next((k for k in comps.keys() if "\u5168\u5c40" in str(k)), "\u5168\u5c40\u8fdb\u5ea6")
+                    if global_key not in comps or not isinstance(comps.get(global_key), dict):
+                        comps[global_key] = {"\u4e3b\u6d41\u7a0b": STAGES_UNIFIED[0], "\u65e5\u5fd7\u6d41": []}
+                    event_text = " | ".join([f"{k}:{ov}->{nv}" for k, ov, nv in change_items])
+                    comps[global_key].setdefault("\u65e5\u5fd7\u6d41", []).append({
+                        "\u65e5\u671f": today_str,
+                        "\u6d41\u8f6c": "\u5927\u76d8\u5feb\u7f16",
+                        "\u5de5\u5e8f": comps[global_key].get("\u4e3b\u6d41\u7a0b", STAGES_UNIFIED[0]),
+                        "\u4e8b\u4ef6": f"[\u5927\u76d8\u5feb\u7f16] {event_text}",
+                    })
+                    changed_projects.append(proj)
+                    changed_count += 1
+
+                if changed_count <= 0:
+                    st.info("\u672a\u68c0\u6d4b\u5230\u53ef\u4fdd\u5b58\u7684\u53d8\u5316\u3002")
+                else:
+                    for proj in list(dict.fromkeys(changed_projects)):
+                        db_manager.save_one(proj, db[proj])
+                    db_manager.save_one("\u7cfb\u7edf\u914d\u7f6e", db["\u7cfb\u7edf\u914d\u7f6e"])
+                    st.success(f"\u5df2\u4fdd\u5b58 {changed_count} \u6761\u9879\u76ee\u66f4\u65b0\u3002")
+                    st.rerun()
+
         def _hl_warn(v):
             return 'background-color: #fef08a; color: #111827; font-weight: 600' if str(v).strip() else ''
 
@@ -3826,23 +4021,63 @@ elif menu == MENU_SPECIFIC:
             new_ship = st.text_input("📦 预计发货区间 (例: 2026 Q2)", value=cur_ship)
     
         if st.button("💾 更新大盘基础信息", type="primary", key="btn_global"):
-            db[sel_proj]['负责人']  = new_pm
-            db[sel_proj]['Milestone'] = new_ms
-            db[sel_proj]['Target']    = new_target
-            db[sel_proj]['发货区间']  = new_ship
-            td        = str(datetime.date.today())
-            comps_list = list(db[sel_proj].get('部件列表', {}).keys())
-            t_c        = "全局进度" if "全局进度" in comps_list else (comps_list[0] if comps_list else "全局进度")
-            cur_macro_state = db[sel_proj].get("部件列表", {}).get(t_c, {}).get("主流程", STAGES_UNIFIED[0])
-            if t_c not in db[sel_proj].setdefault("部件列表", {}):
-                db[sel_proj]["部件列表"][t_c] = {"主流程": STAGES_UNIFIED[0], "日志流": []}
-            db[sel_proj]["部件列表"][t_c]['日志流'].append({
-                "日期": td, "流转": "系统更新",
-                "工序": db[sel_proj]["部件列表"][t_c]["主流程"],
-                "事件": f"[属性更新] 阶段:{new_ms} | 开定:{new_target} | 发货:{new_ship}"
-            })
-            sync_save_db(sel_proj)
-            st.rerun()
+            old_pm = str(db[sel_proj].get("负责人", "")).strip()
+            old_ms = str(db[sel_proj].get("Milestone", "")).strip()
+            old_target_raw = str(db[sel_proj].get("Target", "")).strip()
+            old_ship_raw = str(db[sel_proj].get("发货区间", "")).strip()
+
+            def _normalize_target_text(v):
+                s = str(v or "").strip()
+                if s.upper() == "TBD" or s in ["-", "—", "无", "暂无"]:
+                    return ""
+                return s
+
+            def _normalize_ship_text(v):
+                s = str(v or "").strip()
+                if s.upper() == "TBD" or s in ["-", "—", "无", "暂无"]:
+                    return ""
+                return s
+
+            new_pm_norm = str(new_pm).strip()
+            new_ms_norm = str(new_ms).strip()
+            new_target_norm = _normalize_target_text(new_target)
+            new_ship_norm = _normalize_ship_text(new_ship)
+            old_target_norm = _normalize_target_text(old_target_raw)
+            old_ship_norm = _normalize_ship_text(old_ship_raw)
+
+            change_items = []
+            if old_pm != new_pm_norm:
+                change_items.append(("负责人", old_pm or "未分配", new_pm_norm or "未分配"))
+            if old_ms != new_ms_norm:
+                change_items.append(("阶段", old_ms or "-", new_ms_norm or "-"))
+            if old_target_norm != new_target_norm:
+                change_items.append(("开定", old_target_norm or "TBD", new_target_norm or "TBD"))
+            if old_ship_norm != new_ship_norm:
+                change_items.append(("发货", old_ship_norm or "-", new_ship_norm or "-"))
+
+            if not change_items:
+                st.info("未检测到基础信息变化，未写入更新日志。")
+            else:
+                db[sel_proj]["负责人"] = new_pm_norm
+                db[sel_proj]["Milestone"] = new_ms_norm
+                db[sel_proj]["Target"] = new_target_norm or "TBD"
+                db[sel_proj]["发货区间"] = new_ship_norm
+
+                td = str(datetime.date.today())
+                comps_list = list(db[sel_proj].get("部件列表", {}).keys())
+                t_c = "全局进度" if "全局进度" in comps_list else (comps_list[0] if comps_list else "全局进度")
+                if t_c not in db[sel_proj].setdefault("部件列表", {}):
+                    db[sel_proj]["部件列表"][t_c] = {"主流程": STAGES_UNIFIED[0], "日志流": []}
+                event_text = " | ".join([f"{k}:{ov}→{nv}" for k, ov, nv in change_items])
+                db[sel_proj]["部件列表"][t_c]["日志流"].append({
+                    "日期": td,
+                    "流转": "系统更新",
+                    "工序": db[sel_proj]["部件列表"][t_c].get("主流程", STAGES_UNIFIED[0]),
+                    "事件": f"[属性更新] {event_text}"
+                })
+                sync_save_db(sel_proj)
+                st.success("大盘基础信息已更新。")
+                st.rerun()
     
         with st.expander("🧾 审核信息", expanded=False):
             review_rows = []
@@ -4257,7 +4492,12 @@ elif menu == MENU_SPECIFIC:
 # 模块 3：AI 速记
 # ==========================================
 elif menu == MENU_FASTLOG:
-    st.title("🚀 移动端 智能速记引擎")
+    st.title("📝 手机 AI 速记")
+    with st.expander("🌙 每晚复盘（多项目）", expanded=True):
+        render_pm_batch_fastlog_integrated(valid_projs)
+    st.caption("该页面已切换为新版多项目晚间复盘入口。")
+    st.stop()
+
     MANUAL_PICK = "⚠️冲突: 请手动选择"
     def is_manual_pick_project(name):
         ss = str(name or "").strip()
@@ -5471,71 +5711,3 @@ elif menu == MENU_GUIDE:
         st.markdown(
             "每次收工建议下载全量备份（数据+图片）；换设备后通过上传备份一键恢复。"
         )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
