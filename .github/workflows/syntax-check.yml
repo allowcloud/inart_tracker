@@ -1,4 +1,4 @@
-name: Syntax Check
+﻿name: Syntax Check
 
 on:
   pull_request:
