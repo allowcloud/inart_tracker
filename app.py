@@ -1529,6 +1529,37 @@ def todo_due_date(td):
     if d:
         return d
     return extract_deadline_from_text(todo_cpddl_text(td))
+def todo_alert_text(td, today=None):
+    today = today or datetime.date.today()
+    if bool((td or {}).get("完成")):
+        return "✅ 已完成"
+    due = todo_due_date(td)
+    if not due:
+        return "🟣 无DDL"
+    diff = (due - today).days
+    if diff < 0:
+        return f"🔴 已逾期{abs(diff)}天"
+    if diff == 0:
+        return "🔴 今日到期"
+    if diff == 1:
+        return "🟧 明日到期"
+    if diff <= 3:
+        return "🟨 近期待办"
+    return "🟢 正常"
+
+def todo_sort_key(td, today=None):
+    today = today or datetime.date.today()
+    completed = bool((td or {}).get("完成"))
+    due = todo_due_date(td)
+    created = parse_date_safe((td or {}).get("创建", "")) or datetime.date.max
+    completed_at = parse_date_safe((td or {}).get("完成时间", "")) or datetime.date.min
+    task = str((td or {}).get("任务", "")).strip()
+    if completed:
+        return (1, 9, -completed_at.toordinal(), created.toordinal(), task)
+    if due:
+        diff = (due - today).days
+        return (0, 0, diff, due.toordinal(), created.toordinal(), task)
+    return (0, 1, 99999, datetime.date.max.toordinal(), created.toordinal(), task)
 
 def todo_scope_of(td):
     s = str((td or {}).get("所属视角", "")).strip()
@@ -1576,6 +1607,47 @@ def parse_target_year_month(target_str):
         except:
             return None
 
+    return None
+def parse_period_marker_date(raw_text, end_of_period=False):
+    s = str(raw_text or "").strip()
+    if not s or s.upper() in ["TBD", "-", "—", "NONE", "无"]:
+        return None
+    if len(s) >= 10:
+        try:
+            return datetime.datetime.strptime(s[:10], "%Y-%m-%d").date()
+        except Exception:
+            pass
+
+    q_match = re.match(r'^(20\d{2}|\d{2})\s*Q([1-4])$', s.upper())
+    if q_match:
+        y_raw = int(q_match.group(1))
+        year = y_raw if y_raw >= 1000 else (2000 + y_raw)
+        quarter = int(q_match.group(2))
+        month = quarter * 3 if end_of_period else ((quarter - 1) * 3 + 1)
+        day = month_last_day(year, month) if end_of_period else min(15, month_last_day(year, month))
+        return datetime.date(year, month, day)
+
+    ym_match = re.match(r'^(\d{4})[/-](\d{1,2})$', s)
+    if ym_match:
+        year = int(ym_match.group(1))
+        month = int(ym_match.group(2))
+        day = month_last_day(year, month) if end_of_period else min(15, month_last_day(year, month))
+        return datetime.date(year, month, day)
+
+    short_match = re.match(r'^(\d{2})\.(\d{1,2})$', s)
+    if short_match:
+        year = 2000 + int(short_match.group(1))
+        month = int(short_match.group(2))
+        day = month_last_day(year, month) if end_of_period else min(15, month_last_day(year, month))
+        return datetime.date(year, month, day)
+
+    cn_match = re.match(r'^(\d{2,4})年\s*(\d{1,2})月$', s)
+    if cn_match:
+        y_raw = int(cn_match.group(1))
+        year = y_raw if y_raw >= 1000 else (2000 + y_raw)
+        month = int(cn_match.group(2))
+        day = month_last_day(year, month) if end_of_period else min(15, month_last_day(year, month))
+        return datetime.date(year, month, day)
     return None
 
 
@@ -2266,28 +2338,10 @@ def render_pm_todo_manager(valid_projs, current_pm):
         return todo_list
 
     def _todo_alert_text(td):
-        due = todo_due_date(td)
-        if not due:
-            return "🟣 无DDL"
-        diff = (due - today).days
-        if diff < 0:
-            return f"🔴 已逾期{abs(diff)}天"
-        if diff <= 1:
-            return "🟧 今日/明日"
-        if diff <= 3:
-            return "🟨 近期待办"
-        return "🟢 正常"
+        return todo_alert_text(td, today)
 
     rows = []
-    sorted_items = sorted(
-        todo_list,
-        key=lambda x: (
-            bool(x.get("完成")),
-            todo_due_date(x) or datetime.date.max,
-            str(x.get("创建", "")),
-            str(x.get("任务", "")),
-        ),
-    )
+    sorted_items = sorted(todo_list, key=lambda x: todo_sort_key(x, today))
     for td in sorted_items:
         done_at = str(td.get("完成时间", "")) if td.get("完成") else ""
         rows.append({
@@ -2295,13 +2349,13 @@ def render_pm_todo_manager(valid_projs, current_pm):
             "完成": bool(td.get("完成", False)),
             "任务": str(td.get("任务", "")),
             "CP/DDL": todo_cpddl_text(td),
-            "关联项目": str(td.get("关联项目", "")),
+            "关联项目": str(td.get("关联项目", "") or "(不关联项目)"),
             "完成时间": done_at or "-",
             "关联人员": str(td.get("关联人员", "")),
             "人员识别": format_todo_people_hint(td),
             "所属视角": todo_scope_of(td),
             "到期": str(todo_due_date(td) or "-"),
-            "提醒": _todo_alert_text(td),
+            "提醒": todo_alert_text(td, today),
             "开定识别": infer_todo_target_hint(td, valid_projs),
             "联动状态": todo_link_status_text(td),
             "删除": False,
@@ -2390,6 +2444,31 @@ def render_pm_todo_manager(valid_projs, current_pm):
     st.caption("建议：To do 先做轻量提醒；图片、附件、流转详情统一在【细分配件交接工作台】里补充。")
     return [td for td in todo_all if todo_visible_for_view(td, current_pm)]
 
+def render_sidebar_todo_panel(pm_view):
+    cfg = db.setdefault("系统配置", {})
+    todo_all = cfg.setdefault("PM_TODO_LIST", [])
+    today = datetime.date.today()
+    visible = [td for td in todo_all if todo_visible_for_view(td, pm_view)]
+    pending = sorted([td for td in visible if not td.get("完成")], key=lambda x: todo_sort_key(x, today))
+    completed_count = len([td for td in visible if td.get("完成")])
+
+    st.sidebar.divider()
+    st.sidebar.markdown("### 🗂️ To do")
+    st.sidebar.caption(f"未完成 {len(pending)} | 已完成 {completed_count}")
+    if not pending:
+        st.sidebar.caption("当前视角下没有未完成 To do。")
+        return
+
+    for idx, td in enumerate(pending[:6], 1):
+        task = str(td.get("任务", "")).strip() or "(空任务)"
+        due = todo_due_date(td)
+        due_txt = due.strftime("%m-%d") if due else "无DDL"
+        proj = str(td.get("关联项目", "")).strip() or "(未关联项目)"
+        status_icon = todo_alert_text(td, today).split(" ")[0]
+        st.sidebar.markdown(f"`{idx}` {status_icon} **{task}**")
+        st.sidebar.caption(f"{due_txt} | {proj}")
+    if len(pending) > 6:
+        st.sidebar.caption(f"还有 {len(pending) - 6} 条未完成待办未展开。")
 
 def _csv_cell_text(v):
     s = str(v if v is not None else "").strip()
@@ -3425,6 +3504,8 @@ if backend_name != "MongoDB":
 
 db          = st.session_state.db
 valid_projs = get_visible_projects(db, current_pm)
+render_sidebar_todo_panel(current_pm)
+
 
 menu = st.sidebar.radio("模块导航", [
     MENU_DASHBOARD, MENU_SPECIFIC,
@@ -3601,7 +3682,7 @@ if menu == MENU_DASHBOARD:
 
     @st.cache_data(ttl=30, show_spinner=False)
     def _build_dash(proj_list_key: str, db_hash: str):
-        _table = []; _gantt = []; _ppr = []; _sx = []; _sy = []; _meta = []
+        _table = []; _gantt = []; _ppr = []; _marks = []; _meta = []
         for proj in valid_projs:
             data = db[proj]
             if not data.get('部件列表') and not data.get('Milestone') and not data.get('Target'):
@@ -3657,11 +3738,22 @@ if menu == MENU_DASHBOARD:
                 "是否暂停": 1 if str(ms).strip() == "暂停研发" else 0,
                 "是否完结": 1 if str(ms).strip() in ["生产结束", "项目结束撒花🎉", "✅ 已完成(结束)"] else 0
             })
-            try:
-                if tgt and tgt.upper()!='TBD':
-                    pt=datetime.datetime.strptime(f"{tgt}-01" if len(tgt)==7 else tgt[:10],"%Y-%m-%d")
-                    _sx.append(pt.strftime("%Y-%m-%d")); _sy.append(proj_y_label)
-            except: pass
+            target_dt = parse_period_marker_date(tgt, end_of_period=False)
+            if target_dt:
+                _marks.append({
+                    "日期": target_dt.strftime("%Y-%m-%d"),
+                    "项目": proj_y_label,
+                    "类型": "开定",
+                    "说明": f"[{proj}] 目标开定 {tgt}",
+                })
+            ship_dt = parse_period_marker_date(ship_itv, end_of_period=True)
+            if ship_dt:
+                _marks.append({
+                    "日期": ship_dt.strftime("%Y-%m-%d"),
+                    "项目": proj_y_label,
+                    "类型": "发货",
+                    "说明": f"[{proj}] 预计发货 {ship_itv}",
+                })
             all_logs = sorted(grouped.values(), key=lambda x: x["日期_obj"])
             if all_logs:
                 # 找出暂停时间段：[pause_start, resume_start) 之间的普通日志不产生甘特色块
@@ -3719,7 +3811,7 @@ if menu == MENU_DASHBOARD:
                         if not is_last:
                             cs = ns if ns else log["工序"]
                             sd = log["日期_obj"]; buf = []
-        return _table, _gantt, _ppr, _sx, _sy, _meta
+        return _table, _gantt, _ppr, _marks, _meta
 
     # cache key：项目列表 + 数据指纹（只用非图片字段的哈希）
     import hashlib as _hl
@@ -3727,7 +3819,7 @@ if menu == MENU_DASHBOARD:
         {k: {fk: fv for fk, fv in v.items() if fk not in ("配件清单长图",)}
          for k, v in db.items() if k != "系统配置"},
         ensure_ascii=False, sort_keys=True).encode()).hexdigest()
-    table_data, gantt_data, _ppr_list, star_x, star_y, _meta = _build_dash(",".join(valid_projs), _db_sig)
+    table_data, gantt_data, _ppr_list, timeline_marks, _meta = _build_dash(",".join(valid_projs), _db_sig)
     project_person_roles = set(map(tuple, _ppr_list))
 
     st.divider()
@@ -3774,23 +3866,26 @@ if menu == MENU_DASHBOARD:
             category_orders={"工序阶段": gantt_cat_orders, "项目": y_order},
             color_discrete_map=combined_color_map
         )
-        filtered_star_x = []
-        filtered_star_y = []
-        for sx, sy in zip(star_x, star_y):
-            sx_dt = pd.to_datetime(sx, errors="coerce")
-            if pd.isna(sx_dt):
-                continue
-            if showing_full_gantt or (selected_start <= sx_dt <= selected_end):
-                filtered_star_x.append(sx)
-                filtered_star_y.append(sy)
-        if filtered_star_x:
-            fig.add_trace(go.Scatter(
-                x=filtered_star_x, y=filtered_star_y, mode='markers',
-                marker=dict(symbol='star', size=24, color='#FFD700',
-                            line=dict(width=2, color='#FF4500')),
-                name='📅 目标开定',
-                hovertemplate='目标开定: %{x}<extra></extra>'
-            ))
+        if timeline_marks:
+            df_marks = pd.DataFrame(timeline_marks)
+            df_marks["日期_dt"] = pd.to_datetime(df_marks["日期"], errors="coerce")
+            if not showing_full_gantt:
+                df_marks = df_marks[(df_marks["日期_dt"] >= selected_start) & (df_marks["日期_dt"] <= selected_end)].copy()
+            if not df_marks.empty:
+                for mark_type, label_text, color, symbol in [("开定", "开", "#E11D48", "diamond"), ("发货", "发", "#2563EB", "square")]:
+                    part = df_marks[df_marks["类型"] == mark_type]
+                    if part.empty:
+                        continue
+                    fig.add_trace(go.Scatter(
+                        x=part["日期"], y=part["项目"], mode="markers+text",
+                        marker=dict(symbol=symbol, size=18, color=color, line=dict(width=1.2, color="white")),
+                        text=[label_text] * len(part),
+                        textposition="middle center",
+                        textfont=dict(size=10, color="white"),
+                        name=f"{mark_type}标记",
+                        customdata=part[["说明"]],
+                        hovertemplate="%{customdata[0]}<extra></extra>"
+                    ))
         today_dt = pd.to_datetime(datetime.date.today())
         if showing_full_gantt or (selected_start <= today_dt <= selected_end):
             today_str = datetime.date.today().strftime("%Y-%m-%d")
@@ -3926,70 +4021,7 @@ elif menu == MENU_SPECIFIC:
                     else:
                         st.error("项目名称不能为空。")
 
-    st.subheader("🗂️ To do List（轻量）")
-    todo_list = db.setdefault("系统配置", {}).setdefault("PM_TODO_LIST", [])
-    todo_proj_options = ["(不关联项目)"] + valid_projs
-
-    t1, t2, t3, t4 = st.columns([2.5, 1.2, 1.6, 0.9])
-    with t1:
-        todo_title = st.text_input("任务", key="todo_title_global", placeholder="如：T2 结构件确认")
-    with t2:
-        todo_due = st.date_input("DDL(可空)", value=datetime.date.today(), key="todo_due_global")
-        todo_has_due = st.checkbox("启用DDL", value=False, key="todo_due_on_global")
-    with t3:
-        todo_ref_proj = st.selectbox("关联项目(可选)", todo_proj_options, key="todo_ref_global")
-    with t4:
-        st.write("")
-        if st.button("➕ 添加", key="todo_add_global", type="primary"):
-            if todo_title.strip():
-                todo_list.append({
-                    "任务": todo_title.strip(),
-                    "关联项目": "" if todo_ref_proj == "(不关联项目)" else todo_ref_proj,
-                    "DDL": str(todo_due) if todo_has_due else "",
-                    "完成": False,
-                    "创建": str(datetime.date.today())
-                })
-                sync_save_db("系统配置")
-                st.rerun()
-
-    hint_target = db.get(todo_ref_proj, {}).get("Target", "") if todo_ref_proj in db else ""
-    if hint_target and str(hint_target).strip().upper() != "TBD":
-        st.caption(f"🔎 提示：[{todo_ref_proj}] 当前预计开定为 {hint_target}")
-
-    if todo_list:
-        todo_sorted = sorted(todo_list, key=lambda x: (1 if x.get("完成") else 0, x.get("DDL", "9999-12-31"), x.get("创建", "")))
-        for i, td in enumerate(todo_sorted):
-            c1, c2, c3, c4, c5 = st.columns([0.7, 3, 1.2, 1.2, 1])
-            due_txt = str(td.get("DDL", "")).strip()
-            due_dt = parse_date_safe(due_txt) if due_txt else None
-            tag = ""
-            if due_dt and not td.get("完成"):
-                dd = (due_dt - datetime.date.today()).days
-                if dd <= 0:
-                    tag = " 🔴今日/逾期"
-                elif dd == 1:
-                    tag = " 🟡明日到期"
-            with c1:
-                done = st.checkbox("", value=bool(td.get("完成")), key=f"todo_done_global_{i}")
-                td["完成"] = done
-            with c2:
-                st.markdown(f"**{td.get('任务','')}**{tag}")
-                ref_proj = td.get("关联项目", "")
-                st.caption(ref_proj if ref_proj else "(未关联项目)")
-            with c3:
-                st.write(td.get("DDL", "-" ) or "-")
-            with c4:
-                st.write("✅ 已完成" if td.get("完成") else "⏳ 进行中")
-            with c5:
-                if st.button("🗑️", key=f"todo_del_global_{i}"):
-                    todo_list.remove(td)
-                    sync_save_db("系统配置")
-                    st.rerun()
-        if st.button("💾 保存To do状态", key="todo_save_global"):
-            db.setdefault("系统配置", {})["PM_TODO_LIST"] = todo_list
-            sync_save_db("系统配置")
-            st.rerun()
-
+    todo_list = render_pm_todo_manager(valid_projs, current_pm)
     st.divider()
 
     if not valid_projs:
