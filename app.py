@@ -179,27 +179,42 @@ st.markdown("""
 <style>
 :root {
     --pm-border: #dbe3ef;
-    --pm-bg: #f5f8fc;
+    --pm-bg-start: #f8fbff;
+    --pm-bg-end: #f5f8fc;
+    --pm-sidebar-start: #f7fafc;
+    --pm-sidebar-end: #edf4ff;
     --pm-card: #ffffff;
     --pm-text-soft: #475569;
     --pm-accent: #0f766e;
 }
-/* 防止切页时整页白屏 */
-.stSpinner > div { margin-top: 20vh; }
-/* 全局背景更柔和，减轻长时间浏览疲劳 */
-[data-testid="stAppViewContainer"] {
-    background: linear-gradient(180deg, #f8fbff 0%, var(--pm-bg) 100%);
+@media (prefers-color-scheme: dark) {
+    :root {
+        --pm-border: #334155;
+        --pm-bg-start: #0b1220;
+        --pm-bg-end: #111827;
+        --pm-sidebar-start: #0f172a;
+        --pm-sidebar-end: #111827;
+        --pm-card: #0f172a;
+        --pm-text-soft: #cbd5e1;
+        --pm-accent: #22c55e;
+    }
 }
-/* 表格行高压缩，显示更多数据 */
+/* prevent blank flash while switching pages */
+.stSpinner > div { margin-top: 20vh; }
+/* app background follows system light/dark */
+[data-testid="stAppViewContainer"] {
+    background: linear-gradient(180deg, var(--pm-bg-start) 0%, var(--pm-bg-end) 100%);
+}
+/* compact table cells for denser information */
 [data-testid="stDataFrame"] table td { padding: 4px 8px !important; font-size: 13px; }
 [data-testid="stDataEditor"] [role="gridcell"] { font-size: 13px; }
-/* 侧边栏视觉优化 */
-section[data-testid="stSidebar"] { background: linear-gradient(180deg, #f7fafc 0%, #edf4ff 100%); }
+/* sidebar visual tuning with same theme variables */
+section[data-testid="stSidebar"] { background: linear-gradient(180deg, var(--pm-sidebar-start) 0%, var(--pm-sidebar-end) 100%); }
 section[data-testid="stSidebar"] .stButton button { width: 100%; border-radius: 8px; }
-/* 指标卡片更清晰 */
+/* metric cards */
 [data-testid="stMetric"] { border: 1px solid var(--pm-border); border-radius: 10px; padding: 6px 10px; background: var(--pm-card); }
 [data-testid="stMetric"] [data-testid="stMetricLabel"] { color: var(--pm-text-soft); }
-/* 隐藏 streamlit 页脚 */
+/* hide streamlit footer */
 footer { visibility: hidden; }
 </style>
 """, unsafe_allow_html=True)
@@ -867,6 +882,106 @@ def restore_attachments_from_zip(db_obj, zf):
     return db_obj, restored, missing
 
 
+def refresh_project_todo_links(proj_name):
+    proj = str(proj_name or "").strip()
+    db_obj = st.session_state.db if isinstance(st.session_state.get("db"), dict) else {}
+    if not proj or proj == "\u7cfb\u7edf\u914d\u7f6e" or proj not in db_obj:
+        return 0
+
+    todo_all = db_obj.get("\u7cfb\u7edf\u914d\u7f6e", {}).get("PM_TODO_LIST", [])
+    todo_items = [
+        td for td in todo_all
+        if str((td or {}).get("\u5173\u8054\u9879\u76ee", "")).strip() == proj and str((td or {}).get("\u4efb\u52a1", "")).strip()
+    ]
+    if not todo_items:
+        return 0
+
+    logs = []
+    for comp_name, comp_info in db_obj.get(proj, {}).get("\u90e8\u4ef6\u5217\u8868", {}).items():
+        for lg in (comp_info or {}).get("\u65e5\u5fd7\u6d41", []):
+            if is_hidden_system_log(lg):
+                continue
+            evt = str((lg or {}).get("\u4e8b\u4ef6", "")).strip()
+            if not evt:
+                continue
+            d_txt = str((lg or {}).get("\u65e5\u671f", "")).strip()
+            try:
+                d_obj = datetime.datetime.strptime(d_txt, "%Y-%m-%d").date()
+            except Exception:
+                d_obj = datetime.date.min
+            logs.append({
+                "dt": d_obj,
+                "date": d_txt,
+                "component": str(comp_name),
+                "stage": str((lg or {}).get("\u5de5\u5e8f", "")).strip(),
+                "event": evt,
+                "event_norm": norm_text(evt),
+            })
+
+    if not logs:
+        return 0
+
+    logs.sort(key=lambda x: (x.get("dt") or datetime.date.min, x.get("date", ""), x.get("component", "")), reverse=True)
+
+    def _safe_date(s):
+        try:
+            return datetime.datetime.strptime(str(s or "").strip(), "%Y-%m-%d").date()
+        except Exception:
+            return None
+
+    write_ts = datetime.datetime.now().isoformat(timespec="seconds")
+    updated = 0
+
+    for td in todo_items:
+        task = str((td or {}).get("\u4efb\u52a1", "")).strip()
+        task_norm = norm_text(task)
+        if len(task_norm) < 2:
+            continue
+
+        short_task = task[:8].strip()
+        short_norm = norm_text(short_task)
+        hit = None
+        for item in logs:
+            evt = item["event"]
+            evt_norm = item["event_norm"]
+            matched = False
+            if "[\u5173\u8054To do]" in evt and (task in evt or (task_norm and task_norm in evt_norm)):
+                matched = True
+            elif len(task_norm) >= 4 and task_norm in evt_norm:
+                matched = True
+            elif short_norm and len(short_norm) >= 4 and short_norm in evt_norm:
+                matched = True
+            if matched:
+                hit = item
+                break
+
+        if not hit:
+            continue
+
+        cur_dt = _safe_date(td.get("\u6700\u8fd1\u8054\u52a8\u65e5\u671f", ""))
+        hit_dt = hit.get("dt") if hit.get("dt") != datetime.date.min else None
+        if cur_dt and hit_dt and hit_dt < cur_dt:
+            continue
+
+        desired = {
+            "\u6700\u8fd1\u8054\u52a8\u6a21\u5757": "\u65e5\u5fd7\u8054\u52a8\u56de\u586b",
+            "\u6700\u8fd1\u8054\u52a8\u65e5\u671f": hit.get("date", ""),
+            "\u6700\u8fd1\u8054\u52a8\u9879\u76ee": proj,
+            "\u6700\u8fd1\u8054\u52a8\u90e8\u4ef6": hit.get("component", ""),
+            "\u6700\u8fd1\u8054\u52a8\u9636\u6bb5": hit.get("stage", ""),
+            "\u6700\u8fd1\u8054\u52a8\u5199\u5165\u65f6\u95f4": write_ts,
+        }
+        changed = False
+        for k, v in desired.items():
+            if str(td.get(k, "")) != str(v):
+                td[k] = v
+                changed = True
+        if changed:
+            updated += 1
+
+    return updated
+
+
 def auto_sync_milestone(proj_name):
     proj_data = st.session_state.db.get(proj_name)
     if not isinstance(proj_data, dict):
@@ -925,18 +1040,20 @@ def auto_sync_milestone(proj_name):
 
 def sync_save_db(changed_proj=None):
     """
-    changed_proj: 传入项目名时只写该项目（并发安全）
-                  不传时全量保存（备份恢复/系统配置变更时用）
+    changed_proj: save one project key when provided.
+    otherwise save all projects.
     """
-    if changed_proj and changed_proj in st.session_state.db and changed_proj != "系统配置":
+    if changed_proj and changed_proj in st.session_state.db and changed_proj != "\u7cfb\u7edf\u914d\u7f6e":
         auto_sync_milestone(changed_proj)
+        refresh_project_todo_links(changed_proj)
     else:
         for p in st.session_state.db:
-            if p != "系统配置":
+            if p != "\u7cfb\u7edf\u914d\u7f6e":
                 auto_sync_milestone(p)
+                refresh_project_todo_links(p)
     if changed_proj:
         db_manager.save_one(changed_proj, st.session_state.db[changed_proj])
-        db_manager.save_one("系统配置", st.session_state.db["系统配置"])
+        db_manager.save_one("\u7cfb\u7edf\u914d\u7f6e", st.session_state.db["\u7cfb\u7edf\u914d\u7f6e"])
     else:
         db_manager.save(st.session_state.db)
 def get_macro_phase(detail_stage):
@@ -3771,10 +3888,182 @@ if menu == MENU_DASHBOARD:
                     st.info("\u672a\u68c0\u6d4b\u5230\u53ef\u4fdd\u5b58\u7684\u53d8\u5316\u3002")
                 else:
                     for proj in list(dict.fromkeys(changed_projects)):
-                        db_manager.save_one(proj, db[proj])
-                    db_manager.save_one("\u7cfb\u7edf\u914d\u7f6e", db["\u7cfb\u7edf\u914d\u7f6e"])
+                        sync_save_db(proj)
                     st.success(f"\u5df2\u4fdd\u5b58 {changed_count} \u6761\u9879\u76ee\u66f4\u65b0\u3002")
                     st.rerun()
+
+
+        with st.expander("\U0001f5c2 \u5927\u76d8\u4e8b\u4ef6\u5feb\u6539\uff08\u770b\u5230\u660e\u7ec6\u53ef\u76f4\u63a5\u4fee\uff09", expanded=False):
+            st.caption("\u6309\u9879\u76ee\u7b5b\u9009\u65e5\u5fd7\u540e\uff0c\u53ef\u76f4\u63a5\u4fee\u6539\u65e5\u671f/\u5de5\u5e8f/\u4e8b\u4ef6/\u63d0\u5ba1\u5b57\u6bb5\uff0c\u4fdd\u5b58\u540e\u5404\u6a21\u5757\u540c\u6b65\u751f\u6548\u3002")
+            ef1, ef2, ef3 = st.columns([2.0, 2.2, 1.0])
+            with ef1:
+                event_proj_scope = st.selectbox("\u9879\u76ee\u8303\u56f4", ["\U0001f310 \u5168\u90e8\u9879\u76ee"] + valid_projs, key="dash_event_scope")
+            with ef2:
+                event_kw = st.text_input("\u5173\u952e\u5b57\u7b5b\u9009\uff08\u9879\u76ee/\u90e8\u4ef6/\u4e8b\u4ef6\uff09", key="dash_event_kw", placeholder="\u4f8b\uff1a\u91cc\u592b / \u6253\u56de / \u5305\u88c5")
+            with ef3:
+                event_limit = int(st.number_input("\u663e\u793a\u6761\u6570", min_value=20, max_value=500, value=120, step=20, key="dash_event_limit"))
+
+            scope_projects = valid_projs if event_proj_scope == "\U0001f310 \u5168\u90e8\u9879\u76ee" else [event_proj_scope]
+            event_rows = []
+            id_seeded = False
+            for p_name in scope_projects:
+                for c_name, c_info in db.get(p_name, {}).get("\u90e8\u4ef6\u5217\u8868", {}).items():
+                    for lg in c_info.get("\u65e5\u5fd7\u6d41", []):
+                        if is_hidden_system_log(lg):
+                            continue
+                        if not str(lg.get("_id", "")).strip():
+                            lg["_id"] = str(uuid.uuid4())
+                            id_seeded = True
+                        event_rows.append({
+                            "_id": str(lg.get("_id", "")).strip(),
+                            "\u65e5\u671f": str(lg.get("\u65e5\u671f", "")),
+                            "\u9879\u76ee": p_name,
+                            "\u90e8\u4ef6": c_name,
+                            "\u5de5\u5e8f": str(lg.get("\u5de5\u5e8f", "")),
+                            "\u7c7b\u578b": str(lg.get("\u6d41\u8f6c", "")),
+                            "\u4e8b\u4ef6": str(lg.get("\u4e8b\u4ef6", "")),
+                            "\u63d0\u5ba1\u7c7b\u578b": str(lg.get("\u63d0\u5ba1\u7c7b\u578b", "(\u65e0)") or "(\u65e0)"),
+                            "\u63d0\u5ba1\u7ed3\u679c": str(lg.get("\u63d0\u5ba1\u7ed3\u679c", "(\u65e0)") or "(\u65e0)"),
+                            "\u63d0\u5ba1\u8f6e\u6b21": normalize_review_round(lg.get("\u63d0\u5ba1\u8f6e\u6b21", "")),
+                            "\u5220\u9664": False,
+                        })
+
+            if id_seeded and scope_projects:
+                for p_name in scope_projects:
+                    if p_name in db:
+                        sync_save_db(p_name)
+
+            def _event_sort_key(r):
+                d = str((r or {}).get("\u65e5\u671f", "")).strip()
+                try:
+                    d_obj = datetime.datetime.strptime(d, "%Y-%m-%d").date()
+                except Exception:
+                    d_obj = datetime.date.min
+                return (d_obj, str((r or {}).get("\u9879\u76ee", "")), str((r or {}).get("\u90e8\u4ef6", "")))
+
+            event_rows = sorted(event_rows, key=_event_sort_key, reverse=True)
+            kw_norm = norm_text(event_kw)
+            if kw_norm:
+                event_rows = [
+                    r for r in event_rows
+                    if kw_norm in norm_text(
+                        f"{r.get('\\u9879\\u76ee','')} {r.get('\\u90e8\\u4ef6','')} {r.get('\\u5de5\\u5e8f','')} {r.get('\\u4e8b\\u4ef6','')}"
+                    )
+                ]
+
+            edited_event_df = pd.DataFrame()
+            if event_rows:
+                event_df = pd.DataFrame(event_rows[:event_limit])
+                edited_event_df = st.data_editor(
+                    event_df,
+                    width='stretch',
+                    hide_index=True,
+                    num_rows="fixed",
+                    column_config={
+                        "_id": st.column_config.TextColumn("_id", disabled=True, width="small"),
+                        "\u65e5\u671f": st.column_config.TextColumn("\u65e5\u671f", width="small"),
+                        "\u9879\u76ee": st.column_config.TextColumn("\u9879\u76ee", disabled=True, width="medium"),
+                        "\u90e8\u4ef6": st.column_config.TextColumn("\u90e8\u4ef6", disabled=True, width="medium"),
+                        "\u5de5\u5e8f": st.column_config.SelectboxColumn("\u5de5\u5e8f", options=STAGES_UNIFIED, width="medium"),
+                        "\u7c7b\u578b": st.column_config.TextColumn("\u7c7b\u578b", width="small"),
+                        "\u4e8b\u4ef6": st.column_config.TextColumn("\u4e8b\u4ef6", width="large"),
+                        "\u63d0\u5ba1\u7c7b\u578b": st.column_config.SelectboxColumn("\u63d0\u5ba1\u7c7b\u578b", options=REVIEW_TYPE_OPTIONS, width="small"),
+                        "\u63d0\u5ba1\u7ed3\u679c": st.column_config.SelectboxColumn("\u63d0\u5ba1\u7ed3\u679c", options=REVIEW_RESULT_OPTIONS, width="small"),
+                        "\u63d0\u5ba1\u8f6e\u6b21": st.column_config.NumberColumn("\u63d0\u5ba1\u8f6e\u6b21", min_value=1, step=1, width="small"),
+                        "\u5220\u9664": st.column_config.CheckboxColumn("\u5220\u9664", width="small"),
+                    },
+                    disabled=["_id", "\u9879\u76ee", "\u90e8\u4ef6"],
+                    key="dashboard_event_editor",
+                )
+            else:
+                st.info("\u5f53\u524d\u7b5b\u9009\u6761\u4ef6\u4e0b\u65e0\u4e8b\u4ef6\u660e\u7ec6\u3002")
+
+            if st.button("\U0001f4be \u4fdd\u5b58\u4e8b\u4ef6\u660e\u7ec6\u4fee\u6539", type="primary", key="btn_dash_event_save"):
+                if edited_event_df.empty:
+                    st.info("\u5f53\u524d\u6ca1\u6709\u53ef\u4fdd\u5b58\u7684\u4e8b\u4ef6\u884c\u3002")
+                else:
+                    id_map = {}
+                    for p_name in valid_projs:
+                        for c_name, c_info in db.get(p_name, {}).get("\u90e8\u4ef6\u5217\u8868", {}).items():
+                            for lg in c_info.get("\u65e5\u5fd7\u6d41", []):
+                                rid = str(lg.get("_id", "")).strip()
+                                if rid:
+                                    id_map[rid] = (p_name, c_name, lg)
+
+                    touched_projects = set()
+                    update_count = 0
+                    delete_count = 0
+
+                    for row in edited_event_df.to_dict("records"):
+                        rid = str(row.get("_id", "")).strip()
+                        bind = id_map.get(rid)
+                        if not bind:
+                            continue
+                        p_name, c_name, lg = bind
+
+                        if bool(row.get("\u5220\u9664", False)):
+                            lg["_delete_me"] = True
+                            touched_projects.add(p_name)
+                            delete_count += 1
+                            continue
+
+                        new_date = str(row.get("\u65e5\u671f", lg.get("\u65e5\u671f", ""))).strip() or str(lg.get("\u65e5\u671f", ""))
+                        new_stage = str(row.get("\u5de5\u5e8f", lg.get("\u5de5\u5e8f", ""))).strip() or str(lg.get("\u5de5\u5e8f", ""))
+                        if new_stage not in STAGES_UNIFIED:
+                            new_stage = str(lg.get("\u5de5\u5e8f", ""))
+                        new_type = str(row.get("\u7c7b\u578b", lg.get("\u6d41\u8f6c", ""))).strip() or str(lg.get("\u6d41\u8f6c", ""))
+                        new_event = str(row.get("\u4e8b\u4ef6", lg.get("\u4e8b\u4ef6", ""))).strip() or str(lg.get("\u4e8b\u4ef6", ""))
+                        new_rt = str(row.get("\u63d0\u5ba1\u7c7b\u578b", lg.get("\u63d0\u5ba1\u7c7b\u578b", "(\u65e0)"))).strip() or "(\u65e0)"
+                        if new_rt not in REVIEW_TYPE_OPTIONS:
+                            new_rt = "(\u65e0)"
+                        new_rr = str(row.get("\u63d0\u5ba1\u7ed3\u679c", lg.get("\u63d0\u5ba1\u7ed3\u679c", "(\u65e0)"))).strip() or "(\u65e0)"
+                        if new_rr not in REVIEW_RESULT_OPTIONS:
+                            new_rr = "(\u65e0)"
+                        new_round = normalize_review_round(row.get("\u63d0\u5ba1\u8f6e\u6b21", lg.get("\u63d0\u5ba1\u8f6e\u6b21", ""))) if new_rt != "(\u65e0)" else ""
+
+                        changed = False
+                        if str(lg.get("\u65e5\u671f", "")) != new_date:
+                            lg["\u65e5\u671f"] = new_date
+                            changed = True
+                        if str(lg.get("\u5de5\u5e8f", "")) != new_stage:
+                            lg["\u5de5\u5e8f"] = new_stage
+                            changed = True
+                        if str(lg.get("\u6d41\u8f6c", "")) != new_type:
+                            lg["\u6d41\u8f6c"] = new_type
+                            changed = True
+                        if str(lg.get("\u4e8b\u4ef6", "")) != new_event:
+                            lg["\u4e8b\u4ef6"] = new_event
+                            changed = True
+                        if str(lg.get("\u63d0\u5ba1\u7c7b\u578b", "(\u65e0)")) != new_rt:
+                            lg["\u63d0\u5ba1\u7c7b\u578b"] = new_rt
+                            changed = True
+                        if str(lg.get("\u63d0\u5ba1\u7ed3\u679c", "(\u65e0)")) != new_rr:
+                            lg["\u63d0\u5ba1\u7ed3\u679c"] = new_rr
+                            changed = True
+                        if str(lg.get("\u63d0\u5ba1\u8f6e\u6b21", "")) != str(new_round):
+                            lg["\u63d0\u5ba1\u8f6e\u6b21"] = new_round
+                            changed = True
+
+                        if changed:
+                            touched_projects.add(p_name)
+                            update_count += 1
+
+                    if touched_projects:
+                        for p_name in list(touched_projects):
+                            for c_name, c_info in db.get(p_name, {}).get("\u90e8\u4ef6\u5217\u8868", {}).items():
+                                logs = []
+                                for lg in c_info.get("\u65e5\u5fd7\u6d41", []):
+                                    if lg.get("_delete_me"):
+                                        continue
+                                    lg.pop("_delete_me", None)
+                                    logs.append(lg)
+                                logs = sorted(logs, key=lambda x: str(x.get("\u65e5\u671f", "")))
+                                c_info["\u65e5\u5fd7\u6d41"] = logs
+                            sync_save_db(p_name)
+                        st.success(f"\u4e8b\u4ef6\u5df2\u4fdd\u5b58\uff1a\u66f4\u65b0 {update_count} \u6761\uff0c\u5220\u9664 {delete_count} \u6761\u3002")
+                        st.rerun()
+                    else:
+                        st.info("\u672a\u68c0\u6d4b\u5230\u9700\u8981\u4fdd\u5b58\u7684\u4e8b\u4ef6\u53d8\u66f4\u3002")
 
         def _hl_warn(v):
             return 'background-color: #fef08a; color: #111827; font-weight: 600' if str(v).strip() else ''
