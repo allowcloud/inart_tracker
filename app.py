@@ -638,7 +638,7 @@ class _MongoDBManager:
         return _LocalJsonDBManager(self.local_json_path)
 
     def _load_cached(self):
-        if self.use_local_json or self.col is None:
+        if getattr(self, "use_local_json", False) or getattr(self, "col", None) is None:
             return None
         try:
             docs = list(self.col.find({}, {"_id": 0}))
@@ -648,7 +648,7 @@ class _MongoDBManager:
                 if key:
                     data[key] = doc.get("payload", {})
             return data if data else None
-        except self.PyMongoError as e:
+        except Exception as e:
             st.warning(f"Mongo ?????????? JSON ???{e}")
             return None
 
@@ -672,12 +672,17 @@ class _MongoDBManager:
         return DEFAULT_DB.copy()
 
     def load(self):
-        if self.use_local_json:
+        if getattr(self, "use_local_json", False):
             return self._local_manager().load()
-        cached = self._load_cached()
-        if cached is not None:
-            return cached
-        return self._migrate_from_json()
+        try:
+            cached = self._load_cached()
+            if cached is not None:
+                return cached
+            return self._migrate_from_json()
+        except Exception as e:
+            st.warning(f"????????????? JSON?{e}")
+            self.use_local_json = True
+            return self._local_manager().load()
 
     def save(self, data):
         """????????????????????"""
@@ -775,44 +780,93 @@ def _get_mongo_uri():
         return os.environ.get("MONGO_URI", "")
 
 
+DB_MANAGER_CACHE_BUSTER = "20260309_bootfix_1"
+
+
 @st.cache_resource(show_spinner=False)
-def _get_cached_mongo_manager(uri):
+def _get_cached_mongo_manager(uri, cache_buster=DB_MANAGER_CACHE_BUSTER):
     return _MongoDBManager(uri)
 
 
-if "db_manager" not in globals():
+def _build_db_manager(force_local=False):
+    local_path = os.environ.get("INART_DATA_FILE", "tracker_data_web_v20.json")
+    if force_local:
+        return _LocalJsonDBManager(local_path)
+
     mongo_uri = _get_mongo_uri()
-    if mongo_uri:
-        db_manager = _get_cached_mongo_manager(mongo_uri)
-    else:
-        db_manager = _LocalJsonDBManager(os.environ.get("INART_DATA_FILE", "tracker_data_web_v20.json"))
+    if not mongo_uri:
+        return _LocalJsonDBManager(local_path)
+
+    manager = _get_cached_mongo_manager(mongo_uri, DB_MANAGER_CACHE_BUSTER)
+    required_methods = ["load", "save", "save_one", "save_file_bytes", "read_file_bytes", "import_file_bytes"]
+    missing = [name for name in required_methods if not hasattr(manager, name)]
+    if missing:
+        st.warning(f"????????????????????{', '.join(missing)}")
+        manager = _MongoDBManager(mongo_uri)
+
+    if isinstance(manager, _MongoDBManager):
+        manager.PyMongoError = getattr(manager, "PyMongoError", Exception)
+        manager.NoFile = getattr(manager, "NoFile", FileNotFoundError)
+        manager.ObjectId = getattr(manager, "ObjectId", (lambda raw: raw))
+        manager.local_json_path = getattr(manager, "local_json_path", local_path)
+        manager.use_local_json = bool(getattr(manager, "use_local_json", False))
+        manager.client = getattr(manager, "client", None)
+        manager.col = getattr(manager, "col", None)
+        manager.fs = getattr(manager, "fs", None)
+        if not manager.use_local_json and manager.col is None:
+            manager.use_local_json = True
+
+    return manager
 
 def _ensure_db_shape(db_obj):
     if not isinstance(db_obj, dict):
         db_obj = {}
-    cfg = db_obj.setdefault("系统配置", {})
+    cfg = db_obj.get("????")
+    if not isinstance(cfg, dict):
+        db_obj["????"] = {}
+        cfg = db_obj["????"]
     for k, v in DEFAULT_SYS_CFG.items():
         if k not in cfg:
             cfg[k] = _deep_copy_obj(v)
     for p, d in list(db_obj.items()):
-        if p == "系统配置":
+        if p == "????":
             continue
         if not isinstance(d, dict):
             db_obj[p] = {}
             d = db_obj[p]
-        d.setdefault("负责人", "")
-        d.setdefault("跟单", "")
-        d.setdefault("Milestone", "待立项")
+        d.setdefault("???", "")
+        d.setdefault("??", "")
+        d.setdefault("Milestone", "???")
         d.setdefault("Target", "TBD")
-        d.setdefault("发货区间", "")
-        d.setdefault("部件列表", {})
-        d.setdefault("发货数据", {})
-        d.setdefault("成本数据", {})
+        d.setdefault("????", "")
+        if not isinstance(d.get("????"), dict):
+            d["????"] = {}
+        if not isinstance(d.get("????"), dict):
+            d["????"] = {}
+        if not isinstance(d.get("????"), dict):
+            d["????"] = {}
     return db_obj
 
 
+
+def _load_db_or_fallback():
+    global db_manager
+    db_manager = _build_db_manager(force_local=False)
+    try:
+        loaded = db_manager.load()
+    except Exception as e:
+        st.warning(f"????????????? JSON?{e}")
+        db_manager = _build_db_manager(force_local=True)
+        try:
+            loaded = db_manager.load()
+        except Exception as inner:
+            st.error(f"????????????????{inner}")
+            loaded = DEFAULT_DB.copy()
+    return _ensure_db_shape(loaded)
+
+
 if "db" not in st.session_state:
-    st.session_state.db = _ensure_db_shape(db_manager.load())
+    st.session_state.db = _load_db_or_fallback()
 else:
     st.session_state.db = _ensure_db_shape(st.session_state.db)
 
