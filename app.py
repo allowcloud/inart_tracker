@@ -605,7 +605,7 @@ class _MongoDBManager:
             from bson import ObjectId
         except Exception as e:
             self.use_local_json = True
-            st.warning(f"Mongo ???????????? JSON?{e}")
+            st.warning(f"Mongo 初始化失败，已回退本地 JSON：{e}")
             return
 
         self.PyMongoError = PyMongoError
@@ -614,7 +614,7 @@ class _MongoDBManager:
         uri = uri or _get_mongo_uri()
         if not uri:
             self.use_local_json = True
-            st.info("?? ??? MONGO_URI????????? JSON ?????")
+            st.info("未检测到 MONGO_URI，使用本地 JSON 存储。")
             return
 
         try:
@@ -633,7 +633,7 @@ class _MongoDBManager:
             self.client = None
             self.col = None
             self.fs = None
-            st.warning(f"Mongo ??????????? JSON?{e}")
+            st.warning(f"Mongo 连接失败，已回退本地 JSON：{e}")
 
     def _local_manager(self):
         return _LocalJsonDBManager(self.local_json_path)
@@ -650,11 +650,11 @@ class _MongoDBManager:
                     data[key] = doc.get("payload", {})
             return data if data else None
         except Exception as e:
-            st.warning(f"Mongo ?????????? JSON ???{e}")
+            st.warning(f"Mongo 读取失败，回退 JSON 缓存：{e}")
             return None
 
     def _migrate_from_json(self):
-        """???????? JSON ?? MongoDB?"""
+        """尝试将本地 JSON 数据迁移到 MongoDB。"""
         json_path = self.local_json_path
         if os.path.exists(json_path):
             for enc in ["utf-8", "utf-8-sig", "gbk"]:
@@ -681,12 +681,12 @@ class _MongoDBManager:
                 return cached
             return self._migrate_from_json()
         except Exception as e:
-            st.warning(f"????????????? JSON?{e}")
+            st.warning(f"数据库加载失败，回退本地 JSON：{e}")
             self.use_local_json = True
             return self._local_manager().load()
 
     def save(self, data):
-        """????????????????????"""
+        """保存全量数据（Mongo 异常时由调用方回退）。"""
         if self.use_local_json:
             self._local_manager().save(data)
             return
@@ -699,10 +699,10 @@ class _MongoDBManager:
             if ops:
                 self.col.bulk_write(ops, ordered=False)
         except self.PyMongoError as e:
-            st.warning(f"Mongo ????: {e}")
+            st.warning(f"Mongo 保存失败: {e}")
 
     def save_one(self, key, value):
-        """???????????????????????????"""
+        """保存单个 key（减少并发覆盖风险）。"""
         if self.use_local_json:
             self._local_manager().save_one(key, value)
             return
@@ -713,7 +713,7 @@ class _MongoDBManager:
                 upsert=True,
             )
         except self.PyMongoError as e:
-            st.warning(f"Mongo ???? [{key}]: {e}")
+            st.warning(f"Mongo 保存失败 [{key}]: {e}")
 
     def save_file_bytes(self, file_bytes, filename="", prefix="upload"):
         if self.use_local_json or self.fs is None:
@@ -728,7 +728,7 @@ class _MongoDBManager:
             )
             return f"GRIDFS:{file_id}"
         except self.PyMongoError as e:
-            st.warning(f"Mongo ??????: {e}")
+            st.warning(f"Mongo 附件保存失败: {e}")
             return ""
 
     def read_file_bytes(self, ref):
@@ -746,7 +746,7 @@ class _MongoDBManager:
         except self.NoFile:
             return None
         except self.PyMongoError as e:
-            st.warning(f"Mongo ??????: {e}")
+            st.warning(f"Mongo 附件读取失败: {e}")
             return None
 
     def import_file_bytes(self, ref, file_bytes, filename=""):
@@ -770,7 +770,7 @@ class _MongoDBManager:
                 )
             return ref
         except self.PyMongoError as e:
-            st.warning(f"Mongo ??????: {e}")
+            st.warning(f"Mongo 附件恢复失败: {e}")
             return self.save_file_bytes(file_bytes, filename=filename, prefix="restore")
 
 
@@ -802,7 +802,7 @@ def _build_db_manager(force_local=False):
     required_methods = ["load", "save", "save_one", "save_file_bytes", "read_file_bytes", "import_file_bytes"]
     missing = [name for name in required_methods if not hasattr(manager, name)]
     if missing:
-        st.warning(f"????????????????????{', '.join(missing)}")
+        st.warning(f"数据库管理器缺少必要方法，已重建实例：{', '.join(missing)}")
         manager = _MongoDBManager(mongo_uri)
 
     if isinstance(manager, _MongoDBManager):
@@ -857,17 +857,17 @@ def _load_db_or_fallback():
     try:
         loaded = db_manager.load()
     except Exception as e:
-        st.warning(f"????????????? JSON?{e}")
+        st.warning(f"数据库加载失败，回退本地 JSON：{e}")
         db_manager = _build_db_manager(force_local=True)
         try:
             loaded = db_manager.load()
         except Exception as inner:
-            st.error(f"????????????????{inner}")
+            st.error(f"本地 JSON 加载也失败：{inner}")
             loaded = DEFAULT_DB.copy()
     return _ensure_db_shape(loaded)
 
 
-# db_manager ????????????????????? db ?????
+# db_manager 全局实例（用于附件与持久化接口）
 db_manager = _build_db_manager(force_local=False)
 
 if "db" not in st.session_state:
@@ -1534,6 +1534,33 @@ def parse_date_safe(date_str):
         return datetime.datetime.strptime(str(date_str), "%Y-%m-%d").date()
     except:
         return None
+
+def extract_deadline_from_text(text, ref_date=None):
+    """从 CP/DDL 合并文本提取日期，支持 YYYY-MM-DD / YYYY/MM/DD / M/D。"""
+    s = str(text or "").strip()
+    if not s:
+        return None
+    ref = ref_date or datetime.date.today()
+
+    m_full = re.search(r"(20\d{2})[-/](\d{1,2})[-/](\d{1,2})", s)
+    if m_full:
+        try:
+            return datetime.date(int(m_full.group(1)), int(m_full.group(2)), int(m_full.group(3)))
+        except:
+            pass
+
+    m_md = re.search(r"(^|\D)(\d{1,2})/(\d{1,2})(\D|$)", s)
+    if m_md:
+        try:
+            mm = int(m_md.group(2)); dd = int(m_md.group(3))
+            y = ref.year
+            cand = datetime.date(y, mm, dd)
+            if cand < ref - datetime.timedelta(days=30):
+                cand = datetime.date(y + 1, mm, dd)
+            return cand
+        except:
+            pass
+    return None
 
 def get_risk_status(milestone, target_date_str="TBD"):
     ms = str(milestone).strip()
@@ -2731,31 +2758,34 @@ def _extract_target_map_from_matrix(df_raw, valid_projs, alias_map):
 def get_status_label(milestone):
     bucket = get_project_status_bucket(milestone)
     if bucket == "pause":
-        return "?? ????"
+        return "⏸️ 暂停研发"
     if bucket == "done":
-        return "?? ???"
+        return "🏁 已结案"
     if bucket == "prod":
-        return "?? ???"
+        return "🟢 生产期"
     if bucket == "dev":
-        return "?? ???"
-    return "? ????"
+        return "🟡 研发期"
+    return "⚪ 未知阶段"
+
 
 
 def get_risk_status(milestone, target_date_str="TBD"):
     return get_status_label(milestone), "normal"
 
 
+
 def get_project_status_bucket(milestone):
     ms = str(milestone or "").strip()
-    if ms == "????":
+    if ms == "暂停研发":
         return "pause"
-    if ms in ["????", "????????", "? ???(??)"]:
+    if ms in ["生产结束", "项目结束撒花🎉", "✅ 已完成(结束)"]:
         return "done"
-    if ms in ["???", "???"]:
+    if ms in ["生产中", "下模中"]:
         return "prod"
-    if "??" in ms or ms in ["???", "???", "???"]:
+    if "研发" in ms or ms in ["待开定", "已开定", "待立项"]:
         return "dev"
     return "unknown"
+
 
 
 def month_last_day(year, month):
@@ -2766,9 +2796,10 @@ def month_last_day(year, month):
     return 30
 
 
+
 def parse_schedule_marker_date(schedule_str, marker_mode="target"):
     s = str(schedule_str or "").strip()
-    if not s or s.upper() in ["TBD", "NONE"] or s in ["-", "?", "?"]:
+    if not s or s.upper() in ["TBD", "NONE"] or s in ["-", "—", "无"]:
         return None
 
     for fmt in ["%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d"]:
@@ -2797,24 +2828,26 @@ def parse_schedule_marker_date(schedule_str, marker_mode="target"):
     return None
 
 
+
 def get_deadline_alert(milestone, target_text="TBD", ship_text="-", days=5):
     bucket = get_project_status_bucket(milestone)
     if bucket not in ["dev", "prod"]:
-        return "? ??", 2
+        return "✅ 正常", 2
 
     marker_mode = "target" if bucket == "dev" else "ship"
     raw_value = target_text if bucket == "dev" else ship_text
-    alert_name = "??" if bucket == "dev" else "??"
+    alert_name = "开定" if bucket == "dev" else "发货"
     deadline = parse_schedule_marker_date(raw_value, marker_mode=marker_mode)
     if not deadline:
-        return "? ??", 2
+        return "✅ 正常", 2
 
     diff_days = (deadline - datetime.date.today()).days
     if diff_days < 0:
-        return f"?? {alert_name}??", 0
+        return f"🔴 {alert_name}逾期", 0
     if diff_days <= int(days):
-        return f"?? {alert_name}??(<={int(days)}?)", 1
-    return "? ??", 2
+        return f"🟨 {alert_name}临期(<={int(days)}天)", 1
+    return "✅ 正常", 2
+
 
 
 def build_timeline_marker_info(proj_name, proj_label, milestone, target_text, ship_text):
@@ -2823,23 +2856,23 @@ def build_timeline_marker_info(proj_name, proj_label, milestone, target_text, sh
         mark_dt = parse_schedule_marker_date(target_text, marker_mode="target")
         if mark_dt:
             return {
-                "??": proj_label,
-                "????": proj_name,
-                "??": mark_dt.strftime("%Y-%m-%d"),
-                "????": "????",
-                "????": str(target_text or "TBD"),
-                "??": f"{proj_name}<br>?????{target_text}"
+                "项目": proj_label,
+                "项目原名": proj_name,
+                "日期": mark_dt.strftime("%Y-%m-%d"),
+                "标记类型": "研发开定",
+                "原始时间": str(target_text or "TBD"),
+                "悬浮": f"{proj_name}<br>研发开定：{target_text}"
             }
     if bucket == "prod":
         mark_dt = parse_schedule_marker_date(ship_text, marker_mode="ship")
         if mark_dt:
             return {
-                "??": proj_label,
-                "????": proj_name,
-                "??": mark_dt.strftime("%Y-%m-%d"),
-                "????": "????",
-                "????": str(ship_text or "-"),
-                "??": f"{proj_name}<br>?????{ship_text}"
+                "项目": proj_label,
+                "项目原名": proj_name,
+                "日期": mark_dt.strftime("%Y-%m-%d"),
+                "标记类型": "生产发货",
+                "原始时间": str(ship_text or "-"),
+                "悬浮": f"{proj_name}<br>生产发货：{ship_text}"
             }
     return None
 
@@ -5851,8 +5884,8 @@ elif menu == MENU_SETTINGS:
                 st.rerun()
         else:
             st.success("✅ 数据库已是最优状态，无需迁移！")
-            st.success("? ???????????????")
-            st.success("? ???????????????")
+            st.success("✅ 当前数据已是最优状态。")
+            st.success("✅ 可继续使用下方图片二次压缩工具。")
 
         st.divider()
         st.markdown("#### 🗜️ 图片重新压缩（进一步缩小 img_assets 目录）")
