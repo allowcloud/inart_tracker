@@ -818,35 +818,36 @@ def _build_db_manager(force_local=False):
             manager.use_local_json = True
 
     return manager
-
 def _ensure_db_shape(db_obj):
     if not isinstance(db_obj, dict):
         db_obj = {}
-    cfg = db_obj.get("????")
+    cfg_key = "系统配置"
+    cfg = db_obj.get(cfg_key)
     if not isinstance(cfg, dict):
-        db_obj["????"] = {}
-        cfg = db_obj["????"]
+        db_obj[cfg_key] = {}
+        cfg = db_obj[cfg_key]
     for k, v in DEFAULT_SYS_CFG.items():
         if k not in cfg:
             cfg[k] = _deep_copy_obj(v)
     for p, d in list(db_obj.items()):
-        if p == "????":
+        if p == cfg_key:
             continue
         if not isinstance(d, dict):
             db_obj[p] = {}
             d = db_obj[p]
-        d.setdefault("???", "")
-        d.setdefault("??", "")
-        d.setdefault("Milestone", "???")
+        d.setdefault("负责人", "")
+        d.setdefault("跟单", "")
+        d.setdefault("Milestone", "待立项")
         d.setdefault("Target", "TBD")
-        d.setdefault("????", "")
-        if not isinstance(d.get("????"), dict):
-            d["????"] = {}
-        if not isinstance(d.get("????"), dict):
-            d["????"] = {}
-        if not isinstance(d.get("????"), dict):
-            d["????"] = {}
+        d.setdefault("发货区间", "")
+        if not isinstance(d.get("部件列表"), dict):
+            d["部件列表"] = {}
+        if not isinstance(d.get("发货数据"), dict):
+            d["发货数据"] = {}
+        if not isinstance(d.get("成本数据"), dict):
+            d["成本数据"] = {}
     return db_obj
+
 
 
 
@@ -865,6 +866,9 @@ def _load_db_or_fallback():
             loaded = DEFAULT_DB.copy()
     return _ensure_db_shape(loaded)
 
+
+# db_manager ????????????????????? db ?????
+db_manager = _build_db_manager(force_local=False)
 
 if "db" not in st.session_state:
     st.session_state.db = _load_db_or_fallback()
@@ -3782,8 +3786,12 @@ if menu == MENU_DASHBOARD:
         )
 
         with st.expander("只读预览（含临期预警样式）", expanded=False):
+            preview_warn_cols = [c for c in ["开定延迟预警", "发货延迟预警"] if c in show_df.columns]
+            styled_preview = show_df.style
+            if preview_warn_cols:
+                styled_preview = styled_preview.map(_hl_warn, subset=preview_warn_cols)
             st.dataframe(
-                show_df.style.map(_hl_warn, subset=["临期预警"]),
+                styled_preview,
                 use_container_width=True
             )
     st.divider()
