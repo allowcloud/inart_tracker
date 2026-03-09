@@ -1805,11 +1805,11 @@ def format_todo_people_hint(td):
     bundle = infer_todo_people_bundle(td)
     notes = []
     if bundle["labels"]:
-        notes.append("已识别：" + " / ".join(bundle["labels"][:3]))
+        notes.append("已识别：" + " / ".join(bundle["labels"][:4]))
     if bundle["ambiguous"]:
-        notes.append("待确认：" + "；".join(bundle["ambiguous"][:2]))
+        notes.append("同名待确认（请填写完整角色-姓名）：" + "；".join(bundle["ambiguous"][:2]))
     if bundle["unknown"]:
-        notes.append("待补充：" + " / ".join(bundle["unknown"][:2]))
+        notes.append("未在库中找到（请先在进度明细里补充该人员信息）：" + " / ".join(bundle["unknown"][:2]))
     return " | ".join(notes) if notes else "未识别到人员"
 
 
@@ -1960,6 +1960,31 @@ def build_project_stage_segments(proj_label, proj_data):
             stage_records.setdefault(macro, []).append(entry)
             all_records.append(entry)
 
+    if stage_records.get("立项"):
+        launch_dates = sorted({x["date"] for x in stage_records["立项"]})
+        if launch_dates:
+            true_launch_day = launch_dates[0]
+            leftover_launch_records = [x for x in stage_records["立项"] if x["date"] > true_launch_day]
+            if leftover_launch_records:
+                stage_records["立项"] = [x for x in stage_records["立项"] if x["date"] == true_launch_day]
+                for entry in leftover_launch_records:
+                    reclassified = dict(
+                        entry,
+                        stage="建模",
+                        event=f"[立项补充资料→建模口径] {entry['event']}",
+                        raw_stage="建模(含打印/签样)",
+                    )
+                    stage_records.setdefault("建模", []).append(reclassified)
+                    for record in all_records:
+                        if (
+                            record["date"] == entry["date"]
+                            and record["component"] == entry["component"]
+                            and record["event"] == entry["event"]
+                            and record["stage"] == "立项"
+                        ):
+                            record["stage"] = "建模"
+                            break
+
     if not all_records:
         return []
 
@@ -2060,7 +2085,7 @@ def build_project_stage_segments(proj_label, proj_data):
             "工序阶段": "立项",
             "Start": launch_start.strftime("%Y-%m-%d"),
             "Finish": (launch_start + datetime.timedelta(days=1)).strftime("%Y-%m-%d"),
-            "详情": _detail_lines(launch_records, "• 立项固定按 1 天展示；后续补资料默认归入建模口径"),
+            "详情": _detail_lines(launch_records, "• 立项固定按 1 天展示；后续补充资料已归入【建模】口径"),
         })
 
     for stage in ["建模", "设计", "工程", "开模", "修模", "生产"]:
@@ -2115,7 +2140,7 @@ def build_project_stage_segments(proj_label, proj_data):
 
 def render_pm_todo_manager(valid_projs, current_pm):
     st.subheader("🗂️ To do List（CP/DDL 合并）")
-    st.caption("To do 只保留任务、DDL/CP、关联项目、关联人员。图片统一在进度明细里补，避免待办面板过重。")
+    st.caption("To do 专注任务、DDL/CP、关联项目、关联人员。图片统一在进度明细里补；人员只写姓名时，系统会优先匹配库中的完整角色-姓名。")
     cfg = db.setdefault("系统配置", {})
     todo_all = cfg.setdefault("PM_TODO_LIST", [])
     todo_proj_options = ["(不关联项目)"] + valid_projs
@@ -2132,6 +2157,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
         td.setdefault("关联项目", "")
         td.setdefault("关联人员", "")
         td.setdefault("完成", False)
+        td.setdefault("完成时间", "")
         td.setdefault("创建", str(today))
         td.setdefault("最近联动模块", "")
         td.setdefault("最近联动日期", "")
@@ -2226,6 +2252,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
                     "关联人员": final_people,
                     "所属视角": todo_scope,
                     "完成": False,
+                    "完成时间": "",
                     "创建": str(today),
                 })
                 cfg["PM_TODO_LIST"] = todo_all
@@ -2262,12 +2289,14 @@ def render_pm_todo_manager(valid_projs, current_pm):
         ),
     )
     for td in sorted_items:
+        done_at = str(td.get("完成时间", "")) if td.get("完成") else ""
         rows.append({
             "_id": str(td.get("_id", "")),
             "完成": bool(td.get("完成", False)),
             "任务": str(td.get("任务", "")),
             "CP/DDL": todo_cpddl_text(td),
             "关联项目": str(td.get("关联项目", "")),
+            "完成时间": done_at or "-",
             "关联人员": str(td.get("关联人员", "")),
             "人员识别": format_todo_people_hint(td),
             "所属视角": todo_scope_of(td),
@@ -2286,6 +2315,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
         column_config={
             "_id": st.column_config.TextColumn("_id", disabled=True, width="small"),
             "完成": st.column_config.CheckboxColumn("完成", width="small"),
+            "完成时间": st.column_config.TextColumn("完成时间", disabled=True, width="small"),
             "任务": st.column_config.TextColumn("任务", required=True, width="large"),
             "CP/DDL": st.column_config.TextColumn("CP/DDL", width="medium"),
             "关联项目": st.column_config.SelectboxColumn("关联项目", options=todo_proj_options, width="medium"),
@@ -2298,7 +2328,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
             "联动状态": st.column_config.TextColumn("联动状态", disabled=True, width="medium"),
             "删除": st.column_config.CheckboxColumn("删除", width="small"),
         },
-        disabled=["_id", "到期", "提醒", "开定识别", "联动状态", "人员识别"],
+        disabled=["_id", "完成时间", "到期", "提醒", "开定识别", "联动状态", "人员识别"],
         key="todo_editor_df",
     )
 
@@ -2332,6 +2362,8 @@ def render_pm_todo_manager(valid_projs, current_pm):
             if not people_raw and people_bundle["labels"]:
                 people_raw = ", ".join(people_bundle["labels"])
 
+            prev_done = bool(td.get("完成", False))
+            new_done = bool(row.get("完成", False))
             td["任务"] = title
             td["CPDDL"] = cpddl
             td["CP"] = cpddl
@@ -2339,11 +2371,15 @@ def render_pm_todo_manager(valid_projs, current_pm):
             td["DDL"] = str(due_dt) if due_dt else ""
             td["关联项目"] = ref_proj
             td["关联人员"] = people_raw
-            td["完成"] = bool(row.get("完成", False))
+            td["完成"] = new_done
             scope_val = str(row.get("所属视角", td.get("所属视角", "所有人"))).strip()
             if current_pm != "所有人" and not scope_val:
                 scope_val = current_pm
             td["所属视角"] = scope_val if scope_val in scope_options else (current_pm if current_pm != "所有人" else "所有人")
+            if new_done and not prev_done:
+                td["完成时间"] = str(datetime.date.today())
+            elif not new_done:
+                td["完成时间"] = ""
 
         todo_all[:] = [x for x in todo_all if str(x.get("_id", "")).strip() not in delete_ids and str(x.get("任务", "")).strip()]
         cfg["PM_TODO_LIST"] = todo_all
@@ -3696,18 +3732,33 @@ if menu == MENU_DASHBOARD:
 
     st.divider()
     st.subheader("📈 全局进展甘特图")
-    st.markdown("💡 支持按时间区间筛选；并统计建模/设计/工程平均耗时（可选去极值）。")
+    st.markdown("💡 默认显示当前月份前后约半年区间；支持手动调整日期范围，并统计建模/设计/工程平均耗时（可选去极值）。")
     if gantt_data:
-        df_g = pd.DataFrame(gantt_data).sort_values(by=["项目", "Start"])
-        df_g["Start_dt"] = pd.to_datetime(df_g["Start"], errors="coerce")
-        df_g["Finish_dt"] = pd.to_datetime(df_g["Finish"], errors="coerce")
+        df_g_all = pd.DataFrame(gantt_data).sort_values(by=["项目", "Start"])
+        df_g_all["Start_dt"] = pd.to_datetime(df_g_all["Start"], errors="coerce")
+        df_g_all["Finish_dt"] = pd.to_datetime(df_g_all["Finish"], errors="coerce")
+        month_anchor = datetime.date.today().replace(day=1)
+        default_gantt_start = add_months(month_anchor, -2)
+        default_gantt_end_month = add_months(month_anchor, 3)
+        default_gantt_end = default_gantt_end_month.replace(day=month_last_day(default_gantt_end_month.year, default_gantt_end_month.month))
+        if not isinstance(st.session_state.get("gantt_start"), datetime.date):
+            st.session_state["gantt_start"] = default_gantt_start
+        if not isinstance(st.session_state.get("gantt_end"), datetime.date):
+            st.session_state["gantt_end"] = default_gantt_end
         d1, d2 = st.columns(2)
         with d1:
-            gantt_start = st.date_input("甘特开始日期", value=df_g["Start_dt"].min().date() if not df_g["Start_dt"].isna().all() else datetime.date.today(), key="gantt_start")
+            gantt_start = st.date_input("甘特开始日期", key="gantt_start")
         with d2:
-            gantt_end = st.date_input("甘特结束日期", value=df_g["Finish_dt"].max().date() if not df_g["Finish_dt"].isna().all() else datetime.date.today(), key="gantt_end")
-        m = (df_g["Finish_dt"] >= pd.to_datetime(gantt_start)) & (df_g["Start_dt"] <= pd.to_datetime(gantt_end))
-        df_g = df_g[m]
+            gantt_end = st.date_input("甘特结束日期", key="gantt_end")
+        selected_start = pd.to_datetime(gantt_start)
+        selected_end = pd.to_datetime(gantt_end)
+        m = (df_g_all["Finish_dt"] >= selected_start) & (df_g_all["Start_dt"] <= selected_end)
+        df_g = df_g_all[m].copy()
+        showing_full_gantt = False
+        if df_g.empty:
+            st.info("当前时间窗口内无数据，已回退显示全部甘特数据。")
+            df_g = df_g_all.copy()
+            showing_full_gantt = True
 
         if _meta:
             df_meta = pd.DataFrame(_meta).drop_duplicates(subset=["项目标签"])
@@ -3723,21 +3774,55 @@ if menu == MENU_DASHBOARD:
             category_orders={"工序阶段": gantt_cat_orders, "项目": y_order},
             color_discrete_map=combined_color_map
         )
-        if star_x:
+        filtered_star_x = []
+        filtered_star_y = []
+        for sx, sy in zip(star_x, star_y):
+            sx_dt = pd.to_datetime(sx, errors="coerce")
+            if pd.isna(sx_dt):
+                continue
+            if showing_full_gantt or (selected_start <= sx_dt <= selected_end):
+                filtered_star_x.append(sx)
+                filtered_star_y.append(sy)
+        if filtered_star_x:
             fig.add_trace(go.Scatter(
-                x=star_x, y=star_y, mode='markers',
+                x=filtered_star_x, y=filtered_star_y, mode='markers',
                 marker=dict(symbol='star', size=24, color='#FFD700',
                             line=dict(width=2, color='#FF4500')),
                 name='📅 目标开定',
                 hovertemplate='目标开定: %{x}<extra></extra>'
             ))
+        today_dt = pd.to_datetime(datetime.date.today())
+        if showing_full_gantt or (selected_start <= today_dt <= selected_end):
+            today_str = datetime.date.today().strftime("%Y-%m-%d")
+            fig.add_shape(
+                type="line",
+                x0=today_str,
+                x1=today_str,
+                y0=0,
+                y1=1,
+                xref="x",
+                yref="paper",
+                line=dict(color="#64748B", width=1, dash="dash"),
+            )
+            if y_order:
+                fig.add_trace(go.Scatter(
+                    x=[today_str],
+                    y=[y_order[0]],
+                    mode="markers+text",
+                    text=["今日"],
+                    textposition="top center",
+                    textfont=dict(size=9, color="#64748B"),
+                    marker=dict(size=0, opacity=0),
+                    showlegend=False,
+                    hoverinfo="skip",
+                ))
         fig.update_yaxes(autorange="reversed")
         fig.update_layout(height=max(400, len(df_g['项目'].unique()) * 45))
         st.plotly_chart(fig, use_container_width=True)
 
         st.markdown("#### ⏱️ 建模/设计/工程平均耗时（天）")
         trim_outlier = st.checkbox("去掉最大值和最小值（样本>=3时）", value=False, key="trim_stage_avg")
-        df_dur = df_g.copy()
+        df_dur = df_g_all.copy()
         df_dur["天数"] = (df_dur["Finish_dt"] - df_dur["Start_dt"]).dt.days.clip(lower=1)
         focus = df_dur[df_dur["工序阶段"].isin(["建模", "设计", "工程"])]
         rows = []
@@ -5222,6 +5307,29 @@ elif menu == MENU_HISTORY:
             "提审轮次": g["log"].get("提审轮次", ""),
             "图片": all_imgs
         })
+
+    done_todos = [
+        td for td in db.get("系统配置", {}).get("PM_TODO_LIST", [])
+        if td.get("完成")
+        and str(td.get("关联项目", "")).strip() == sel_proj
+        and str(td.get("完成时间", "")).strip()
+    ]
+
+    st.divider()
+    st.subheader("✅ 已完成 To do 记录（关联此项目）")
+    if done_todos:
+        done_rows = []
+        for td in sorted(done_todos, key=lambda x: x.get("完成时间", ""), reverse=True):
+            done_rows.append({
+                "完成时间": td.get("完成时间", ""),
+                "任务": td.get("任务", ""),
+                "CP/DDL": todo_cpddl_text(td),
+                "关联人员": td.get("关联人员", ""),
+                "创建": td.get("创建", ""),
+            })
+        st.dataframe(pd.DataFrame(done_rows), use_container_width=True, hide_index=True)
+    else:
+        st.caption("暂无已完成并关联此项目的 To do 记录。")
 
     if flat_data:
         df_logs = pd.DataFrame(flat_data).sort_values(by="日期", ascending=False).reset_index(drop=True)
