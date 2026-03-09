@@ -1933,6 +1933,122 @@ def _extract_target_map_from_matrix(df_raw, valid_projs, alias_map):
     conflicts = {k: sorted(list(v)) for k, v in conflicts.items()}
     return target_map, conflicts
 
+def get_status_label(milestone):
+    bucket = get_project_status_bucket(milestone)
+    if bucket == "pause":
+        return "?? ????"
+    if bucket == "done":
+        return "?? ???"
+    if bucket == "prod":
+        return "?? ???"
+    if bucket == "dev":
+        return "?? ???"
+    return "? ????"
+
+
+def get_risk_status(milestone, target_date_str="TBD"):
+    return get_status_label(milestone), "normal"
+
+
+def get_project_status_bucket(milestone):
+    ms = str(milestone or "").strip()
+    if ms == "????":
+        return "pause"
+    if ms in ["????", "????????", "? ???(??)"]:
+        return "done"
+    if ms in ["???", "???"]:
+        return "prod"
+    if "??" in ms or ms in ["???", "???", "???"]:
+        return "dev"
+    return "unknown"
+
+
+def month_last_day(year, month):
+    if month in [1, 3, 5, 7, 8, 10, 12]:
+        return 31
+    if month == 2:
+        return 29 if (year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)) else 28
+    return 30
+
+
+def parse_schedule_marker_date(schedule_str, marker_mode="target"):
+    s = str(schedule_str or "").strip()
+    if not s or s.upper() in ["TBD", "NONE"] or s in ["-", "?", "?"]:
+        return None
+
+    for fmt in ["%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d"]:
+        try:
+            return datetime.datetime.strptime(s[:10], fmt).date()
+        except Exception:
+            pass
+
+    m_q = re.match(r'^(\d{4}|\d{2})\s*Q([1-4])$', s.upper())
+    if m_q:
+        y_raw = int(m_q.group(1))
+        year = y_raw if y_raw >= 1000 else (2000 + y_raw)
+        quarter = int(m_q.group(2))
+        if marker_mode == "ship":
+            return quarter_to_deadline(f"{year} Q{quarter}")
+        first_month = (quarter - 1) * 3 + 1
+        return datetime.date(year, first_month, 15)
+
+    ym = parse_target_year_month(s)
+    if ym:
+        year, month = int(ym[0]), int(ym[1])
+        if marker_mode == "ship":
+            return datetime.date(year, month, month_last_day(year, month))
+        return datetime.date(year, month, 15)
+
+    return None
+
+
+def get_deadline_alert(milestone, target_text="TBD", ship_text="-", days=5):
+    bucket = get_project_status_bucket(milestone)
+    if bucket not in ["dev", "prod"]:
+        return "? ??", 2
+
+    marker_mode = "target" if bucket == "dev" else "ship"
+    raw_value = target_text if bucket == "dev" else ship_text
+    alert_name = "??" if bucket == "dev" else "??"
+    deadline = parse_schedule_marker_date(raw_value, marker_mode=marker_mode)
+    if not deadline:
+        return "? ??", 2
+
+    diff_days = (deadline - datetime.date.today()).days
+    if diff_days < 0:
+        return f"?? {alert_name}??", 0
+    if diff_days <= int(days):
+        return f"?? {alert_name}??(<={int(days)}?)", 1
+    return "? ??", 2
+
+
+def build_timeline_marker_info(proj_name, proj_label, milestone, target_text, ship_text):
+    bucket = get_project_status_bucket(milestone)
+    if bucket == "dev":
+        mark_dt = parse_schedule_marker_date(target_text, marker_mode="target")
+        if mark_dt:
+            return {
+                "??": proj_label,
+                "????": proj_name,
+                "??": mark_dt.strftime("%Y-%m-%d"),
+                "????": "????",
+                "????": str(target_text or "TBD"),
+                "??": f"{proj_name}<br>?????{target_text}"
+            }
+    if bucket == "prod":
+        mark_dt = parse_schedule_marker_date(ship_text, marker_mode="ship")
+        if mark_dt:
+            return {
+                "??": proj_label,
+                "????": proj_name,
+                "??": mark_dt.strftime("%Y-%m-%d"),
+                "????": "????",
+                "????": str(ship_text or "-"),
+                "??": f"{proj_name}<br>?????{ship_text}"
+            }
+    return None
+
+
 def render_pm_batch_fastlog_integrated(visible_projects, default_proj=""):
     st.subheader("📝 批量速记（多项目）")
     st.caption("用于晚间复盘：一次输入多项目进展，解析后统一校对并批量入库。")
