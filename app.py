@@ -3646,6 +3646,136 @@ if menu == MENU_DASHBOARD:
         df_table = df_table.sort_values(by=["状态组", "开定排序", "发货排序", "断更天", "项目"], ascending=[True, True, True, True, True])
         show_df = df_table.drop(columns=["状态组", "开定排序", "发货排序", "断更天"])
 
+        with st.expander("\u26a1 \u5927\u76d8\u5feb\u901f\u7f16\u8f91\uff08\u9636\u6bb5/\u5f00\u5b9a/\u53d1\u8d27/\u8ddf\u5355\uff09", expanded=True):
+            st.caption("\u9002\u5408\u6bcf\u65e5\u6536\u53e3\uff1a\u76f4\u63a5\u5728\u5927\u76d8\u6539\u5173\u952e\u5b57\u6bb5\uff0c\u51cf\u5c11\u5728 PM \u5de5\u4f5c\u53f0\u9010\u4e2a\u5207\u6362\u3002")
+
+            quick_edit_df = show_df[["\u9879\u76ee", "\u9879\u76ee\u5f53\u524d\u9636\u6bb5", "\u5f00\u5b9a\u65f6\u95f4", "\u9884\u8ba1\u53d1\u8d27", "\u8ddf\u5355"]].copy()
+            if current_pm == "\u6240\u6709\u4eba":
+                quick_edit_df.insert(
+                    1,
+                    "\u8d1f\u8d23\u4eba",
+                    [str(db.get(str(p).strip(), {}).get("\u8d1f\u8d23\u4eba", "")).strip() for p in quick_edit_df["\u9879\u76ee"].tolist()],
+                )
+
+            owner_options = list(
+                dict.fromkeys(
+                    [
+                        "Mo",
+                        "\u8d8a",
+                        "\u8881",
+                        *[
+                            str((db.get(p, {}) or {}).get("\u8d1f\u8d23\u4eba", "")).strip()
+                            for p in valid_projs
+                            if str((db.get(p, {}) or {}).get("\u8d1f\u8d23\u4eba", "")).strip()
+                        ],
+                    ]
+                )
+            )
+
+            quick_column_config = {
+                "\u9879\u76ee": st.column_config.TextColumn("\u9879\u76ee", disabled=True, width="large"),
+                "\u9879\u76ee\u5f53\u524d\u9636\u6bb5": st.column_config.SelectboxColumn("\u9879\u76ee\u5f53\u524d\u9636\u6bb5", options=STD_MILESTONES, width="small"),
+                "\u5f00\u5b9a\u65f6\u95f4": st.column_config.TextColumn("\u5f00\u5b9a\u65f6\u95f4", width="small", help="\u652f\u6301 2026-05 / 26.5 / 2026 Q2 / TBD"),
+                "\u9884\u8ba1\u53d1\u8d27": st.column_config.TextColumn("\u9884\u8ba1\u53d1\u8d27", width="small", help="\u652f\u6301 2026 Q2 / 2026-06 / -"),
+                "\u8ddf\u5355": st.column_config.TextColumn("\u8ddf\u5355", width="small"),
+            }
+            if current_pm == "\u6240\u6709\u4eba":
+                quick_column_config["\u8d1f\u8d23\u4eba"] = st.column_config.SelectboxColumn("\u8d1f\u8d23\u4eba", options=owner_options, width="small")
+
+            edited_quick_df = st.data_editor(
+                quick_edit_df,
+                width='stretch',
+                hide_index=True,
+                num_rows="fixed",
+                column_config=quick_column_config,
+                disabled=["\u9879\u76ee"],
+                key="dashboard_quick_editor",
+            )
+
+            if st.button("\U0001f4be \u4fdd\u5b58\u5927\u76d8\u5feb\u901f\u7f16\u8f91", type="primary", key="btn_dash_quick_save"):
+                changed_projects = []
+                changed_count = 0
+                today_str = str(datetime.date.today())
+
+                def _normalize_target_text(v):
+                    s = str(v or "").strip()
+                    if s.upper() == "TBD" or s in ["-", "\u2014", "\u65e0", "\u6682\u65e0"]:
+                        return ""
+                    return s
+
+                def _normalize_ship_text(v):
+                    s = str(v or "").strip()
+                    if s.upper() == "TBD" or s in ["-", "\u2014", "\u65e0", "\u6682\u65e0"]:
+                        return ""
+                    return s
+
+                for row in edited_quick_df.to_dict("records"):
+                    proj = str(row.get("\u9879\u76ee", "")).strip()
+                    if not proj or proj not in db or proj == "\u7cfb\u7edf\u914d\u7f6e":
+                        continue
+
+                    proj_data = db[proj]
+                    old_pm = str(proj_data.get("\u8d1f\u8d23\u4eba", "")).strip()
+                    old_ms = str(proj_data.get("Milestone", "")).strip() or "\u5f85\u7acb\u9879"
+                    old_target_raw = str(proj_data.get("Target", "")).strip()
+                    old_ship_raw = str(proj_data.get("\u53d1\u8d27\u533a\u95f4", "")).strip()
+                    old_gd = str(proj_data.get("\u8ddf\u5355", "")).strip()
+
+                    new_pm = old_pm
+                    if current_pm == "\u6240\u6709\u4eba":
+                        new_pm = str(row.get("\u8d1f\u8d23\u4eba", old_pm)).strip() or old_pm
+                    new_ms = str(row.get("\u9879\u76ee\u5f53\u524d\u9636\u6bb5", old_ms)).strip() or old_ms
+                    if new_ms not in STD_MILESTONES:
+                        new_ms = old_ms
+                    old_target_norm = _normalize_target_text(old_target_raw)
+                    old_ship_norm = _normalize_ship_text(old_ship_raw)
+                    new_target_norm = _normalize_target_text(row.get("\u5f00\u5b9a\u65f6\u95f4", old_target_raw))
+                    new_ship_norm = _normalize_ship_text(row.get("\u9884\u8ba1\u53d1\u8d27", old_ship_raw))
+                    new_gd = str(row.get("\u8ddf\u5355", old_gd)).strip()
+
+                    change_items = []
+                    if current_pm == "\u6240\u6709\u4eba" and old_pm != new_pm:
+                        change_items.append(("\u8d1f\u8d23\u4eba", old_pm or "\u672a\u5206\u914d", new_pm or "\u672a\u5206\u914d"))
+                    if old_ms != new_ms:
+                        change_items.append(("\u9636\u6bb5", old_ms or "-", new_ms or "-"))
+                    if old_target_norm != new_target_norm:
+                        change_items.append(("\u5f00\u5b9a", old_target_norm or "TBD", new_target_norm or "TBD"))
+                    if old_ship_norm != new_ship_norm:
+                        change_items.append(("\u53d1\u8d27", old_ship_norm or "-", new_ship_norm or "-"))
+                    if old_gd != new_gd:
+                        change_items.append(("\u8ddf\u5355", old_gd or "-", new_gd or "-"))
+                    if not change_items:
+                        continue
+
+                    proj_data["\u8d1f\u8d23\u4eba"] = new_pm
+                    proj_data["Milestone"] = new_ms
+                    proj_data["Target"] = new_target_norm or "TBD"
+                    proj_data["\u53d1\u8d27\u533a\u95f4"] = new_ship_norm
+                    proj_data["\u8ddf\u5355"] = new_gd
+
+                    comps = proj_data.setdefault("\u90e8\u4ef6\u5217\u8868", {})
+                    global_key = next((k for k in comps.keys() if "\u5168\u5c40" in str(k)), "\u5168\u5c40\u8fdb\u5ea6")
+                    if global_key not in comps or not isinstance(comps.get(global_key), dict):
+                        comps[global_key] = {"\u4e3b\u6d41\u7a0b": STAGES_UNIFIED[0], "\u65e5\u5fd7\u6d41": []}
+                    event_text = " | ".join([f"{k}:{ov}->{nv}" for k, ov, nv in change_items])
+                    comps[global_key].setdefault("\u65e5\u5fd7\u6d41", []).append({
+                        "\u65e5\u671f": today_str,
+                        "\u6d41\u8f6c": "\u5927\u76d8\u5feb\u7f16",
+                        "\u5de5\u5e8f": comps[global_key].get("\u4e3b\u6d41\u7a0b", STAGES_UNIFIED[0]),
+                        "\u4e8b\u4ef6": f"[\u5927\u76d8\u5feb\u7f16] {event_text}",
+                    })
+                    changed_projects.append(proj)
+                    changed_count += 1
+
+                if changed_count <= 0:
+                    st.info("\u672a\u68c0\u6d4b\u5230\u53ef\u4fdd\u5b58\u7684\u53d8\u5316\u3002")
+                else:
+                    for proj in list(dict.fromkeys(changed_projects)):
+                        db_manager.save_one(proj, db[proj])
+                    db_manager.save_one("\u7cfb\u7edf\u914d\u7f6e", db["\u7cfb\u7edf\u914d\u7f6e"])
+                    st.success(f"\u5df2\u4fdd\u5b58 {changed_count} \u6761\u9879\u76ee\u66f4\u65b0\u3002")
+                    st.rerun()
+
         def _hl_warn(v):
             return 'background-color: #fef08a; color: #111827; font-weight: 600' if str(v).strip() else ''
 
