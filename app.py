@@ -1288,6 +1288,13 @@ def todo_visible_for_view(td, pm_view):
     return scope == pm_view
 
 
+def todo_visible_for_sidebar(td, pm_view):
+    scope = todo_scope_of(td)
+    if pm_view == "所有人":
+        return scope in ["", "未分配", "所有人"]
+    return scope == pm_view
+
+
 def build_todo_scope_options(current_pm):
     scope_vals = []
     for proj_name, proj_data in db.items():
@@ -1504,6 +1511,35 @@ def todo_link_status_text(td):
     return " / ".join(parts)
 
 
+def parse_role_person_label(raw_label):
+    token = str(raw_label or "").strip()
+    if not token:
+        return "综合", ""
+    if "-" in token:
+        role, person = token.split("-", 1)
+    elif ":" in token:
+        role, person = token.split(":", 1)
+    else:
+        role, person = "综合", token
+    role = str(role or "").strip() or "综合"
+    person = str(person or "").strip()
+    return role, person
+
+
+def _append_role_person_to_maps(role, person, labels, name_map):
+    role_txt = str(role or "").strip() or "综合"
+    person_txt = str(person or "").strip()
+    if not person_txt:
+        return
+    label = f"{role_txt}-{person_txt}" if role_txt != "综合" else person_txt
+    if label not in labels:
+        labels.append(label)
+    key = norm_text(person_txt)
+    info = name_map.setdefault(key, {"display": person_txt, "labels": []})
+    if label not in info["labels"]:
+        info["labels"].append(label)
+
+
 def collect_role_person_options():
     labels = []
     name_map = {}
@@ -1512,29 +1548,71 @@ def collect_role_person_options():
             continue
         for comp_data in proj_data.get("部件列表", {}).values():
             owner_str = str(comp_data.get("负责人", "")).strip()
-            for pair in re.split(r'[,，|/]+', owner_str):
-                pair = pair.strip()
-                if not pair or pair == "未分配":
+            for pair in re.split(r"[,\uFF0C|/]+", owner_str):
+                pair = str(pair or "").strip()
+                if (not pair) or pair == "未分配":
                     continue
-                if '-' in pair:
-                    role, person = pair.split('-', 1)
-                elif ':' in pair:
-                    role, person = pair.split(':', 1)
-                else:
-                    role, person = "综合", pair
-                role = role.strip()
-                person = person.strip()
-                if not person:
+                role, person = parse_role_person_label(pair)
+                if person == "未分配":
                     continue
-                label = f"{role}-{person}" if role and role != "综合" else person
-                if label not in labels:
-                    labels.append(label)
-                key = norm_text(person)
-                info = name_map.setdefault(key, {"display": person, "labels": []})
-                if label not in info["labels"]:
-                    info["labels"].append(label)
-    labels = sorted(labels, key=lambda x: (x.split('-', 1)[0] if '-' in x else "综合", x.split('-', 1)[-1]))
+                _append_role_person_to_maps(role, person, labels, name_map)
+
+    extra_people = db.get("系统配置", {}).get("TODO_EXTRA_ROLE_PEOPLE", [])
+    if isinstance(extra_people, str):
+        extra_people = split_people_text(extra_people)
+    if isinstance(extra_people, list):
+        for pair in extra_people:
+            role, person = parse_role_person_label(pair)
+            _append_role_person_to_maps(role, person, labels, name_map)
+
+    labels = sorted(labels, key=lambda x: (x.split("-", 1)[0] if "-" in x else "综合", x.split("-", 1)[-1]))
     return labels, name_map
+
+
+def register_extra_role_people(raw_people_tokens):
+    cfg = db.setdefault("系统配置", {})
+    store = cfg.setdefault("TODO_EXTRA_ROLE_PEOPLE", [])
+    if isinstance(store, str):
+        store = split_people_text(store)
+        cfg["TODO_EXTRA_ROLE_PEOPLE"] = store
+    if not isinstance(store, list):
+        store = []
+        cfg["TODO_EXTRA_ROLE_PEOPLE"] = store
+
+    existing = {norm_text(x) for x in store if str(x).strip()}
+    added = []
+    for token in raw_people_tokens or []:
+        role, person = parse_role_person_label(token)
+        if (not person) or person == "未分配":
+            continue
+        label = f"{role}-{person}" if role and role != "综合" else person
+        label_key = norm_text(label)
+        if label_key in existing:
+            continue
+        store.append(label)
+        existing.add(label_key)
+        added.append(label)
+    return added
+
+
+def create_project_shell_if_missing(project_name, owner_name=""):
+    proj = str(project_name or "").strip()
+    if not proj or proj == "系统配置":
+        return False
+    if proj in db and isinstance(db.get(proj), dict):
+        return False
+    owner = str(owner_name or "").strip() or "Mo"
+    db[proj] = {
+        "负责人": owner,
+        "跟单": "",
+        "Milestone": "待立项",
+        "Target": "TBD",
+        "发货区间": "",
+        "部件列表": {},
+        "发货数据": {},
+        "成本数据": {},
+    }
+    return True
 
 
 def split_people_text(raw_text):
@@ -1626,6 +1704,31 @@ def format_todo_people_hint(td):
     return " | ".join(notes) if notes else "未识别到人员"
 
 
+def collect_todo_loading_pairs(pm_view="所有人"):
+    cfg = db.get("系统配置", {})
+    todo_all = cfg.get("PM_TODO_LIST", [])
+    pairs = set()
+    for td in todo_all:
+        if bool((td or {}).get("完成")):
+            continue
+        if not todo_visible_for_view(td, pm_view):
+            continue
+        proj = str((td or {}).get("关联项目", "")).strip()
+        if not proj or proj == "系统配置" or proj not in db:
+            continue
+
+        people_tokens = split_people_text((td or {}).get("关联人员", ""))
+        if not people_tokens:
+            people_tokens = infer_todo_people_bundle(td).get("labels", [])
+
+        for token in people_tokens:
+            role, person = parse_role_person_label(token)
+            if (not person) or person == "未分配":
+                continue
+            pairs.add((proj, person, role or "综合"))
+    return pairs
+
+
 def infer_todo_handoff_prefill(td, proj_name):
     td_obj = td or {}
     proj = str(proj_name or "").strip()
@@ -1657,6 +1760,36 @@ def infer_todo_handoff_prefill(td, proj_name):
             if (base and base in txt) or (norm_text(std_comp) in txt_norm):
                 comp_hits.append(std_comp)
                 break
+    def _pick_component_from_hint(target_keyword):
+        target_norm = norm_text(target_keyword)
+        for comp_name in proj_comps:
+            comp_txt = str(comp_name).strip()
+            if not comp_txt:
+                continue
+            if target_keyword in comp_txt or (target_norm and target_norm in norm_text(comp_txt)):
+                if "全局" in comp_txt:
+                    return "🌐 全局进度 (Overall)"
+                return comp_txt
+        for std_comp in STD_COMPONENTS:
+            std_txt = str(std_comp).strip()
+            if target_keyword in std_txt or (target_norm and target_norm in norm_text(std_txt)):
+                return std_txt
+        return ""
+
+    if not comp_hits:
+        todo_comp_hint = [
+            ("头发", "头雕"), ("发型", "头雕"), ("发丝", "头雕"), ("发际", "头雕"), ("刘海", "头雕"),
+            ("头", "头雕"), ("脸", "头雕"), ("眼", "头雕"),
+            ("手", "手型"), ("衣", "服装"), ("服", "服装"),
+            ("包", "包装"), ("地台", "地台"),
+        ]
+        for kw, target in todo_comp_hint:
+            if kw in txt:
+                picked_comp = _pick_component_from_hint(target)
+                if picked_comp and picked_comp not in comp_hits:
+                    comp_hits.append(picked_comp)
+                break
+
     if not comp_hits and any(k in txt for k in ["全局", "整体", "项目", "大盘"]):
         comp_hits = ["🌐 全局进度 (Overall)"]
 
@@ -1992,8 +2125,20 @@ def render_pm_todo_manager(valid_projs, current_pm):
     cfg = db.setdefault("系统配置", {})
     todo_all = cfg.setdefault("PM_TODO_LIST", [])
     todo_proj_options = ["(不关联项目)"] + valid_projs
+    todo_new_proj_option = "➕ 新增项目..."
+    todo_proj_options_create = todo_proj_options + [todo_new_proj_option]
+    todo_new_person_option = "➕ 新增关联人员..."
     scope_options = build_todo_scope_options(current_pm)
     role_person_options, _ = collect_role_person_options()
+    role_person_options_create = role_person_options + [todo_new_person_option]
+    owner_pool = list(dict.fromkeys([
+        "Mo", "越", "袁",
+        *[
+            str(db.get(p, {}).get("负责人", "")).strip()
+            for p in valid_projs
+            if str(db.get(p, {}).get("负责人", "")).strip()
+        ],
+    ]))
 
     touched = False
     today = datetime.date.today()
@@ -2067,7 +2212,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
         with c2:
             todo_cpddl = st.text_input("CP/DDL(合并)", key="todo_cpddl_global", placeholder="例：3/7 结构件确认")
         with c3:
-            todo_ref_proj = st.selectbox("关联项目", todo_proj_options, key="todo_ref_global")
+            todo_ref_proj = st.selectbox("关联项目", todo_proj_options_create, key="todo_ref_global")
         with c4:
             if current_pm == "所有人":
                 todo_scope = st.selectbox("所属视角", scope_options, key="todo_scope_global")
@@ -2075,17 +2220,48 @@ def render_pm_todo_manager(valid_projs, current_pm):
                 todo_scope = current_pm
                 st.text_input("所属视角", value=current_pm, key="todo_scope_ro", disabled=True)
 
+        resolved_ref_proj = "" if todo_ref_proj == "(不关联项目)" else todo_ref_proj
+        new_proj_name = ""
+        new_proj_owner = current_pm if current_pm != "所有人" else (owner_pool[0] if owner_pool else "Mo")
+        if todo_ref_proj == todo_new_proj_option:
+            np1, np2 = st.columns([2.2, 1.2])
+            with np1:
+                new_proj_name = st.text_input("新增项目名称", key="todo_new_proj_name", placeholder="例：1/6 新IP")
+            with np2:
+                if current_pm == "所有人":
+                    new_proj_owner = st.selectbox("新增项目负责人", owner_pool or ["Mo"], key="todo_new_proj_owner")
+                else:
+                    new_proj_owner = current_pm
+                    st.text_input("新增项目负责人", value=current_pm, key="todo_new_proj_owner_ro", disabled=True)
+            resolved_ref_proj = new_proj_name.strip()
+
         p1, p2 = st.columns([2.2, 1.6])
         with p1:
-            todo_people_sel = st.multiselect("关联人员（可多选/留空）", role_person_options, key="todo_people_global")
+            todo_people_sel = st.multiselect("关联人员（可多选/留空）", role_person_options_create, key="todo_people_global")
         with p2:
             todo_people_manual = st.text_input("补充人员(可手填)", key="todo_people_manual_global", placeholder="例：设计-宇涵 / 宇涵")
 
-        people_input = normalize_people_text(", ".join(todo_people_sel + split_people_text(todo_people_manual)))
+        todo_people_sel_clean = [x for x in todo_people_sel if x != todo_new_person_option]
+        todo_new_person_token = ""
+        if todo_new_person_option in todo_people_sel:
+            pp1, pp2 = st.columns([1.2, 1.5])
+            with pp1:
+                todo_new_person_role = st.text_input("新增人员角色", key="todo_new_person_role", placeholder="例：设计")
+            with pp2:
+                todo_new_person_name = st.text_input("新增人员姓名", key="todo_new_person_name", placeholder="例：宇涵")
+            if str(todo_new_person_name).strip():
+                role_txt = str(todo_new_person_role).strip()
+                name_txt = str(todo_new_person_name).strip()
+                todo_new_person_token = f"{role_txt}-{name_txt}" if role_txt else name_txt
+
+        people_tokens = todo_people_sel_clean + split_people_text(todo_people_manual)
+        if todo_new_person_token:
+            people_tokens.append(todo_new_person_token)
+        people_input = normalize_people_text(", ".join(people_tokens))
         tmp_td = {
             "任务": todo_title,
             "CPDDL": todo_cpddl,
-            "关联项目": "" if todo_ref_proj == "(不关联项目)" else todo_ref_proj,
+            "关联项目": resolved_ref_proj,
             "关联人员": people_input,
         }
         st.caption("开定识别：" + infer_todo_target_hint(tmp_td, valid_projs))
@@ -2097,16 +2273,24 @@ def render_pm_todo_manager(valid_projs, current_pm):
         if st.button("➕ 添加", key="todo_add_global", type="primary"):
             if not todo_title.strip():
                 st.warning("请先填写任务内容。")
+            elif todo_ref_proj == todo_new_proj_option and not resolved_ref_proj:
+                st.warning("你选择了【新增项目】，请先填写项目名称。")
             else:
                 due_dt = extract_deadline_from_text(todo_cpddl)
                 final_people = people_input or ", ".join(people_bundle["labels"])
+                linked_proj = str(resolved_ref_proj or "").strip()
+                created_project = False
+                if linked_proj:
+                    created_project = create_project_shell_if_missing(linked_proj, new_proj_owner)
+
+                added_people = register_extra_role_people(split_people_text(final_people))
                 todo_all.append({
                     "_id": uuid.uuid4().hex[:10],
                     "任务": todo_title.strip(),
                     "CPDDL": todo_cpddl.strip(),
                     "CP": todo_cpddl.strip(),
                     "DDL": str(due_dt) if due_dt else "",
-                    "关联项目": "" if todo_ref_proj == "(不关联项目)" else todo_ref_proj,
+                    "关联项目": linked_proj,
                     "关联人员": final_people,
                     "所属视角": (str(todo_scope).strip() or "未分配"),
                     "创建者视角": (current_pm if current_pm != "所有人" else (str(todo_scope).strip() or "未分配")),
@@ -2115,8 +2299,20 @@ def render_pm_todo_manager(valid_projs, current_pm):
                     "创建": str(today),
                 })
                 cfg["PM_TODO_LIST"] = todo_all
-                sync_save_db("系统配置")
-                st.success("To do 已添加。")
+                if created_project and linked_proj:
+                    sync_save_db(linked_proj)
+                else:
+                    sync_save_db("系统配置")
+
+                success_bits = ["To do 已添加。"]
+                if created_project and linked_proj:
+                    success_bits.append(f"已新建项目：{linked_proj}。")
+                if added_people:
+                    preview = " / ".join(added_people[:3])
+                    if len(added_people) > 3:
+                        preview += " ..."
+                    success_bits.append(f"已补充人员库：{preview}")
+                st.success(" ".join(success_bits))
                 st.rerun()
 
     st.markdown("##### 当前 To do")
@@ -2203,6 +2399,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
             people_bundle = infer_todo_people_bundle(people_td)
             if not people_raw and people_bundle["labels"]:
                 people_raw = ", ".join(people_bundle["labels"])
+            register_extra_role_people(split_people_text(people_raw))
 
             prev_done = bool(td.get("完成", False))
             new_done = bool(row.get("完成", False))
@@ -2223,7 +2420,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
             if (not str(td.get("创建者视角", "")).strip()) and scope_val not in ["", "未分配", "所有人"]:
                 td["创建者视角"] = scope_val
             if new_done and not prev_done:
-                done_date = datetime.date.today()
+                done_date = due_dt or datetime.date.today()
                 td["完成时间"] = str(done_date)
                 if append_todo_completion_history(td, done_date):
                     project_history_updates.add(ref_proj)
@@ -2246,7 +2443,7 @@ def render_sidebar_todo_panel(pm_view):
     cfg = db.setdefault("系统配置", {})
     todo_all = cfg.setdefault("PM_TODO_LIST", [])
     today = datetime.date.today()
-    visible = [td for td in todo_all if todo_visible_for_view(td, pm_view)]
+    visible = [td for td in todo_all if todo_visible_for_sidebar(td, pm_view)]
     pending = sorted([td for td in visible if not td.get("完成")], key=lambda x: todo_sort_key(x, today))
     completed_count = len([td for td in visible if td.get("完成")])
 
@@ -3625,6 +3822,7 @@ if menu == MENU_DASHBOARD:
         ensure_ascii=False, sort_keys=True).encode()).hexdigest()
     table_data, gantt_data, _ppr_list, timeline_marks, _meta = _build_dash(",".join(valid_projs), _db_sig)
     project_person_roles = set(map(tuple, _ppr_list))
+    project_person_roles.update(collect_todo_loading_pairs(current_pm))
 
     st.divider()
     st.subheader("📈 全局进展甘特图")
@@ -3762,9 +3960,11 @@ if menu == MENU_DASHBOARD:
 
         df_table = df_table.sort_values(by=["状态组", "开定排序", "发货排序", "断更天", "项目"], ascending=[True, True, True, True, True])
         show_df = df_table.drop(columns=["状态组", "开定排序", "发货排序", "断更天"])
+        dashboard_project_order = show_df["\u9879\u76ee"].tolist()
+        project_rank_map = {str(p): idx for idx, p in enumerate(dashboard_project_order)}
 
-        with st.expander("\u26a1 \u5927\u76d8\u5feb\u901f\u7f16\u8f91\uff08\u9636\u6bb5/\u5f00\u5b9a/\u53d1\u8d27/\u8ddf\u5355\uff09", expanded=True):
-            st.caption("\u9002\u5408\u6bcf\u65e5\u6536\u53e3\uff1a\u76f4\u63a5\u5728\u5927\u76d8\u6539\u5173\u952e\u5b57\u6bb5\uff0c\u51cf\u5c11\u5728 PM \u5de5\u4f5c\u53f0\u9010\u4e2a\u5207\u6362\u3002")
+        with st.expander("\u26a1 \u5927\u76d8\u8054\u52a8\u5feb\u6539\uff08\u57fa\u7840\u5b57\u6bb5 + \u4e8b\u4ef6\uff09", expanded=True):
+            st.caption("\u540c\u4e00\u5165\u53e3\u5b8c\u6210\u5b57\u6bb5\u5feb\u6539\u548c\u4e8b\u4ef6\u5feb\u6539\uff0c\u6392\u5e8f\u4e0e\u4e0b\u65b9\u5927\u76d8\u660e\u7ec6\u8868\u4fdd\u6301\u4e00\u81f4\u3002")
 
             quick_edit_df = show_df[["\u9879\u76ee", "\u9879\u76ee\u5f53\u524d\u9636\u6bb5", "\u5f00\u5b9a\u65f6\u95f4", "\u9884\u8ba1\u53d1\u8d27", "\u8ddf\u5355"]].copy()
             if current_pm == "\u6240\u6709\u4eba":
@@ -3893,17 +4093,18 @@ if menu == MENU_DASHBOARD:
                     st.rerun()
 
 
-        with st.expander("\U0001f5c2 \u5927\u76d8\u4e8b\u4ef6\u5feb\u6539\uff08\u770b\u5230\u660e\u7ec6\u53ef\u76f4\u63a5\u4fee\uff09", expanded=False):
+        with st.container(border=True):
+            st.markdown("##### \U0001f5c2 \u4e8b\u4ef6\u660e\u7ec6\u5feb\u6539")
             st.caption("\u6309\u9879\u76ee\u7b5b\u9009\u65e5\u5fd7\u540e\uff0c\u53ef\u76f4\u63a5\u4fee\u6539\u65e5\u671f/\u5de5\u5e8f/\u4e8b\u4ef6/\u63d0\u5ba1\u5b57\u6bb5\uff0c\u4fdd\u5b58\u540e\u5404\u6a21\u5757\u540c\u6b65\u751f\u6548\u3002")
             ef1, ef2, ef3 = st.columns([2.0, 2.2, 1.0])
             with ef1:
-                event_proj_scope = st.selectbox("\u9879\u76ee\u8303\u56f4", ["\U0001f310 \u5168\u90e8\u9879\u76ee"] + valid_projs, key="dash_event_scope")
+                event_proj_scope = st.selectbox("\u9879\u76ee\u8303\u56f4", ["\U0001f310 \u5168\u90e8\u9879\u76ee"] + dashboard_project_order, key="dash_event_scope")
             with ef2:
                 event_kw = st.text_input("\u5173\u952e\u5b57\u7b5b\u9009\uff08\u9879\u76ee/\u90e8\u4ef6/\u4e8b\u4ef6\uff09", key="dash_event_kw", placeholder="\u4f8b\uff1a\u91cc\u592b / \u6253\u56de / \u5305\u88c5")
             with ef3:
                 event_limit = int(st.number_input("\u663e\u793a\u6761\u6570", min_value=20, max_value=500, value=120, step=20, key="dash_event_limit"))
 
-            scope_projects = valid_projs if event_proj_scope == "\U0001f310 \u5168\u90e8\u9879\u76ee" else [event_proj_scope]
+            scope_projects = dashboard_project_order if event_proj_scope == "\U0001f310 \u5168\u90e8\u9879\u76ee" else [event_proj_scope]
             event_rows = []
             id_seeded = False
             for p_name in scope_projects:
@@ -3939,9 +4140,16 @@ if menu == MENU_DASHBOARD:
                     d_obj = datetime.datetime.strptime(d, "%Y-%m-%d").date()
                 except Exception:
                     d_obj = datetime.date.min
-                return (d_obj, str((r or {}).get("\u9879\u76ee", "")), str((r or {}).get("\u90e8\u4ef6", "")))
+                proj_name = str((r or {}).get("\u9879\u76ee", "")).strip()
+                proj_rank = project_rank_map.get(proj_name, 999999)
+                return (
+                    proj_rank,
+                    -d_obj.toordinal(),
+                    str((r or {}).get("\u90e8\u4ef6", "")),
+                    str((r or {}).get("\u4e8b\u4ef6", "")),
+                )
 
-            event_rows = sorted(event_rows, key=_event_sort_key, reverse=True)
+            event_rows = sorted(event_rows, key=_event_sort_key)
             kw_norm = norm_text(event_kw)
             if kw_norm:
                 event_rows = [
