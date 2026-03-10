@@ -3984,7 +3984,7 @@ if menu == MENU_DASHBOARD:
                         latest = {"rank": rank, "component": str(comp_name), "log": lg}
             return latest
 
-        def _apply_latest_dynamic_update(project_name, new_text, mode):
+        def _apply_latest_dynamic_update(project_name, new_text, mode, auto_save=True):
             proj = str(project_name or "").strip()
             msg = str(new_text or "").strip()
             if (not proj) or proj not in db:
@@ -4000,7 +4000,8 @@ if menu == MENU_DASHBOARD:
 
             if mode == "edit_latest" and binding and isinstance(binding.get("log"), dict):
                 binding["log"]["\u4e8b\u4ef6"] = msg
-                sync_save_db(proj)
+                if auto_save:
+                    sync_save_db(proj)
                 return True, f"\u5df2\u6539\u5199 {proj} \u7684\u5f53\u524d\u6700\u65b0\u52a8\u6001\u3002"
 
             comp_info = comps[target_comp]
@@ -4014,369 +4015,158 @@ if menu == MENU_DASHBOARD:
                 "\u4e8b\u4ef6": msg,
             })
             comp_info["\u65e5\u5fd7\u6d41"] = sorted(comp_info.get("\u65e5\u5fd7\u6d41", []), key=lambda x: str((x or {}).get("\u65e5\u671f", "")))
-            sync_save_db(proj)
+            if auto_save:
+                sync_save_db(proj)
             return True, f"\u5df2\u8ffd\u52a0 {proj} \u7684\u6700\u65b0\u52a8\u6001\u3002"
 
-        with st.expander("\u26a1 \u5927\u76d8\u8054\u52a8\u5feb\u6539\uff08\u57fa\u7840\u5b57\u6bb5 + \u4e8b\u4ef6\uff09", expanded=False):
-            st.caption("\u540c\u4e00\u5165\u53e3\u5b8c\u6210\u5b57\u6bb5\u5feb\u6539\u548c\u4e8b\u4ef6\u5feb\u6539\uff0c\u6392\u5e8f\u4e0e\u4e0b\u65b9\u5927\u76d8\u660e\u7ec6\u8868\u4fdd\u6301\u4e00\u81f4\u3002")
+        st.markdown("##### 🧩 大盘明细可编辑表")
+        st.caption("直接在表格中修改基础字段和【最新全盘动态】；保存时选择是追加为最新动态，还是改写当前最新动态。")
 
-            quick_edit_df = show_df[["\u9879\u76ee", "\u9879\u76ee\u5f53\u524d\u9636\u6bb5", "\u5f00\u5b9a\u65f6\u95f4", "\u9884\u8ba1\u53d1\u8d27", "\u8ddf\u5355"]].copy()
-            if current_pm == "\u6240\u6709\u4eba":
-                quick_edit_df.insert(
-                    1,
-                    "\u8d1f\u8d23\u4eba",
-                    [str(db.get(str(p).strip(), {}).get("\u8d1f\u8d23\u4eba", "")).strip() for p in quick_edit_df["\u9879\u76ee"].tolist()],
-                )
-
-            owner_options = list(
-                dict.fromkeys(
-                    [
-                        "Mo",
-                        "\u8d8a",
-                        "\u8881",
-                        *[
-                            str((db.get(p, {}) or {}).get("\u8d1f\u8d23\u4eba", "")).strip()
-                            for p in valid_projs
-                            if str((db.get(p, {}) or {}).get("\u8d1f\u8d23\u4eba", "")).strip()
-                        ],
-                    ]
-                )
+        editable_cols = ["\u72b6\u6001", "\u9879\u76ee", "\u9879\u76ee\u5f53\u524d\u9636\u6bb5", "\u5f00\u5b9a\u65f6\u95f4", "\u9884\u8ba1\u53d1\u8d27", "\u8ddf\u5355", "\u6700\u65b0\u5168\u76d8\u52a8\u6001", "\u65ad\u66f4", "\u5f00\u5b9a\u5ef6\u8fdf\u9884\u8b66", "\u53d1\u8d27\u5ef6\u8fdf\u9884\u8b66"]
+        editable_df = show_df[editable_cols].copy()
+        if current_pm == "\u6240\u6709\u4eba":
+            editable_df.insert(
+                2,
+                "\u8d1f\u8d23\u4eba",
+                [str((db.get(str(p).strip(), {}) or {}).get("\u8d1f\u8d23\u4eba", "")).strip() for p in editable_df["\u9879\u76ee"].tolist()],
             )
 
-            quick_column_config = {
-                "\u9879\u76ee": st.column_config.TextColumn("\u9879\u76ee", disabled=True, width="large"),
-                "\u9879\u76ee\u5f53\u524d\u9636\u6bb5": st.column_config.SelectboxColumn("\u9879\u76ee\u5f53\u524d\u9636\u6bb5", options=STD_MILESTONES, width="small"),
-                "\u5f00\u5b9a\u65f6\u95f4": st.column_config.TextColumn("\u5f00\u5b9a\u65f6\u95f4", width="small", help="\u652f\u6301 2026-05 / 26.5 / 2026 Q2 / TBD"),
-                "\u9884\u8ba1\u53d1\u8d27": st.column_config.TextColumn("\u9884\u8ba1\u53d1\u8d27", width="small", help="\u652f\u6301 2026 Q2 / 2026-06 / -"),
-                "\u8ddf\u5355": st.column_config.TextColumn("\u8ddf\u5355", width="small"),
-            }
-            if current_pm == "\u6240\u6709\u4eba":
-                quick_column_config["\u8d1f\u8d23\u4eba"] = st.column_config.SelectboxColumn("\u8d1f\u8d23\u4eba", options=owner_options, width="small")
-
-            edited_quick_df = st.data_editor(
-                quick_edit_df,
-                width='stretch',
-                hide_index=True,
-                num_rows="fixed",
-                column_config=quick_column_config,
-                disabled=["\u9879\u76ee"],
-                key="dashboard_quick_editor",
-            )
-
-            if st.button("\U0001f4be \u4fdd\u5b58\u5927\u76d8\u5feb\u901f\u7f16\u8f91", type="primary", key="btn_dash_quick_save"):
-                changed_projects = []
-                changed_count = 0
-                today_str = str(datetime.date.today())
-
-                def _normalize_target_text(v):
-                    s = str(v or "").strip()
-                    if s.upper() == "TBD" or s in ["-", "\u2014", "\u65e0", "\u6682\u65e0"]:
-                        return ""
-                    return s
-
-                def _normalize_ship_text(v):
-                    s = str(v or "").strip()
-                    if s.upper() == "TBD" or s in ["-", "\u2014", "\u65e0", "\u6682\u65e0"]:
-                        return ""
-                    return s
-
-                for row in edited_quick_df.to_dict("records"):
-                    proj = str(row.get("\u9879\u76ee", "")).strip()
-                    if not proj or proj not in db or proj == "\u7cfb\u7edf\u914d\u7f6e":
-                        continue
-
-                    proj_data = db[proj]
-                    old_pm = str(proj_data.get("\u8d1f\u8d23\u4eba", "")).strip()
-                    old_ms = str(proj_data.get("Milestone", "")).strip() or "\u5f85\u7acb\u9879"
-                    old_target_raw = str(proj_data.get("Target", "")).strip()
-                    old_ship_raw = str(proj_data.get("\u53d1\u8d27\u533a\u95f4", "")).strip()
-                    old_gd = str(proj_data.get("\u8ddf\u5355", "")).strip()
-
-                    new_pm = old_pm
-                    if current_pm == "\u6240\u6709\u4eba":
-                        new_pm = str(row.get("\u8d1f\u8d23\u4eba", old_pm)).strip() or old_pm
-                    new_ms = str(row.get("\u9879\u76ee\u5f53\u524d\u9636\u6bb5", old_ms)).strip() or old_ms
-                    if new_ms not in STD_MILESTONES:
-                        new_ms = old_ms
-                    old_target_norm = _normalize_target_text(old_target_raw)
-                    old_ship_norm = _normalize_ship_text(old_ship_raw)
-                    new_target_norm = _normalize_target_text(row.get("\u5f00\u5b9a\u65f6\u95f4", old_target_raw))
-                    new_ship_norm = _normalize_ship_text(row.get("\u9884\u8ba1\u53d1\u8d27", old_ship_raw))
-                    new_gd = str(row.get("\u8ddf\u5355", old_gd)).strip()
-
-                    change_items = []
-                    if current_pm == "\u6240\u6709\u4eba" and old_pm != new_pm:
-                        change_items.append(("\u8d1f\u8d23\u4eba", old_pm or "\u672a\u5206\u914d", new_pm or "\u672a\u5206\u914d"))
-                    if old_ms != new_ms:
-                        change_items.append(("\u9636\u6bb5", old_ms or "-", new_ms or "-"))
-                    if old_target_norm != new_target_norm:
-                        change_items.append(("\u5f00\u5b9a", old_target_norm or "TBD", new_target_norm or "TBD"))
-                    if old_ship_norm != new_ship_norm:
-                        change_items.append(("\u53d1\u8d27", old_ship_norm or "-", new_ship_norm or "-"))
-                    if old_gd != new_gd:
-                        change_items.append(("\u8ddf\u5355", old_gd or "-", new_gd or "-"))
-                    if not change_items:
-                        continue
-
-                    proj_data["\u8d1f\u8d23\u4eba"] = new_pm
-                    proj_data["Milestone"] = new_ms
-                    proj_data["Target"] = new_target_norm or "TBD"
-                    proj_data["\u53d1\u8d27\u533a\u95f4"] = new_ship_norm
-                    proj_data["\u8ddf\u5355"] = new_gd
-
-                    comps = proj_data.setdefault("\u90e8\u4ef6\u5217\u8868", {})
-                    global_key = next((k for k in comps.keys() if "\u5168\u5c40" in str(k)), "\u5168\u5c40\u8fdb\u5ea6")
-                    if global_key not in comps or not isinstance(comps.get(global_key), dict):
-                        comps[global_key] = {"\u4e3b\u6d41\u7a0b": STAGES_UNIFIED[0], "\u65e5\u5fd7\u6d41": []}
-                    event_text = " | ".join([f"{k}:{ov}->{nv}" for k, ov, nv in change_items])
-                    comps[global_key].setdefault("\u65e5\u5fd7\u6d41", []).append({
-                        "\u65e5\u671f": today_str,
-                        "\u6d41\u8f6c": "\u5927\u76d8\u5feb\u7f16",
-                        "\u5de5\u5e8f": comps[global_key].get("\u4e3b\u6d41\u7a0b", STAGES_UNIFIED[0]),
-                        "\u4e8b\u4ef6": f"[\u5927\u76d8\u5feb\u7f16] {event_text}",
-                    })
-                    changed_projects.append(proj)
-                    changed_count += 1
-
-                if changed_count <= 0:
-                    st.info("\u672a\u68c0\u6d4b\u5230\u53ef\u4fdd\u5b58\u7684\u53d8\u5316\u3002")
-                else:
-                    for proj in list(dict.fromkeys(changed_projects)):
-                        sync_save_db(proj)
-                    st.success(f"\u5df2\u4fdd\u5b58 {changed_count} \u6761\u9879\u76ee\u66f4\u65b0\u3002")
-                    st.rerun()
-
-
-        with st.container(border=True):
-            st.markdown("##### \U0001f5c2 \u4e8b\u4ef6\u660e\u7ec6\u5feb\u6539")
-            st.caption("\u6309\u9879\u76ee\u7b5b\u9009\u65e5\u5fd7\u540e\uff0c\u53ef\u76f4\u63a5\u4fee\u6539\u65e5\u671f/\u5de5\u5e8f/\u4e8b\u4ef6/\u63d0\u5ba1\u5b57\u6bb5\uff0c\u4fdd\u5b58\u540e\u5404\u6a21\u5757\u540c\u6b65\u751f\u6548\u3002")
-            ef1, ef2, ef3 = st.columns([2.0, 2.2, 1.0])
-            with ef1:
-                event_proj_scope = st.selectbox("\u9879\u76ee\u8303\u56f4", ["\U0001f310 \u5168\u90e8\u9879\u76ee"] + dashboard_project_order, key="dash_event_scope")
-            with ef2:
-                event_kw = st.text_input("\u5173\u952e\u5b57\u7b5b\u9009\uff08\u9879\u76ee/\u90e8\u4ef6/\u4e8b\u4ef6\uff09", key="dash_event_kw", placeholder="\u4f8b\uff1a\u91cc\u592b / \u6253\u56de / \u5305\u88c5")
-            with ef3:
-                event_limit = int(st.number_input("\u663e\u793a\u6761\u6570", min_value=20, max_value=500, value=120, step=20, key="dash_event_limit"))
-
-            scope_projects = dashboard_project_order if event_proj_scope == "\U0001f310 \u5168\u90e8\u9879\u76ee" else [event_proj_scope]
-            event_rows = []
-            id_seeded = False
-            for p_name in scope_projects:
-                for c_name, c_info in db.get(p_name, {}).get("\u90e8\u4ef6\u5217\u8868", {}).items():
-                    for lg in c_info.get("\u65e5\u5fd7\u6d41", []):
-                        if is_hidden_system_log(lg):
-                            continue
-                        if not str(lg.get("_id", "")).strip():
-                            lg["_id"] = str(uuid.uuid4())
-                            id_seeded = True
-                        event_rows.append({
-                            "_id": str(lg.get("_id", "")).strip(),
-                            "\u65e5\u671f": str(lg.get("\u65e5\u671f", "")),
-                            "\u9879\u76ee": p_name,
-                            "\u90e8\u4ef6": c_name,
-                            "\u5de5\u5e8f": str(lg.get("\u5de5\u5e8f", "")),
-                            "\u7c7b\u578b": str(lg.get("\u6d41\u8f6c", "")),
-                            "\u4e8b\u4ef6": str(lg.get("\u4e8b\u4ef6", "")),
-                            "\u63d0\u5ba1\u7c7b\u578b": str(lg.get("\u63d0\u5ba1\u7c7b\u578b", "(\u65e0)") or "(\u65e0)"),
-                            "\u63d0\u5ba1\u7ed3\u679c": str(lg.get("\u63d0\u5ba1\u7ed3\u679c", "(\u65e0)") or "(\u65e0)"),
-                            "\u63d0\u5ba1\u8f6e\u6b21": normalize_review_round(lg.get("\u63d0\u5ba1\u8f6e\u6b21", "")),
-                            "\u5220\u9664": False,
-                        })
-
-            if id_seeded and scope_projects:
-                for p_name in scope_projects:
-                    if p_name in db:
-                        sync_save_db(p_name)
-
-            def _event_sort_key(r):
-                d = str((r or {}).get("\u65e5\u671f", "")).strip()
-                try:
-                    d_obj = datetime.datetime.strptime(d, "%Y-%m-%d").date()
-                except Exception:
-                    d_obj = datetime.date.min
-                proj_name = str((r or {}).get("\u9879\u76ee", "")).strip()
-                proj_rank = project_rank_map.get(proj_name, 999999)
-                return (
-                    proj_rank,
-                    -d_obj.toordinal(),
-                    str((r or {}).get("\u90e8\u4ef6", "")),
-                    str((r or {}).get("\u4e8b\u4ef6", "")),
-                )
-
-            event_rows = sorted(event_rows, key=_event_sort_key)
-            kw_norm = norm_text(event_kw)
-            if kw_norm:
-                event_rows = [
-                    r for r in event_rows
-                    if kw_norm in norm_text(
-                        f"{r.get('\\u9879\\u76ee','')} {r.get('\\u90e8\\u4ef6','')} {r.get('\\u5de5\\u5e8f','')} {r.get('\\u4e8b\\u4ef6','')}"
-                    )
+        owner_options = list(
+            dict.fromkeys(
+                [
+                    "Mo",
+                    "越",
+                    "袁",
+                    *[
+                        str((db.get(p, {}) or {}).get("负责人", "")).strip()
+                        for p in valid_projs
+                        if str((db.get(p, {}) or {}).get("负责人", "")).strip()
+                    ],
                 ]
+            )
+        )
 
-            edited_event_df = pd.DataFrame()
-            if event_rows:
-                event_df = pd.DataFrame(event_rows[:event_limit])
-                edited_event_df = st.data_editor(
-                    event_df,
-                    width='stretch',
-                    hide_index=True,
-                    num_rows="fixed",
-                    column_config={
-                        "_id": st.column_config.TextColumn("_id", disabled=True, width="small"),
-                        "\u65e5\u671f": st.column_config.TextColumn("\u65e5\u671f", width="small"),
-                        "\u9879\u76ee": st.column_config.TextColumn("\u9879\u76ee", disabled=True, width="medium"),
-                        "\u90e8\u4ef6": st.column_config.TextColumn("\u90e8\u4ef6", disabled=True, width="medium"),
-                        "\u5de5\u5e8f": st.column_config.SelectboxColumn("\u5de5\u5e8f", options=STAGES_UNIFIED, width="medium"),
-                        "\u7c7b\u578b": st.column_config.TextColumn("\u7c7b\u578b", width="small"),
-                        "\u4e8b\u4ef6": st.column_config.TextColumn("\u4e8b\u4ef6", width="large"),
-                        "\u63d0\u5ba1\u7c7b\u578b": st.column_config.SelectboxColumn("\u63d0\u5ba1\u7c7b\u578b", options=REVIEW_TYPE_OPTIONS, width="small"),
-                        "\u63d0\u5ba1\u7ed3\u679c": st.column_config.SelectboxColumn("\u63d0\u5ba1\u7ed3\u679c", options=REVIEW_RESULT_OPTIONS, width="small"),
-                        "\u63d0\u5ba1\u8f6e\u6b21": st.column_config.NumberColumn("\u63d0\u5ba1\u8f6e\u6b21", min_value=1, step=1, width="small"),
-                        "\u5220\u9664": st.column_config.CheckboxColumn("\u5220\u9664", width="small"),
-                    },
-                    disabled=["_id", "\u9879\u76ee", "\u90e8\u4ef6"],
-                    key="dashboard_event_editor",
-                )
-            else:
-                st.info("\u5f53\u524d\u7b5b\u9009\u6761\u4ef6\u4e0b\u65e0\u4e8b\u4ef6\u660e\u7ec6\u3002")
+        dashboard_column_config = {
+            "状态": st.column_config.TextColumn("状态", width="small", disabled=True),
+            "项目": st.column_config.TextColumn("项目", width="large", disabled=True),
+            "项目当前阶段": st.column_config.SelectboxColumn("项目当前阶段", options=STD_MILESTONES, width="small"),
+            "开定时间": st.column_config.TextColumn("开定时间", width="small", help="支持 2026-05 / 26.5 / 2026 Q2 / TBD"),
+            "预计发货": st.column_config.TextColumn("预计发货", width="small", help="支持 2026 Q2 / 2026-06 / -"),
+            "跟单": st.column_config.TextColumn("跟单", width="small"),
+            "最新全盘动态": st.column_config.TextColumn("最新全盘动态", width="large"),
+            "断更": st.column_config.TextColumn("断更", width="small", disabled=True),
+            "开定延迟预警": st.column_config.TextColumn("开定延迟预警", width="small", disabled=True),
+            "发货延迟预警": st.column_config.TextColumn("发货延迟预警", width="small", disabled=True),
+        }
+        if current_pm == "所有人":
+            dashboard_column_config["负责人"] = st.column_config.SelectboxColumn("负责人", options=owner_options, width="small")
 
-            if st.button("\U0001f4be \u4fdd\u5b58\u4e8b\u4ef6\u660e\u7ec6\u4fee\u6539", type="primary", key="btn_dash_event_save"):
-                if edited_event_df.empty:
-                    st.info("\u5f53\u524d\u6ca1\u6709\u53ef\u4fdd\u5b58\u7684\u4e8b\u4ef6\u884c\u3002")
-                else:
-                    id_map = {}
-                    for p_name in valid_projs:
-                        for c_name, c_info in db.get(p_name, {}).get("\u90e8\u4ef6\u5217\u8868", {}).items():
-                            for lg in c_info.get("\u65e5\u5fd7\u6d41", []):
-                                rid = str(lg.get("_id", "")).strip()
-                                if rid:
-                                    id_map[rid] = (p_name, c_name, lg)
-
-                    touched_projects = set()
-                    update_count = 0
-                    delete_count = 0
-
-                    for row in edited_event_df.to_dict("records"):
-                        rid = str(row.get("_id", "")).strip()
-                        bind = id_map.get(rid)
-                        if not bind:
-                            continue
-                        p_name, c_name, lg = bind
-
-                        if bool(row.get("\u5220\u9664", False)):
-                            lg["_delete_me"] = True
-                            touched_projects.add(p_name)
-                            delete_count += 1
-                            continue
-
-                        new_date = str(row.get("\u65e5\u671f", lg.get("\u65e5\u671f", ""))).strip() or str(lg.get("\u65e5\u671f", ""))
-                        new_stage = str(row.get("\u5de5\u5e8f", lg.get("\u5de5\u5e8f", ""))).strip() or str(lg.get("\u5de5\u5e8f", ""))
-                        if new_stage not in STAGES_UNIFIED:
-                            new_stage = str(lg.get("\u5de5\u5e8f", ""))
-                        new_type = str(row.get("\u7c7b\u578b", lg.get("\u6d41\u8f6c", ""))).strip() or str(lg.get("\u6d41\u8f6c", ""))
-                        new_event = str(row.get("\u4e8b\u4ef6", lg.get("\u4e8b\u4ef6", ""))).strip() or str(lg.get("\u4e8b\u4ef6", ""))
-                        new_rt = str(row.get("\u63d0\u5ba1\u7c7b\u578b", lg.get("\u63d0\u5ba1\u7c7b\u578b", "(\u65e0)"))).strip() or "(\u65e0)"
-                        if new_rt not in REVIEW_TYPE_OPTIONS:
-                            new_rt = "(\u65e0)"
-                        new_rr = str(row.get("\u63d0\u5ba1\u7ed3\u679c", lg.get("\u63d0\u5ba1\u7ed3\u679c", "(\u65e0)"))).strip() or "(\u65e0)"
-                        if new_rr not in REVIEW_RESULT_OPTIONS:
-                            new_rr = "(\u65e0)"
-                        new_round = normalize_review_round(row.get("\u63d0\u5ba1\u8f6e\u6b21", lg.get("\u63d0\u5ba1\u8f6e\u6b21", ""))) if new_rt != "(\u65e0)" else ""
-
-                        changed = False
-                        if str(lg.get("\u65e5\u671f", "")) != new_date:
-                            lg["\u65e5\u671f"] = new_date
-                            changed = True
-                        if str(lg.get("\u5de5\u5e8f", "")) != new_stage:
-                            lg["\u5de5\u5e8f"] = new_stage
-                            changed = True
-                        if str(lg.get("\u6d41\u8f6c", "")) != new_type:
-                            lg["\u6d41\u8f6c"] = new_type
-                            changed = True
-                        if str(lg.get("\u4e8b\u4ef6", "")) != new_event:
-                            lg["\u4e8b\u4ef6"] = new_event
-                            changed = True
-                        if str(lg.get("\u63d0\u5ba1\u7c7b\u578b", "(\u65e0)")) != new_rt:
-                            lg["\u63d0\u5ba1\u7c7b\u578b"] = new_rt
-                            changed = True
-                        if str(lg.get("\u63d0\u5ba1\u7ed3\u679c", "(\u65e0)")) != new_rr:
-                            lg["\u63d0\u5ba1\u7ed3\u679c"] = new_rr
-                            changed = True
-                        if str(lg.get("\u63d0\u5ba1\u8f6e\u6b21", "")) != str(new_round):
-                            lg["\u63d0\u5ba1\u8f6e\u6b21"] = new_round
-                            changed = True
-
-                        if changed:
-                            touched_projects.add(p_name)
-                            update_count += 1
-
-                    if touched_projects:
-                        for p_name in list(touched_projects):
-                            for c_name, c_info in db.get(p_name, {}).get("\u90e8\u4ef6\u5217\u8868", {}).items():
-                                logs = []
-                                for lg in c_info.get("\u65e5\u5fd7\u6d41", []):
-                                    if lg.get("_delete_me"):
-                                        continue
-                                    lg.pop("_delete_me", None)
-                                    logs.append(lg)
-                                logs = sorted(logs, key=lambda x: str(x.get("\u65e5\u671f", "")))
-                                c_info["\u65e5\u5fd7\u6d41"] = logs
-                            sync_save_db(p_name)
-                        st.success(f"\u4e8b\u4ef6\u5df2\u4fdd\u5b58\uff1a\u66f4\u65b0 {update_count} \u6761\uff0c\u5220\u9664 {delete_count} \u6761\u3002")
-                        st.rerun()
-                    else:
-                        st.info("\u672a\u68c0\u6d4b\u5230\u9700\u8981\u4fdd\u5b58\u7684\u4e8b\u4ef6\u53d8\u66f4\u3002")
-
-        st.caption("\u63d0\u793a\uff1a\u5f00\u5b9a/\u53d1\u8d27 +5 \u5929\u4e34\u671f\u4f1a\u5728\u63d0\u9192\u5217\u663e\u793a \u26a0\ufe0f\uff0c\u660e\u7ec6\u533a\u53ef\u76f4\u63a5\u505a\u6700\u65b0\u52a8\u6001\u5feb\u6539\u3002")
-
-        with st.popover("\U0001f4dd \u4fee\u6539\u6700\u65b0\u5168\u76d8\u52a8\u6001"):
-            if dashboard_project_order:
-                dyn_proj = st.selectbox("\u9009\u62e9\u9879\u76ee", dashboard_project_order, key="dash_latest_dynamic_proj")
-                latest_bind = _latest_event_binding(dyn_proj)
-                latest_comp = str((latest_bind or {}).get("component", "-"))
-                latest_evt = _clean_dashboard_event_text((latest_bind or {}).get("log", {}).get("\u4e8b\u4ef6", "")) if latest_bind else "\u65e0\u5386\u53f2\u52a8\u6001"
-                st.caption(f"\u5f53\u524d\u6700\u65b0\uff1a[{latest_comp}] {latest_evt}")
-                dyn_mode_label = st.radio(
-                    "\u66f4\u65b0\u65b9\u5f0f\uff08\u6267\u884c\u524d\u8bf7\u786e\u8ba4\uff09",
-                    ["\u4f5c\u4e3a\u6700\u65b0\u52a8\u6001\u8ffd\u52a0\uff08\u63a8\u8350\uff09", "\u4fee\u6539\u5f53\u524d\u6700\u65b0\u52a8\u6001\uff08\u6539\u5199\u5386\u53f2\uff09"],
-                    key="dash_latest_dynamic_mode",
-                )
-                dyn_text = st.text_area(
-                    "\u65b0\u52a8\u6001\u5185\u5bb9",
-                    value=("" if latest_evt == "\u65e0\u5386\u53f2\u52a8\u6001" else latest_evt),
-                    key="dash_latest_dynamic_text",
-                    placeholder="\u4f8b\uff1a\u98de\u5929\u652f\u67b6\u5df2 on-hand\uff0c\u5df2\u7ed9\u4e3b\u7f8e\u770b\u8fc7",
-                    height=96,
-                )
-                st.info("\u5982\u679c\u53ea\u662f\u4fee typo\uff0c\u8bf7\u9009\u3010\u4fee\u6539\u5f53\u524d\u6700\u65b0\u52a8\u6001\u3011\uff1b\u5982\u679c\u662f\u65b0\u8fdb\u5c55\uff0c\u8bf7\u9009\u3010\u4f5c\u4e3a\u6700\u65b0\u52a8\u6001\u8ffd\u52a0\u3011\u3002")
-                if st.button("\u786e\u8ba4\u66f4\u65b0\u52a8\u6001", type="primary", key="btn_dash_latest_dynamic_apply"):
-                    mode = "append_latest" if dyn_mode_label.startswith("\u4f5c\u4e3a\u6700\u65b0") else "edit_latest"
-                    ok, msg = _apply_latest_dynamic_update(dyn_proj, dyn_text, mode)
-                    if ok:
-                        st.success(msg)
-                        st.rerun()
-                    else:
-                        st.warning(msg)
-            else:
-                st.caption("\u5f53\u524d\u65e0\u53ef\u7f16\u8f91\u9879\u76ee\u3002")
-
-        st.dataframe(
-            show_df,
+        edited_dashboard_df = st.data_editor(
+            editable_df,
             width="stretch",
             hide_index=True,
-            column_config={
-                "\u72b6\u6001": st.column_config.TextColumn("\u72b6\u6001", width="small"),
-                "\u9879\u76ee": st.column_config.TextColumn("\u9879\u76ee", width="medium"),
-                "\u8ddf\u5355": st.column_config.TextColumn("\u8ddf\u5355", width="small"),
-                "\u9879\u76ee\u5f53\u524d\u9636\u6bb5": st.column_config.TextColumn("\u9879\u76ee\u5f53\u524d\u9636\u6bb5", width="small"),
-                "\u5f00\u5b9a\u65f6\u95f4": st.column_config.TextColumn("\u5f00\u5b9a\u65f6\u95f4", width="small"),
-                "\u9884\u8ba1\u53d1\u8d27": st.column_config.TextColumn("\u9884\u8ba1\u53d1\u8d27", width="small"),
-                "\u65ad\u66f4": st.column_config.TextColumn("\u65ad\u66f4", width="small"),
-                "\u6700\u65b0\u5168\u76d8\u52a8\u6001": st.column_config.TextColumn("\u6700\u65b0\u5168\u76d8\u52a8\u6001", width="large"),
-                "\u5f00\u5b9a\u5ef6\u8fdf\u9884\u8b66": st.column_config.TextColumn("\u5f00\u5b9a\u5ef6\u8fdf\u9884\u8b66", width="small"),
-                "\u53d1\u8d27\u5ef6\u8fdf\u9884\u8b66": st.column_config.TextColumn("\u53d1\u8d27\u5ef6\u8fdf\u9884\u8b66", width="small"),
-            },
+            num_rows="fixed",
+            column_config=dashboard_column_config,
+            disabled=["状态", "项目", "断更", "开定延迟预警", "发货延迟预警"],
+            key="dashboard_main_editor",
         )
+
+        def _normalize_target_text(v):
+            s = str(v or "").strip()
+            if s.upper() == "TBD" or s in ["-", "—", "无", "暂无"]:
+                return ""
+            return s
+
+        def _normalize_ship_text(v):
+            s = str(v or "").strip()
+            if s.upper() == "TBD" or s in ["-", "—", "无", "暂无"]:
+                return ""
+            return s
+
+        def _save_dashboard_from_table(dynamic_mode):
+            changed_projects = set()
+            basic_updates = 0
+            dynamic_updates = 0
+            error_msgs = []
+
+            for row in edited_dashboard_df.to_dict("records"):
+                proj = str(row.get("项目", "")).strip()
+                if not proj or proj not in db or proj == "系统配置":
+                    continue
+
+                proj_data = db[proj]
+                old_pm = str(proj_data.get("负责人", "")).strip()
+                old_ms = str(proj_data.get("Milestone", "")).strip() or "待立项"
+                old_target_raw = str(proj_data.get("Target", "")).strip()
+                old_ship_raw = str(proj_data.get("发货区间", "")).strip()
+                old_gd = str(proj_data.get("跟单", "")).strip()
+
+                new_pm = old_pm
+                if current_pm == "所有人":
+                    new_pm = str(row.get("负责人", old_pm)).strip() or old_pm
+                new_ms = str(row.get("项目当前阶段", old_ms)).strip() or old_ms
+                if new_ms not in STD_MILESTONES:
+                    new_ms = old_ms
+                old_target_norm = _normalize_target_text(old_target_raw)
+                old_ship_norm = _normalize_ship_text(old_ship_raw)
+                new_target_norm = _normalize_target_text(row.get("开定时间", old_target_raw))
+                new_ship_norm = _normalize_ship_text(row.get("预计发货", old_ship_raw))
+                new_gd = str(row.get("跟单", old_gd)).strip()
+
+                basic_changed = False
+                if current_pm == "所有人" and old_pm != new_pm:
+                    proj_data["负责人"] = new_pm
+                    basic_changed = True
+                if old_ms != new_ms:
+                    proj_data["Milestone"] = new_ms
+                    basic_changed = True
+                if old_target_norm != new_target_norm:
+                    proj_data["Target"] = new_target_norm or "TBD"
+                    basic_changed = True
+                if old_ship_norm != new_ship_norm:
+                    proj_data["发货区间"] = new_ship_norm
+                    basic_changed = True
+                if old_gd != new_gd:
+                    proj_data["跟单"] = new_gd
+                    basic_changed = True
+
+                latest_before = _clean_dashboard_event_text(((_latest_event_binding(proj) or {}).get("log") or {}).get("事件", ""))
+                latest_after = str(row.get("最新全盘动态", latest_before)).strip()
+                if latest_after != latest_before:
+                    if not latest_after:
+                        error_msgs.append(f"{proj}: 最新全盘动态不能为空。")
+                    else:
+                        ok, msg = _apply_latest_dynamic_update(proj, latest_after, dynamic_mode, auto_save=False)
+                        if ok:
+                            dynamic_updates += 1
+                            changed_projects.add(proj)
+                        else:
+                            error_msgs.append(f"{proj}: {msg}")
+
+                if basic_changed:
+                    basic_updates += 1
+                    changed_projects.add(proj)
+
+            if changed_projects:
+                for proj in sorted(changed_projects, key=lambda p: project_rank_map.get(str(p), 999999)):
+                    sync_save_db(proj)
+                st.success(f"已保存 {len(changed_projects)} 个项目：基础字段 {basic_updates} 条，动态 {dynamic_updates} 条。")
+                if error_msgs:
+                    st.warning("\n".join(error_msgs[:6]))
+                st.rerun()
+            else:
+                if error_msgs:
+                    st.warning("\n".join(error_msgs[:6]))
+                else:
+                    st.info("未检测到可保存的变更。")
+
+        act1, act2 = st.columns(2)
+        with act1:
+            if st.button("✅ 修改最新全盘动态（作为新记录）", type="primary", key="btn_dash_save_append_latest"):
+                _save_dashboard_from_table("append_latest")
+        with act2:
+            if st.button("🛠 修改当前最新动态（改写历史）", key="btn_dash_save_edit_latest"):
+                _save_dashboard_from_table("edit_latest")
     st.divider()
     if project_person_roles:
         df_ppr   = pd.DataFrame(list(project_person_roles), columns=["项目", "人员", "职务"])
