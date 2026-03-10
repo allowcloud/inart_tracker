@@ -24,7 +24,21 @@ class StreamlitSmokeTest(unittest.TestCase):
             if at.exception:
                 raise SystemExit("initial run exceptions: " + " | ".join(str(x.value) for x in at.exception))
 
-            at.radio[0].set_value(at.radio[0].options[1])
+            nav_radio = None
+            for r in at.radio:
+                label = str(r.label or "")
+                options = [str(o) for o in r.options]
+                if "\u529f\u80fd\u5bfc\u822a" in label or any("PM \u5de5\u4f5c\u53f0" in o for o in options):
+                    nav_radio = r
+                    break
+            if nav_radio is None:
+                raise SystemExit("navigation radio not found")
+
+            pm_option = next((o for o in nav_radio.options if "PM \u5de5\u4f5c\u53f0" in str(o)), None)
+            if pm_option is None:
+                raise SystemExit("PM workspace option not found")
+
+            nav_radio.set_value(pm_option)
             at.run()
             if at.exception:
                 raise SystemExit("pm workspace exceptions: " + " | ".join(str(x.value) for x in at.exception))
