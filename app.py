@@ -3963,7 +3963,61 @@ if menu == MENU_DASHBOARD:
         dashboard_project_order = show_df["\u9879\u76ee"].tolist()
         project_rank_map = {str(p): idx for idx, p in enumerate(dashboard_project_order)}
 
-        with st.expander("\u26a1 \u5927\u76d8\u8054\u52a8\u5feb\u6539\uff08\u57fa\u7840\u5b57\u6bb5 + \u4e8b\u4ef6\uff09", expanded=True):
+        def _clean_dashboard_event_text(event_text):
+            txt = str(event_text or "").strip()
+            if "\u8865\u5145:" in txt:
+                txt = txt.split("\u8865\u5145:")[-1]
+            if "\u3011" in txt:
+                txt = txt.split("\u3011")[-1]
+            return txt.split("[\u7cfb\u7edf]")[0].strip() or str(event_text or "").strip()
+
+        def _latest_event_binding(proj_name):
+            latest = None
+            for comp_name, comp_info in db.get(proj_name, {}).get("\u90e8\u4ef6\u5217\u8868", {}).items():
+                for lg in comp_info.get("\u65e5\u5fd7\u6d41", []):
+                    if is_hidden_system_log(lg):
+                        continue
+                    d_txt = str((lg or {}).get("\u65e5\u671f", "")).strip()
+                    d_obj = parse_date_safe(d_txt) or datetime.date.min
+                    rank = (d_obj.toordinal(), d_txt, str((lg or {}).get("_id", "")), str(comp_name))
+                    if (latest is None) or (rank > latest["rank"]):
+                        latest = {"rank": rank, "component": str(comp_name), "log": lg}
+            return latest
+
+        def _apply_latest_dynamic_update(project_name, new_text, mode):
+            proj = str(project_name or "").strip()
+            msg = str(new_text or "").strip()
+            if (not proj) or proj not in db:
+                return False, "\u672a\u9009\u62e9\u6709\u6548\u9879\u76ee\u3002"
+            if not msg:
+                return False, "\u52a8\u6001\u5185\u5bb9\u4e0d\u80fd\u4e3a\u7a7a\u3002"
+
+            binding = _latest_event_binding(proj)
+            comps = db.get(proj, {}).setdefault("\u90e8\u4ef6\u5217\u8868", {})
+            target_comp = binding["component"] if binding else next((k for k in comps.keys() if "\u5168\u5c40" in str(k)), "\u5168\u5c40\u8fdb\u5ea6")
+            if target_comp not in comps or not isinstance(comps.get(target_comp), dict):
+                comps[target_comp] = {"\u4e3b\u6d41\u7a0b": STAGES_UNIFIED[0], "\u65e5\u5fd7\u6d41": []}
+
+            if mode == "edit_latest" and binding and isinstance(binding.get("log"), dict):
+                binding["log"]["\u4e8b\u4ef6"] = msg
+                sync_save_db(proj)
+                return True, f"\u5df2\u6539\u5199 {proj} \u7684\u5f53\u524d\u6700\u65b0\u52a8\u6001\u3002"
+
+            comp_info = comps[target_comp]
+            curr_stage = str(comp_info.get("\u4e3b\u6d41\u7a0b", "")).strip()
+            if curr_stage not in STAGES_UNIFIED:
+                curr_stage = STAGES_UNIFIED[0]
+            comp_info.setdefault("\u65e5\u5fd7\u6d41", []).append({
+                "\u65e5\u671f": str(datetime.date.today()),
+                "\u6d41\u8f6c": "\u5927\u76d8\u52a8\u6001",
+                "\u5de5\u5e8f": curr_stage,
+                "\u4e8b\u4ef6": msg,
+            })
+            comp_info["\u65e5\u5fd7\u6d41"] = sorted(comp_info.get("\u65e5\u5fd7\u6d41", []), key=lambda x: str((x or {}).get("\u65e5\u671f", "")))
+            sync_save_db(proj)
+            return True, f"\u5df2\u8ffd\u52a0 {proj} \u7684\u6700\u65b0\u52a8\u6001\u3002"
+
+        with st.expander("\u26a1 \u5927\u76d8\u8054\u52a8\u5feb\u6539\uff08\u57fa\u7840\u5b57\u6bb5 + \u4e8b\u4ef6\uff09", expanded=False):
             st.caption("\u540c\u4e00\u5165\u53e3\u5b8c\u6210\u5b57\u6bb5\u5feb\u6539\u548c\u4e8b\u4ef6\u5feb\u6539\uff0c\u6392\u5e8f\u4e0e\u4e0b\u65b9\u5927\u76d8\u660e\u7ec6\u8868\u4fdd\u6301\u4e00\u81f4\u3002")
 
             quick_edit_df = show_df[["\u9879\u76ee", "\u9879\u76ee\u5f53\u524d\u9636\u6bb5", "\u5f00\u5b9a\u65f6\u95f4", "\u9884\u8ba1\u53d1\u8d27", "\u8ddf\u5355"]].copy()
@@ -4273,24 +4327,56 @@ if menu == MENU_DASHBOARD:
                     else:
                         st.info("\u672a\u68c0\u6d4b\u5230\u9700\u8981\u4fdd\u5b58\u7684\u4e8b\u4ef6\u53d8\u66f4\u3002")
 
-        def _hl_warn(v):
-            return 'background-color: #fef08a; color: #111827; font-weight: 600' if str(v).strip() else ''
+        st.caption("\u63d0\u793a\uff1a\u5f00\u5b9a/\u53d1\u8d27 +5 \u5929\u4e34\u671f\u4f1a\u5728\u63d0\u9192\u5217\u663e\u793a \u26a0\ufe0f\uff0c\u660e\u7ec6\u533a\u53ef\u76f4\u63a5\u505a\u6700\u65b0\u52a8\u6001\u5feb\u6539\u3002")
 
-        st.caption("提示：开定/发货 +5 天临期会高亮黄色，仍可点击表头二次排序。")
+        with st.popover("\U0001f4dd \u4fee\u6539\u6700\u65b0\u5168\u76d8\u52a8\u6001"):
+            if dashboard_project_order:
+                dyn_proj = st.selectbox("\u9009\u62e9\u9879\u76ee", dashboard_project_order, key="dash_latest_dynamic_proj")
+                latest_bind = _latest_event_binding(dyn_proj)
+                latest_comp = str((latest_bind or {}).get("component", "-"))
+                latest_evt = _clean_dashboard_event_text((latest_bind or {}).get("log", {}).get("\u4e8b\u4ef6", "")) if latest_bind else "\u65e0\u5386\u53f2\u52a8\u6001"
+                st.caption(f"\u5f53\u524d\u6700\u65b0\uff1a[{latest_comp}] {latest_evt}")
+                dyn_mode_label = st.radio(
+                    "\u66f4\u65b0\u65b9\u5f0f\uff08\u6267\u884c\u524d\u8bf7\u786e\u8ba4\uff09",
+                    ["\u4f5c\u4e3a\u6700\u65b0\u52a8\u6001\u8ffd\u52a0\uff08\u63a8\u8350\uff09", "\u4fee\u6539\u5f53\u524d\u6700\u65b0\u52a8\u6001\uff08\u6539\u5199\u5386\u53f2\uff09"],
+                    key="dash_latest_dynamic_mode",
+                )
+                dyn_text = st.text_area(
+                    "\u65b0\u52a8\u6001\u5185\u5bb9",
+                    value=("" if latest_evt == "\u65e0\u5386\u53f2\u52a8\u6001" else latest_evt),
+                    key="dash_latest_dynamic_text",
+                    placeholder="\u4f8b\uff1a\u98de\u5929\u652f\u67b6\u5df2 on-hand\uff0c\u5df2\u7ed9\u4e3b\u7f8e\u770b\u8fc7",
+                    height=96,
+                )
+                st.info("\u5982\u679c\u53ea\u662f\u4fee typo\uff0c\u8bf7\u9009\u3010\u4fee\u6539\u5f53\u524d\u6700\u65b0\u52a8\u6001\u3011\uff1b\u5982\u679c\u662f\u65b0\u8fdb\u5c55\uff0c\u8bf7\u9009\u3010\u4f5c\u4e3a\u6700\u65b0\u52a8\u6001\u8ffd\u52a0\u3011\u3002")
+                if st.button("\u786e\u8ba4\u66f4\u65b0\u52a8\u6001", type="primary", key="btn_dash_latest_dynamic_apply"):
+                    mode = "append_latest" if dyn_mode_label.startswith("\u4f5c\u4e3a\u6700\u65b0") else "edit_latest"
+                    ok, msg = _apply_latest_dynamic_update(dyn_proj, dyn_text, mode)
+                    if ok:
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.warning(msg)
+            else:
+                st.caption("\u5f53\u524d\u65e0\u53ef\u7f16\u8f91\u9879\u76ee\u3002")
+
         st.dataframe(
-            show_df.style.map(_hl_warn, subset=["开定延迟预警", "发货延迟预警"]),
-            width='stretch'
+            show_df,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "\u72b6\u6001": st.column_config.TextColumn("\u72b6\u6001", width="small"),
+                "\u9879\u76ee": st.column_config.TextColumn("\u9879\u76ee", width="medium"),
+                "\u8ddf\u5355": st.column_config.TextColumn("\u8ddf\u5355", width="small"),
+                "\u9879\u76ee\u5f53\u524d\u9636\u6bb5": st.column_config.TextColumn("\u9879\u76ee\u5f53\u524d\u9636\u6bb5", width="small"),
+                "\u5f00\u5b9a\u65f6\u95f4": st.column_config.TextColumn("\u5f00\u5b9a\u65f6\u95f4", width="small"),
+                "\u9884\u8ba1\u53d1\u8d27": st.column_config.TextColumn("\u9884\u8ba1\u53d1\u8d27", width="small"),
+                "\u65ad\u66f4": st.column_config.TextColumn("\u65ad\u66f4", width="small"),
+                "\u6700\u65b0\u5168\u76d8\u52a8\u6001": st.column_config.TextColumn("\u6700\u65b0\u5168\u76d8\u52a8\u6001", width="large"),
+                "\u5f00\u5b9a\u5ef6\u8fdf\u9884\u8b66": st.column_config.TextColumn("\u5f00\u5b9a\u5ef6\u8fdf\u9884\u8b66", width="small"),
+                "\u53d1\u8d27\u5ef6\u8fdf\u9884\u8b66": st.column_config.TextColumn("\u53d1\u8d27\u5ef6\u8fdf\u9884\u8b66", width="small"),
+            },
         )
-
-        with st.expander("只读预览（含临期预警样式）", expanded=False):
-            preview_warn_cols = [c for c in ["开定延迟预警", "发货延迟预警"] if c in show_df.columns]
-            styled_preview = show_df.style
-            if preview_warn_cols:
-                styled_preview = styled_preview.map(_hl_warn, subset=preview_warn_cols)
-            st.dataframe(
-                styled_preview,
-                width='stretch'
-            )
     st.divider()
     if project_person_roles:
         df_ppr   = pd.DataFrame(list(project_person_roles), columns=["项目", "人员", "职务"])
