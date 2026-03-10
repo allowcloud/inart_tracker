@@ -3984,43 +3984,206 @@ if menu == MENU_DASHBOARD:
                         latest = {"rank": rank, "component": str(comp_name), "log": lg}
             return latest
 
-        def _apply_latest_dynamic_update(project_name, new_text, mode, auto_save=True):
+        def _apply_latest_dynamic_update(project_name, new_text, mode, auto_save=True, event_date=None):
             proj = str(project_name or "").strip()
             msg = str(new_text or "").strip()
             if (not proj) or proj not in db:
-                return False, "\u672a\u9009\u62e9\u6709\u6548\u9879\u76ee\u3002"
+                return False, "未选择有效项目。"
             if not msg:
-                return False, "\u52a8\u6001\u5185\u5bb9\u4e0d\u80fd\u4e3a\u7a7a\u3002"
+                return False, "动态内容不能为空。"
 
             binding = _latest_event_binding(proj)
-            comps = db.get(proj, {}).setdefault("\u90e8\u4ef6\u5217\u8868", {})
-            target_comp = binding["component"] if binding else next((k for k in comps.keys() if "\u5168\u5c40" in str(k)), "\u5168\u5c40\u8fdb\u5ea6")
+            comps = db.get(proj, {}).setdefault("部件列表", {})
+            target_comp = binding["component"] if binding else next((k for k in comps.keys() if "全局" in str(k)), "全局进度")
             if target_comp not in comps or not isinstance(comps.get(target_comp), dict):
-                comps[target_comp] = {"\u4e3b\u6d41\u7a0b": STAGES_UNIFIED[0], "\u65e5\u5fd7\u6d41": []}
+                comps[target_comp] = {"主流程": STAGES_UNIFIED[0], "日志流": []}
 
             if mode == "edit_latest" and binding and isinstance(binding.get("log"), dict):
-                binding["log"]["\u4e8b\u4ef6"] = msg
+                binding["log"]["事件"] = msg
                 if auto_save:
                     sync_save_db(proj)
-                return True, f"\u5df2\u6539\u5199 {proj} \u7684\u5f53\u524d\u6700\u65b0\u52a8\u6001\u3002"
+                return True, f"已改写 {proj} 的当前最新动态。"
 
             comp_info = comps[target_comp]
-            curr_stage = str(comp_info.get("\u4e3b\u6d41\u7a0b", "")).strip()
+            curr_stage = str(comp_info.get("主流程", "")).strip()
             if curr_stage not in STAGES_UNIFIED:
                 curr_stage = STAGES_UNIFIED[0]
-            comp_info.setdefault("\u65e5\u5fd7\u6d41", []).append({
-                "\u65e5\u671f": str(datetime.date.today()),
-                "\u6d41\u8f6c": "\u5927\u76d8\u52a8\u6001",
-                "\u5de5\u5e8f": curr_stage,
-                "\u4e8b\u4ef6": msg,
+            log_date = event_date if isinstance(event_date, datetime.date) else datetime.date.today()
+            comp_info.setdefault("日志流", []).append({
+                "日期": str(log_date),
+                "流转": "大盘动态",
+                "工序": curr_stage,
+                "事件": msg,
             })
-            comp_info["\u65e5\u5fd7\u6d41"] = sorted(comp_info.get("\u65e5\u5fd7\u6d41", []), key=lambda x: str((x or {}).get("\u65e5\u671f", "")))
+            comp_info["日志流"] = sorted(comp_info.get("日志流", []), key=lambda x: str((x or {}).get("日期", "")))
             if auto_save:
                 sync_save_db(proj)
-            return True, f"\u5df2\u8ffd\u52a0 {proj} \u7684\u6700\u65b0\u52a8\u6001\u3002"
+            return True, f"已追加 {proj} 的最新动态。"
+
+        def _dashboard_dynamic_is_placeholder(text):
+            t = norm_text(text)
+            return (not t) or (t in {"-", "无", "无数据", "暂无", "none", "null", "n/a"})
+
+        def _normalize_dashboard_dynamic_input(project_name, cell_text):
+            raw = str(cell_text or "").strip()
+            if not raw:
+                return ""
+
+            binding = _latest_event_binding(project_name)
+            latest_comp = str((binding or {}).get("component", "")).strip()
+
+            txt = raw
+            for _ in range(4):
+                m = re.match(r"^\[([^\]]*)\]\s*", txt)
+                if not m:
+                    break
+                tag = str(m.group(1) or "").strip()
+                if tag in {"全局进度", "全局", "整体", "Overall", "-", ""}:
+                    txt = txt[m.end():].strip()
+                    continue
+                if latest_comp and tag == latest_comp:
+                    txt = txt[m.end():].strip()
+                    continue
+                break
+
+            txt = _clean_dashboard_event_text(txt)
+            if _dashboard_dynamic_is_placeholder(txt):
+                return ""
+            return txt
+
+        def _extract_event_date_from_text(text, prefer_past=False, ref_date=None):
+            s = str(text or "").strip()
+            if not s:
+                return None, s
+            ref = ref_date or datetime.date.today()
+
+            full_patterns = [
+                r"(20\d{2})[-/\.](\d{1,2})[-/\.](\d{1,2})",
+                r"(20\d{2})年(\d{1,2})月(\d{1,2})日?",
+            ]
+            for pat in full_patterns:
+                m = re.search(pat, s)
+                if not m:
+                    continue
+                try:
+                    y = int(m.group(1)); mm = int(m.group(2)); dd = int(m.group(3))
+                    dt = datetime.date(y, mm, dd)
+                    cleaned = (s[:m.start()] + " " + s[m.end():]).strip(" ，,;；|")
+                    return dt, cleaned
+                except Exception:
+                    pass
+
+            md_patterns = [
+                r"(?<!\d)(\d{1,2})/(\d{1,2})(?!\d)",
+                r"(?<!\d)(\d{1,2})-(\d{1,2})(?!\d)",
+                r"(?<!\d)(\d{1,2})月(\d{1,2})日?",
+            ]
+            for pat in md_patterns:
+                m = re.search(pat, s)
+                if not m:
+                    continue
+                try:
+                    mm = int(m.group(1)); dd = int(m.group(2))
+                    y = ref.year
+                    cand = datetime.date(y, mm, dd)
+                    if prefer_past and cand > ref + datetime.timedelta(days=30):
+                        cand = datetime.date(y - 1, mm, dd)
+                    if (not prefer_past) and cand < ref - datetime.timedelta(days=30):
+                        cand = datetime.date(y + 1, mm, dd)
+                    cleaned = (s[:m.start()] + " " + s[m.end():]).strip(" ，,;；|")
+                    return cand, cleaned
+                except Exception:
+                    pass
+
+            return None, s
+
+        def _classify_dynamic_intent(text):
+            txt = str(text or "")
+            txt_norm = norm_text(txt)
+            todo_keys = [
+                "待", "待办", "需要", "需", "跟进", "跟催", "确认", "补", "安排", "提交", "提审", "todo", "to do", "ddl", "cp",
+            ]
+            past_keys = [
+                "已", "已经", "完成", "完毕", "通过", "收到", "确认了", "确认完成", "看过", "on-hand", "on hand", "done", "ok",
+            ]
+            todo_score = sum(1 for k in todo_keys if (k in txt) or (norm_text(k) in txt_norm))
+            past_score = sum(1 for k in past_keys if (k in txt) or (norm_text(k) in txt_norm))
+            if todo_score > past_score and todo_score > 0:
+                return "todo"
+            if past_score > todo_score and past_score > 0:
+                return "past"
+            if todo_score > 0 and past_score > 0:
+                if any(k in txt for k in ["待", "需要", "需", "跟进", "跟催"]):
+                    return "todo"
+                return "past"
+            return "neutral"
+
+        def _sync_todo_checkpoint_from_dynamic(project_name, event_text):
+            intent = _classify_dynamic_intent(event_text)
+            if intent != "todo":
+                return ""
+
+            due_dt, task_body = _extract_event_date_from_text(event_text, prefer_past=False)
+            if not due_dt:
+                return ""
+
+            task = str(task_body or event_text).strip(" |，,;；")
+            if not task:
+                return ""
+
+            proj_data = db.get(project_name, {}) if project_name in db else {}
+            owner = str(proj_data.get("负责人", "")).strip()
+            scope = owner if owner and owner != "所有人" else "未分配"
+            people = str(proj_data.get("跟单", "")).strip()
+            cpddl_txt = f"{due_dt.month}/{due_dt.day} {task}"
+
+            cfg = db.setdefault("系统配置", {})
+            todo_all = cfg.setdefault("PM_TODO_LIST", [])
+            task_norm = norm_text(task)
+
+            hit = None
+            for td in todo_all:
+                if bool((td or {}).get("完成")):
+                    continue
+                if str((td or {}).get("关联项目", "")).strip() != str(project_name):
+                    continue
+                if norm_text(str((td or {}).get("任务", ""))) == task_norm:
+                    hit = td
+                    break
+
+            if hit:
+                changed = False
+                if str(hit.get("DDL", "")).strip() != str(due_dt):
+                    hit["DDL"] = str(due_dt)
+                    changed = True
+                if str(hit.get("CPDDL", "")).strip() != cpddl_txt:
+                    hit["CPDDL"] = cpddl_txt
+                    hit["CP"] = cpddl_txt
+                    changed = True
+                if people and not str(hit.get("关联人员", "")).strip():
+                    hit["关联人员"] = people
+                    changed = True
+                return "updated" if changed else "exists"
+
+            todo_all.append({
+                "_id": str(uuid.uuid4()),
+                "任务": task,
+                "CPDDL": cpddl_txt,
+                "CP": cpddl_txt,
+                "DDL": str(due_dt),
+                "完成": False,
+                "关联项目": str(project_name),
+                "关联人员": people,
+                "所属视角": scope,
+                "创建者视角": current_pm if current_pm != "所有人" else scope,
+                "创建": str(datetime.date.today()),
+                "完成时间": "",
+            })
+            return "created"
 
         st.markdown("##### 🧩 大盘明细可编辑表")
         st.caption("直接在表格中修改基础字段和【最新全盘动态】；保存时选择是追加为最新动态，还是改写当前最新动态。")
+        st.caption("规则：含日期的待办语气会自动同步 To do checkpoint；含日期的过去式语气会按该日期写入历史。")
 
         editable_cols = ["\u72b6\u6001", "\u9879\u76ee", "\u9879\u76ee\u5f53\u524d\u9636\u6bb5", "\u5f00\u5b9a\u65f6\u95f4", "\u9884\u8ba1\u53d1\u8d27", "\u8ddf\u5355", "\u6700\u65b0\u5168\u76d8\u52a8\u6001", "\u65ad\u66f4", "\u5f00\u5b9a\u5ef6\u8fdf\u9884\u8b66", "\u53d1\u8d27\u5ef6\u8fdf\u9884\u8b66"]
         editable_df = show_df[editable_cols].copy()
@@ -4030,6 +4193,13 @@ if menu == MENU_DASHBOARD:
                 "\u8d1f\u8d23\u4eba",
                 [str((db.get(str(p).strip(), {}) or {}).get("\u8d1f\u8d23\u4eba", "")).strip() for p in editable_df["\u9879\u76ee"].tolist()],
             )
+
+        dashboard_edit_snapshot = {}
+        for rec in editable_df.to_dict("records"):
+            proj_key = str(rec.get("\u9879\u76ee", "")).strip()
+            if not proj_key:
+                continue
+            dashboard_edit_snapshot[proj_key] = {k: str(rec.get(k, "")).strip() for k in editable_df.columns.tolist()}
 
         owner_options = list(
             dict.fromkeys(
@@ -4087,6 +4257,8 @@ if menu == MENU_DASHBOARD:
             changed_projects = set()
             basic_updates = 0
             dynamic_updates = 0
+            todo_created = 0
+            todo_updated = 0
             error_msgs = []
 
             for row in edited_dashboard_df.to_dict("records"):
@@ -4130,16 +4302,35 @@ if menu == MENU_DASHBOARD:
                     proj_data["跟单"] = new_gd
                     basic_changed = True
 
-                latest_before = _clean_dashboard_event_text(((_latest_event_binding(proj) or {}).get("log") or {}).get("事件", ""))
-                latest_after = str(row.get("最新全盘动态", latest_before)).strip()
-                if latest_after != latest_before:
+                base_row = dashboard_edit_snapshot.get(proj, {})
+                latest_raw_before = str(base_row.get("最新全盘动态", "")).strip()
+                latest_raw_after = str(row.get("最新全盘动态", latest_raw_before)).strip()
+                if latest_raw_after != latest_raw_before:
+                    latest_after = _normalize_dashboard_dynamic_input(proj, latest_raw_after)
                     if not latest_after:
-                        error_msgs.append(f"{proj}: 最新全盘动态不能为空。")
+                        error_msgs.append(f"{proj}: 最新全盘动态不能为空或无数据。")
                     else:
-                        ok, msg = _apply_latest_dynamic_update(proj, latest_after, dynamic_mode, auto_save=False)
+                        intent = _classify_dynamic_intent(latest_after)
+                        event_date = None
+                        if dynamic_mode == "append_latest" and intent == "past":
+                            event_date, _ = _extract_event_date_from_text(latest_after, prefer_past=True)
+
+                        ok, msg = _apply_latest_dynamic_update(
+                            proj,
+                            latest_after,
+                            dynamic_mode,
+                            auto_save=False,
+                            event_date=event_date,
+                        )
                         if ok:
                             dynamic_updates += 1
                             changed_projects.add(proj)
+                            if dynamic_mode == "append_latest":
+                                todo_state = _sync_todo_checkpoint_from_dynamic(proj, latest_after)
+                                if todo_state == "created":
+                                    todo_created += 1
+                                elif todo_state == "updated":
+                                    todo_updated += 1
                         else:
                             error_msgs.append(f"{proj}: {msg}")
 
@@ -4150,7 +4341,13 @@ if menu == MENU_DASHBOARD:
             if changed_projects:
                 for proj in sorted(changed_projects, key=lambda p: project_rank_map.get(str(p), 999999)):
                     sync_save_db(proj)
-                st.success(f"已保存 {len(changed_projects)} 个项目：基础字段 {basic_updates} 条，动态 {dynamic_updates} 条。")
+                todo_bits = []
+                if todo_created:
+                    todo_bits.append(f"To do新建 {todo_created} 条")
+                if todo_updated:
+                    todo_bits.append(f"To do更新 {todo_updated} 条")
+                todo_suffix = ("；" + "，".join(todo_bits)) if todo_bits else ""
+                st.success(f"已保存 {len(changed_projects)} 个项目：基础字段 {basic_updates} 条，动态 {dynamic_updates} 条{todo_suffix}。")
                 if error_msgs:
                     st.warning("\n".join(error_msgs[:6]))
                 st.rerun()
