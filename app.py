@@ -239,7 +239,7 @@ DEFAULT_SYS_CFG = {
     "标准部件": ["头雕(表情)", "素体", "手型", "服装", "配件", "地台", "包装"],
     "标准阶段": ["立项", "建模(含打印/签样)", "涂装", "设计", "工程拆件", "手板/结构板", "官图", "工厂复样(含胶件/上色等)", "大货", "⏸️ 暂停/搁置", "✅ 已完成(结束)"],
     "宏观阶段": ["立项", "建模", "设计", "工程", "模具", "修模", "生产", "暂停", "结束"],
-    "排期基线": {"立项": 7, "建模": 42, "设计": 35, "工程": 49, "模具": 28, "修模": 14, "生产": 30},
+    "排期基线": {"立项": 1, "建模": 42, "设计": 35, "工程": 49, "模具": 28, "修模": 14, "生产": 30},
     "项目别名": {},
     "AI_COMP_KW":  {},
     "AI_STAGE_KW": {}
@@ -5981,7 +5981,8 @@ elif menu == MENU_COST:
                     count += 1
                 sync_save_db(sel_proj)
                 if count > 0: st.success(f"🎉 导入 {count} 条明细！"); st.balloons()
-                else:          st.warning("⚠️ 未能识别金额数据。")
+                else:
+                    st.warning(f"未能识别金额数据。单价列识别：{col_price or '未识别'}；金额列识别：{col_amt or '未识别'}。CSV 列名：{', '.join([str(c) for c in df_cost.columns])}")
             except Exception as e:
                 st.error(f"解析失败: {e}")
 
@@ -6069,7 +6070,7 @@ elif menu == MENU_COST:
     # ==========================================
     # 模块 6：历史溯源
         st.divider()
-        with st.expander("?? 入库与领用台账", expanded=False):
+        with st.expander("入库与领用台账", expanded=False):
             render_project_inventory_ledger(sel_proj, key_prefix=f"cost_inv_{norm_text(sel_proj)[:24]}")
 # ==========================================
 elif menu == MENU_HISTORY:
