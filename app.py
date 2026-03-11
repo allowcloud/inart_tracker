@@ -1238,7 +1238,13 @@ def todo_due_date(td):
     d = parse_date_safe((td or {}).get("DDL", ""))
     if d:
         return d
-    return extract_deadline_from_text(todo_cpddl_text(td))
+    extract_fn = globals().get("extract_deadline_from_text")
+    if callable(extract_fn):
+        try:
+            return extract_fn(todo_cpddl_text(td))
+        except Exception:
+            return None
+    return None
 def todo_alert_text(td, today=None):
     today = today or datetime.date.today()
     if bool((td or {}).get("完成")):
@@ -6602,7 +6608,7 @@ elif menu == MENU_SETTINGS:
             st.warning("\u5f53\u524d\u662f\u5168\u91cf\u8303\u56f4\u64cd\u4f5c\uff0c\u8bf7\u52fe\u9009\u786e\u8ba4\uff0c\u9632\u6b62\u8bef\u8986\u76d6\u3002")
             confirm_all = st.checkbox("\u6211\u786e\u8ba4\u5bf9\u5168\u91cf\u8303\u56f4\u6267\u884c\u672c\u6b21\u64cd\u4f5c", value=False, key="rp_confirm_all_unified")
 
-        if st.button("\ud83d\udcbe \u6267\u884c\u56e2\u961f\u6210\u5458\u7ef4\u62a4", type="primary", key="btn_role_person_maintain_unified"):
+        if st.button("\u4fdd\u5b58\u5e76\u6267\u884c\u56e2\u961f\u6210\u5458\u7ef4\u62a4", type="primary", key="btn_role_person_maintain_unified"):
             if not confirm_all:
                 st.warning("\u672a\u786e\u8ba4\u5168\u91cf\u64cd\u4f5c\uff0c\u5df2\u53d6\u6d88\u6267\u884c\u3002")
             else:
