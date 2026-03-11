@@ -1,4 +1,4 @@
-﻿import streamlit as st
+import streamlit as st
 import json
 import os
 import datetime
@@ -891,7 +891,7 @@ def refresh_project_todo_links(proj_name):
     todo_all = db_obj.get("\u7cfb\u7edf\u914d\u7f6e", {}).get("PM_TODO_LIST", [])
     todo_items = [
         td for td in todo_all
-        if str((td or {}).get("\u5173\u8054\u9879\u76ee", "")).strip() == proj and str((td or {}).get("\u4efb\u52a1", "")).strip()
+        if todo_matches_project(td, proj) and str((td or {}).get("\u4efb\u52a1", "")).strip()
     ]
     if not todo_items:
         return 0
@@ -1449,6 +1449,63 @@ def fmt_ym(ym):
     if not ym:
         return "-"
     return f"{int(ym[0])}/{int(ym[1]):02d}"
+
+
+def todo_matches_project(td, proj_name):
+    td_obj = td or {}
+    proj = str(proj_name or "").strip()
+    if not proj:
+        return False
+
+    alias_map = db.get("????", {}).get("????", {})
+    proj_canon = resolve_alias_project(proj, alias_map)
+
+    ref_proj = str(td_obj.get("????", "")).strip()
+    if ref_proj:
+        ref_canon = resolve_alias_project(ref_proj, alias_map)
+        if ref_proj in [proj, proj_canon] or ref_canon in [proj, proj_canon]:
+            return True
+
+    linked_proj = str(td_obj.get("??????", "")).strip()
+    if linked_proj:
+        linked_canon = resolve_alias_project(linked_proj, alias_map)
+        if linked_proj in [proj, proj_canon] or linked_canon in [proj, proj_canon]:
+            return True
+
+    txt = f"{str(td_obj.get('??', '')).strip()} {todo_cpddl_text(td_obj)}".strip()
+    txt_norm = norm_text(txt)
+
+    candidates = set()
+    candidates.add(proj)
+    candidates.add(proj_canon)
+
+    def _add_proj_forms(name):
+        s = str(name or "").strip()
+        if not s:
+            return
+        candidates.add(s)
+        short = re.sub(r'^(1/6|1/4|1/12|1/3|1/1)\s*', '', s).strip()
+        if short:
+            candidates.add(short)
+
+    _add_proj_forms(proj)
+    _add_proj_forms(proj_canon)
+
+    for a in alias_map.keys():
+        a_canon = resolve_alias_project(a, alias_map)
+        if a_canon in [proj, proj_canon]:
+            _add_proj_forms(a)
+
+    for token in candidates:
+        t = str(token or "").strip()
+        if not t:
+            continue
+        if t in txt:
+            return True
+        tn = norm_text(t)
+        if tn and tn in txt_norm:
+            return True
+    return False
 
 
 def infer_todo_target_hint(td, valid_projs):
@@ -3251,71 +3308,253 @@ def render_pm_fastlog_integrated(sel_proj):
         else:
             st.warning("没有可保存的记录。")
 
-def render_pm_packing_inventory_integrated(sel_proj):
-    st.markdown("#### 📦 包装跟踪 + 入库台账（已并入 PM）")
-    pack_data = db[sel_proj].get("包装专项", {})
-    pack_items = [
-        "实物寄厂", "提供刀线", "已称重", "彩盒设计", "灰箱设计", "物流箱设计", "说明书", "感谢信", "杂项纸品"
-    ]
-    labels = {
-        "实物寄厂": "实物寄包装厂", "提供刀线": "提供刀线", "已称重": "内部已称重",
-        "彩盒设计": "彩盒设计完毕", "灰箱设计": "灰箱设计完毕", "物流箱设计": "物流箱设计完毕",
-        "说明书": "说明书定版", "感谢信": "感谢信定版", "杂项纸品": "杂项纸品确认"
+def _normalize_packing_board(pack_raw):
+    pack_obj = pack_raw if isinstance(pack_raw, dict) else {}
+    cfg_raw = pack_obj.get("配置", {})
+    cfg = cfg_raw if isinstance(cfg_raw, dict) else {}
+    checklist_raw = pack_obj.get("阶段清单", {})
+    checklist = checklist_raw if isinstance(checklist_raw, dict) else {}
+    reviews_raw = pack_obj.get("提审记录", [])
+    if not isinstance(reviews_raw, list):
+        reviews_raw = []
+
+    # 兼容旧版扩平结构
+    legacy_map = {
+        "实物寄厂": "前置_实物已寄包装厂",
+        "提供刀线": "前置_刀线已收回",
+        "已称重": "前置_内部已称重",
+        "彩盒设计": "设计_彩盒",
+        "灰箱设计": "设计_灰箱",
+        "说明书": "设计_说明书主项",
+        "感谢信": "设计_感谢信",
     }
-    pack_file_map = db[sel_proj].setdefault("包装物料附件", {})
+    for old_key, new_key in legacy_map.items():
+        if new_key not in checklist and bool(pack_obj.get(old_key, False)):
+            checklist[new_key] = True
+    if "设计_物流箱小" not in checklist and bool(pack_obj.get("物流箱设计", False)):
+        checklist["设计_物流箱小"] = True
+    if bool(pack_obj.get("说明书", False)):
+        checklist.setdefault("设计_说明书_定稿", True)
 
-    done_now = sum(1 for k in pack_items if pack_data.get(k, False))
-    st.progress(done_now / max(1, len(pack_items)), text=f"包装进度：{done_now}/{len(pack_items)}")
+    norm_reviews = []
+    for rec in reviews_raw:
+        if not isinstance(rec, dict):
+            continue
+        raw_targets = rec.get("提审对象", [])
+        if isinstance(raw_targets, list):
+            targets = [str(x).strip() for x in raw_targets if str(x).strip()]
+        else:
+            targets = [x.strip() for x in re.split(r"[、,，/]+", str(raw_targets or "")) if x.strip()]
+        norm_reviews.append({
+            "日期": str(rec.get("日期", "")).strip() or str(datetime.date.today()),
+            "提审对象": targets,
+            "结果": str(rec.get("结果", "")).strip() or "通过",
+            "打回原因": str(rec.get("打回原因", "")).strip(),
+        })
 
-    new_pack_vals = {}
-    cols = st.columns(3)
-    for i, k in enumerate(pack_items):
-        with cols[i % 3]:
-            with st.container(border=True):
-                new_pack_vals[k] = st.checkbox(f"{i+1}. {labels[k]}", value=pack_data.get(k, False), key=f"pm2_pack_ck_{sel_proj}_{k}")
-                up = st.file_uploader("关联文件", type=['png', 'jpg', 'jpeg', 'pdf'], key=f"pm2_pack_up_{sel_proj}_{k}")
-                if up is not None and st.button("➕ 添加附件", key=f"pm2_pack_add_{sel_proj}_{k}"):
-                    ref = save_uploaded_file_ref(up, prefix=f"pm2_pack_{norm_text(sel_proj)[:10]}_{i}")
-                    if ref:
-                        pack_file_map.setdefault(k, []).append(ref)
-                        db[sel_proj]["包装物料附件"] = pack_file_map
-                        sync_save_db(sel_proj)
-                        st.success("已关联附件。")
-                        st.rerun()
-                st.caption(f"附件数：{len(pack_file_map.get(k, []))}")
+    return {
+        "配置": {"需要大物流箱": bool(cfg.get("需要大物流箱", False))},
+        "阶段清单": checklist,
+        "提审记录": norm_reviews,
+    }
 
-    if st.button("💾 保存包装 Checklist", type="primary", key=f"pm2_pack_save_{sel_proj}"):
-        db[sel_proj]["包装专项"] = new_pack_vals
-        db[sel_proj]["包装物料附件"] = pack_file_map
+
+def render_packing_lightweight_board(sel_proj, ui_prefix="pack_board"):
+    st.markdown("##### 📦 包装模块：分阶段轻量看板")
+    st.caption("每个 checklist 节点不挂文件；需要存文件/图片时，请统一到【细分配件交接工作台】关联对应日志。")
+
+    board = _normalize_packing_board(db.get(sel_proj, {}).get("包装专项", {}))
+    checklist = dict(board.get("阶段清单", {}))
+    review_rounds = list(board.get("提审记录", []))
+    cfg = dict(board.get("配置", {}))
+
+    need_large_box = st.checkbox(
+        "建档配置：是否需要大物流箱",
+        value=bool(cfg.get("需要大物流箱", False)),
+        key=f"{ui_prefix}_need_large_box",
+    )
+
+    stage1_items = [
+        ("前置_实物已寄包装厂", "实物已寄包装厂"),
+        ("前置_刀线已收回", "刀线已收回"),
+        ("前置_内部已称重", "内部已称重"),
+    ]
+    stage2_items = [
+        ("设计_彩盒", "彩盒"),
+        ("设计_灰箱", "灰箱"),
+        ("设计_物流箱小", "物流箱小"),
+        ("设计_地台贴", "地台贴"),
+        ("设计_合格证", "合格证"),
+        ("设计_电影票", "电影票"),
+        ("设计_感谢信", "感谢信"),
+        ("设计_说明书主项", "说明书"),
+    ]
+    if need_large_box:
+        stage2_items.insert(3, ("设计_物流箱大", "物流箱大"))
+
+    manual_items = [
+        ("设计_说明书_中文版", "中文版"),
+        ("设计_说明书_2D图", "2D图"),
+        ("设计_说明书_翻译", "翻译"),
+        ("设计_说明书_排版", "排版"),
+        ("设计_说明书_定稿", "定稿"),
+    ]
+    stage4_items = [
+        ("打样_已收到", "打样已收到"),
+        ("打样_确认OK", "打样确认OK"),
+    ]
+    stage5_items = [
+        ("大货_开始", "大货开始"),
+        ("大货_完成", "大货完成"),
+    ]
+
+    active_keys = [k for k, _ in stage1_items + stage2_items + manual_items + stage4_items + stage5_items]
+    done_count = sum(1 for k in active_keys if bool(checklist.get(k, False)))
+    st.progress(done_count / max(1, len(active_keys)), text=f"包装阶段完成度：{done_count}/{len(active_keys)}")
+
+    new_checklist = dict(checklist)
+
+    def _render_stage(title, items, cols_n=3):
+        st.markdown(f"**{title}**")
+        cols = st.columns(cols_n)
+        for idx, (k, label) in enumerate(items):
+            with cols[idx % cols_n]:
+                new_checklist[k] = st.checkbox(
+                    label,
+                    value=bool(checklist.get(k, False)),
+                    key=f"{ui_prefix}_{k}",
+                )
+
+    _render_stage("阶段一：前置准备", stage1_items, cols_n=3)
+    _render_stage("阶段二：设计（并行）", stage2_items, cols_n=4)
+
+    with st.expander("说明书子流程（中文版→2D图→翻译→排版→定稿）", expanded=any(bool(checklist.get(k, False)) for k, _ in manual_items)):
+        mcols = st.columns(3)
+        for idx, (k, label) in enumerate(manual_items):
+            with mcols[idx % 3]:
+                new_checklist[k] = st.checkbox(
+                    label,
+                    value=bool(checklist.get(k, False)),
+                    key=f"{ui_prefix}_{k}",
+                )
+
+    st.markdown("**阶段三：提审（多轮，每轮一条记录）**")
+    review_targets = ["地台贴", "彩盒", "电影票"]
+    rr1, rr2, rr3, rr4 = st.columns([1.2, 2.2, 1.0, 2.2])
+    with rr1:
+        rv_date = st.date_input("提审日期", datetime.date.today(), key=f"{ui_prefix}_review_date")
+    with rr2:
+        rv_targets = st.multiselect("提审对象", review_targets, key=f"{ui_prefix}_review_targets")
+    with rr3:
+        rv_result = st.selectbox("结果", ["通过", "打回"], key=f"{ui_prefix}_review_result")
+    with rr4:
+        rv_reason = st.text_input("打回原因", key=f"{ui_prefix}_review_reason", placeholder="仅结果=打回时填写")
+
+    if st.button("➕ 添加提审轮次", key=f"{ui_prefix}_review_add"):
+        if not rv_targets:
+            st.warning("请至少选择一个提审对象。")
+        elif rv_result == "打回" and not str(rv_reason).strip():
+            st.warning("结果为打回时，请填写打回原因。")
+        else:
+            review_rounds.append({
+                "日期": str(rv_date),
+                "提审对象": [x for x in rv_targets if str(x).strip()],
+                "结果": rv_result,
+                "打回原因": str(rv_reason).strip() if rv_result == "打回" else "",
+            })
+            board["配置"] = {"需要大物流箱": bool(need_large_box)}
+            board["阶段清单"] = checklist
+            board["提审记录"] = review_rounds
+            db[sel_proj]["包装专项"] = board
+            sync_save_db(sel_proj)
+            st.success("已添加提审记录。")
+            st.rerun()
+
+    if review_rounds:
+        review_rows = []
+        for rec in review_rounds:
+            review_rows.append({
+                "日期": str(rec.get("日期", "")).strip(),
+                "提审对象": " / ".join(rec.get("提审对象", [])),
+                "结果": str(rec.get("结果", "通过")).strip() or "通过",
+                "打回原因": str(rec.get("打回原因", "")).strip(),
+            })
+        review_df = pd.DataFrame(review_rows)
+        edited_df = st.data_editor(
+            review_df,
+            num_rows="dynamic",
+            width='stretch',
+            hide_index=True,
+            key=f"{ui_prefix}_review_editor",
+            column_config={
+                "日期": st.column_config.TextColumn("日期(YYYY-MM-DD)"),
+                "提审对象": st.column_config.TextColumn("提审对象(用 / 分隔)"),
+                "结果": st.column_config.SelectboxColumn("结果", options=["通过", "打回"]),
+                "打回原因": st.column_config.TextColumn("打回原因"),
+            },
+        )
+        if st.button("💾 保存提审记录", key=f"{ui_prefix}_review_save"):
+            new_reviews = []
+            for _, row in edited_df.iterrows():
+                d_txt = str(row.get("日期", "")).strip()
+                if not d_txt:
+                    continue
+                try:
+                    d_txt = str(datetime.datetime.strptime(d_txt, "%Y-%m-%d").date())
+                except Exception:
+                    d_txt = str(datetime.date.today())
+
+                tgt_txt = str(row.get("提审对象", "")).strip()
+                targets = [x.strip() for x in re.split(r"[、,，/]+", tgt_txt) if x.strip()]
+                if not targets:
+                    continue
+
+                result_txt = str(row.get("结果", "通过")).strip()
+                if result_txt not in ["通过", "打回"]:
+                    result_txt = "通过"
+                reason_txt = str(row.get("打回原因", "")).strip() if result_txt == "打回" else ""
+
+                new_reviews.append({
+                    "日期": d_txt,
+                    "提审对象": targets,
+                    "结果": result_txt,
+                    "打回原因": reason_txt,
+                })
+
+            board["配置"] = {"需要大物流箱": bool(need_large_box)}
+            board["阶段清单"] = checklist
+            board["提审记录"] = new_reviews
+            db[sel_proj]["包装专项"] = board
+            sync_save_db(sel_proj)
+            st.success("提审记录已保存。")
+            st.rerun()
+    else:
+        st.caption("暂无提审记录。")
+
+    _render_stage("阶段四：打样", stage4_items, cols_n=2)
+    _render_stage("阶段五：大货", stage5_items, cols_n=2)
+
+    if all(new_checklist.get(k, False) for k, _ in manual_items):
+        new_checklist["设计_说明书主项"] = True
+    if not need_large_box:
+        new_checklist["设计_物流箱大"] = False
+
+    if st.button("💾 保存包装看板", type="primary", key=f"{ui_prefix}_save"):
+        board["配置"] = {"需要大物流箱": bool(need_large_box)}
+        board["阶段清单"] = new_checklist
+        board["提审记录"] = review_rounds
+        db[sel_proj]["包装专项"] = board
         sync_save_db(sel_proj)
-        st.success("包装清单已保存。")
+        st.success("包装看板已保存。")
         st.rerun()
 
-    with st.expander("🗂️ 包装物料附件追溯", expanded=False):
-        for k in pack_items:
-            refs = pack_file_map.get(k, [])
-            if not refs:
-                continue
-            st.markdown(f"**{labels[k]}**")
-            gcols = st.columns(min(4, len(refs)))
-            for j, ref in enumerate(refs):
-                with gcols[j % len(gcols)]:
-                    if str(ref).lower().endswith('.pdf'):
-                        st.write(ref)
-                    else:
-                        render_image(ref, width='stretch')
-                    if st.button("🗑️", key=f"pm2_pack_del_{sel_proj}_{k}_{j}"):
-                        refs.pop(j)
-                        db[sel_proj]["包装物料附件"][k] = refs
-                        sync_save_db(sel_proj)
-                        st.rerun()
 
-    st.markdown("##### 🧮 工厂大货入库台账")
+def render_project_inventory_ledger(sel_proj, key_prefix="inv"):
     inv_data = db[sel_proj].get("发货数据", {"总单量": 0, "批次明细": []})
-    i1, i2 = st.columns([1, 2])
-    with i1:
-        total_qty = st.number_input("工厂生产总单量(PCS)", value=int(inv_data.get("总单量", 0)), step=100, key=f"pm2_total_qty_{sel_proj}")
-        if st.button("保存总单量", key=f"pm2_save_total_{sel_proj}"):
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        total_qty = st.number_input("工厂生产总单量 (PCS)", value=int(inv_data.get("总单量", 0)), step=100, key=f"{key_prefix}_total_qty")
+        if st.button("保存单量", key=f"{key_prefix}_save_total"):
             db[sel_proj].setdefault("发货数据", {})["总单量"] = int(total_qty)
             sync_save_db(sel_proj)
             st.rerun()
@@ -3337,14 +3576,14 @@ def render_pm_packing_inventory_integrated(sel_proj):
     with st.expander("➕ 登记入库/领用流水", expanded=False):
         r1, r2, r3, r4 = st.columns(4)
         with r1:
-            typ = st.selectbox("类型", ["大货入库", "内部领用"], key=f"pm2_inv_typ_{sel_proj}")
+            typ = st.selectbox("类型", ["大货入库", "内部领用"], key=f"{key_prefix}_typ")
         with r2:
-            qty = st.number_input("数量", min_value=1, value=10, key=f"pm2_inv_qty_{sel_proj}")
+            qty = st.number_input("数量", min_value=1, value=10, key=f"{key_prefix}_qty")
         with r3:
-            note = st.text_input("用途/备注", key=f"pm2_inv_note_{sel_proj}")
+            note = st.text_input("用途/备注", key=f"{key_prefix}_note")
         with r4:
             st.write("")
-            if st.button("登记", key=f"pm2_inv_add_{sel_proj}"):
+            if st.button("登记", key=f"{key_prefix}_add"):
                 db[sel_proj].setdefault("发货数据", {}).setdefault("批次明细", []).append({
                     "日期": str(datetime.date.today()), "类型": typ, "数量": int(qty), "备注": note
                 })
@@ -3354,6 +3593,12 @@ def render_pm_packing_inventory_integrated(sel_proj):
     if rows:
         st.dataframe(pd.DataFrame(rows), width='stretch')
 
+
+def render_pm_packing_inventory_integrated(sel_proj):
+    st.markdown("#### 📦 包装跟踪（已并入 PM）")
+    render_packing_lightweight_board(sel_proj, ui_prefix=f"pm_pack_{norm_text(sel_proj)[:24]}")
+    with st.expander("🧾 入库与领用台账", expanded=False):
+        render_project_inventory_ledger(sel_proj, key_prefix=f"pm2_inv_{norm_text(sel_proj)[:24]}")
 
 def render_pm_cost_integrated(sel_proj):
     st.markdown("#### 💰 成本分析（已并入 PM）")
@@ -3662,10 +3907,8 @@ if restore_file is not None and st.sidebar.button("⚠️ 确认覆盖恢复", t
 
 
 
-if menu == MENU_DASHBOARD:
-    st.title(f"📊 全局大盘与进度甘特图 ({current_pm} 的视角)")
-
-    with st.expander("📥 批量导入/更新研发总表 (CSV)"):
+def render_rd_csv_import_panel(expanded=False):
+    with st.expander("📥 批量导入/更新研发总表 (CSV)", expanded=expanded):
         st.info("💡 支持自动识别含有【项目名称】、【负责人】、【当前阶段】、【开定时间】、【发货区间】、【跟单】等列的 CSV 文件。")
         st.caption("自动模式支持：首行非表头 + 手工月度矩阵（同月多个项目）。")
         import_mode = st.selectbox(
@@ -3774,6 +4017,11 @@ if menu == MENU_DASHBOARD:
                     st.error("❌ 未能找到【项目名称】列，请检查表头！")
             except Exception as e:
                 st.error(f"解析失败: {e}")
+
+if menu == MENU_DASHBOARD:
+    st.title(f"📊 全局大盘与进度甘特图 ({current_pm} 的视角)")
+
+    st.caption("CSV 导入入口已迁移至【系统维护】。")
     gantt_cat_orders = MACRO_STAGES.copy()
     combined_color_map = {
         "立项": "#F2C14E", "建模": "#34C6D3", "设计": "#8B5CF6",
@@ -4253,7 +4501,7 @@ if menu == MENU_DASHBOARD:
             for td in todo_all:
                 if bool((td or {}).get("完成")):
                     continue
-                if str((td or {}).get("关联项目", "")).strip() != str(project_name):
+                if not todo_matches_project(td, project_name):
                     continue
                 if norm_text(str((td or {}).get("任务", ""))) == task_norm:
                     hit = td
@@ -4507,24 +4755,25 @@ if menu == MENU_DASHBOARD:
             if st.button("🛠 修改当前最新动态（改写历史）", key="btn_dash_save_edit_latest"):
                 _save_dashboard_from_table("edit_latest")
     st.divider()
-    if project_person_roles:
-        df_ppr   = pd.DataFrame(list(project_person_roles), columns=["项目", "人员", "职务"])
-        df_owner = df_ppr.groupby(["人员", "职务"]).size().reset_index(name='积压项目数')
-        df_owner["积压项目数"] = df_owner["积压项目数"].astype(int)
-        fig_owner = px.bar(df_owner, x='人员', y='积压项目数', color='职务',
-                           title="👤 团队&责任人 Loading", text='积压项目数')
-        fig_owner.update_yaxes(dtick=1)
-        st.plotly_chart(fig_owner, width='stretch')
+    with st.expander("人员 Loading（点击展开）", expanded=False):
+        if project_person_roles:
+            df_ppr   = pd.DataFrame(list(project_person_roles), columns=["项目", "人员", "职务"])
+            df_owner = df_ppr.groupby(["人员", "职务"]).size().reset_index(name='积压项目数')
+            df_owner["积压项目数"] = df_owner["积压项目数"].astype(int)
+            fig_owner = px.bar(df_owner, x='人员', y='积压项目数', color='职务',
+                               title="👤 团队&责任人 Loading", text='积压项目数')
+            fig_owner.update_yaxes(dtick=1)
+            st.plotly_chart(fig_owner, width='stretch')
 
-        st.markdown("#### 📌 Function 去重项目数（进行中）")
-        table_df = pd.DataFrame(table_data)
-        ongoing = table_df[table_df["状态"].str.contains("研发|生产", na=False)][["项目"]]
-        role_df = df_ppr.merge(ongoing, on="项目", how="inner").drop_duplicates(subset=["项目", "职务"])
-        fn_stats = role_df.groupby("职务")["项目"].nunique().reset_index(name="进行中项目数")
-        st.dataframe(fn_stats.sort_values(by=["进行中项目数", "职务"], ascending=[False, True]), width='stretch')
+            st.markdown("#### 📌 Function 去重项目数（进行中）")
+            table_df = pd.DataFrame(table_data)
+            ongoing = table_df[table_df["状态"].str.contains("研发|生产", na=False)][["项目"]]
+            role_df = df_ppr.merge(ongoing, on="项目", how="inner").drop_duplicates(subset=["项目", "职务"])
+            fn_stats = role_df.groupby("职务")["项目"].nunique().reset_index(name="进行中项目数")
+            st.dataframe(fn_stats.sort_values(by=["进行中项目数", "职务"], ascending=[False, True]), width='stretch')
 
-# ==========================================
-# 模块 2：特定项目管控台
+    # ==========================================
+    # 模块 2：特定项目管控台
 # ==========================================
 elif menu == MENU_SPECIFIC:
     st.title("🎯 PM 工作台")
@@ -4570,6 +4819,14 @@ elif menu == MENU_SPECIFIC:
         st.session_state.exclude_imgs        = set()
         st.session_state.config_consumed_hashes = set()
         st.session_state.current_proj_context   = sel_proj
+    with st.expander("项目备忘录", expanded=False):
+        memo_txt_pm = st.text_area("记录跨部门叮嘱等杂项", value=db[sel_proj].get("备忘录", ""), height=90, key=f"pm_memo_{sel_proj}")
+        if st.button("保存项目备忘录", key=f"pm_save_memo_{sel_proj}"):
+            db[sel_proj]["备忘录"] = memo_txt_pm
+            sync_save_db(sel_proj)
+            st.success("备忘录已保存。")
+            st.rerun()
+
     st.divider()
     st.subheader("🔬 项目进度透视矩阵 (并行连消追踪)")
     st.caption("颜色说明：🟩 已完成 ｜ 🟦 进行中/生产中 ｜ ⬛ 暂停前已流转 ｜ 🟨 Delay ｜ ⬜ 未流转")
@@ -4839,7 +5096,7 @@ elif menu == MENU_SPECIFIC:
 
     project_pending_todos = [
         x for x in todo_list
-        if (not x.get("完成")) and str(x.get("关联项目", "")).strip() == sel_proj
+        if (not x.get("完成")) and todo_matches_project(x, sel_proj)
     ]
     project_pending_todos = sorted(project_pending_todos, key=lambda x: (todo_due_date(x) or datetime.date.max, str(x.get("创建", ""))))
 
@@ -4886,7 +5143,7 @@ elif menu == MENU_SPECIFIC:
     fk = st.session_state.form_key
     handoff_todos = [
         x for x in db.get("系统配置", {}).get("PM_TODO_LIST", [])
-        if (not x.get("完成")) and todo_visible_for_view(x, current_pm) and str(x.get("关联项目", "")).strip() == sel_proj
+        if (not x.get("完成")) and todo_visible_for_view(x, current_pm) and todo_matches_project(x, sel_proj)
     ]
     handoff_todo_map = {str(x.get("_id", "")).strip(): x for x in handoff_todos}
     prefill = st.session_state.get("todo_handoff_prefill")
@@ -5220,8 +5477,11 @@ elif menu == MENU_SPECIFIC:
 # ==========================================
 elif menu == MENU_FASTLOG:
     st.title("📝 手机 AI 速记")
-    with st.expander("🌙 每晚复盘（多项目）", expanded=True):
+    _fastlog_first_expand = not st.session_state.get("fastlog_expanded_once", False)
+    with st.expander("每晚复盘（多项目）", expanded=_fastlog_first_expand):
         render_pm_batch_fastlog_integrated(valid_projs)
+    if _fastlog_first_expand:
+        st.session_state["fastlog_expanded_once"] = True
     st.caption("该页面已切换为新版多项目晚间复盘入口。")
     st.stop()
 
@@ -5584,108 +5844,12 @@ elif menu == MENU_FASTLOG:
 # 模块 4：包装与入库
 # ==========================================
 elif menu == MENU_PACKING:
-    st.title("📦 包装与入库特殊领用记录")
+    st.title("📦 包装进度看板")
     if not valid_projs: st.stop()
     sel_proj = st.selectbox("📌 追踪项目", valid_projs)
+    render_packing_lightweight_board(sel_proj, ui_prefix=f"pack_page_{norm_text(sel_proj)[:24]}")
+    st.caption("项目备忘录请在 PM 工作台维护；入库/领用台账请在成本台账查看。")
 
-    st.divider()
-    st.markdown("### 📝 项目全局备忘录")
-    memo_txt = st.text_area("记录跨部门叮嘱等杂项", value=db[sel_proj].get("备忘录", ""), height=100)
-    if st.button("💾 保存备忘录"):
-        db[sel_proj]["备忘录"] = memo_txt
-        sync_save_db(sel_proj)
-        st.success("已保存！")
-        st.rerun()
-
-    st.divider()
-    st.markdown("### 🎁 包装 Checklist（卡片版 + 物料附件追溯）")
-    pack_data = db[sel_proj].get("包装专项", {})
-    pack_items = [
-        "实物寄厂", "提供刀线", "已称重", "彩盒设计", "灰箱设计", "物流箱设计", "说明书", "感谢信", "杂项纸品"
-    ]
-    labels = {
-        "实物寄厂": "1. 实物寄包装厂", "提供刀线": "2. 提供刀线", "已称重": "3. 内部已称重",
-        "彩盒设计": "4. 彩盒设计完毕", "灰箱设计": "5. 灰箱设计完毕", "物流箱设计": "6. 物流箱已设计",
-        "说明书": "7. 说明书定版", "感谢信": "8. 感谢信定版", "杂项纸品": "9. 杂项纸品"
-    }
-    pack_file_map = db[sel_proj].setdefault("包装物料附件", {})
-    new_pack_vals = {}
-    cols = st.columns(3)
-    for i, key in enumerate(pack_items):
-        with cols[i % 3]:
-            with st.container(border=True):
-                new_pack_vals[key] = st.checkbox(labels[key], value=pack_data.get(key, False), key=f"pack_ck_{sel_proj}_{key}")
-                up = st.file_uploader("上传附件(可选)", type=['png', 'jpg', 'jpeg', 'pdf'], key=f"pack_file_{sel_proj}_{key}")
-                if up is not None:
-                    ref = save_uploaded_file_ref(up, prefix=f"pack_{norm_text(sel_proj)[:12]}_{i}")
-                    if ref:
-                        pack_file_map.setdefault(key, []).append(ref)
-                        st.success("附件已缓存，点击【保存包装进度】后统一落库。")
-                refs = pack_file_map.get(key, [])
-                if refs:
-                    st.caption(f"已关联附件：{len(refs)}")
-
-    if st.button("💾 保存包装进度", type="primary"):
-        db[sel_proj]["包装专项"] = new_pack_vals
-        db[sel_proj]["包装物料附件"] = pack_file_map
-        sync_save_db(sel_proj)
-        st.success("已存档！")
-        st.rerun()
-
-    with st.expander("🗂️ 查看包装物料附件"):
-        for key in pack_items:
-            refs = pack_file_map.get(key, [])
-            if not refs:
-                continue
-            st.markdown(f"**{labels[key]}**")
-            pcols = st.columns(min(len(refs), 4))
-            for j, ref in enumerate(refs):
-                with pcols[j % 4]:
-                    if str(ref).lower().endswith('.pdf'):
-                        st.write(ref)
-                    else:
-                        render_image(ref, width='stretch')
-
-    st.divider()
-    st.markdown("### 🧮 工厂大货入库与特殊领用台账")
-    inv_data  = db[sel_proj].get("发货数据", {"总单量": 0, "批次明细": []})
-    c1, c2    = st.columns([1, 2])
-    with c1:
-        total_qty = st.number_input("工厂生产总单量 (PCS)", value=int(inv_data.get("总单量", 0)), step=100)
-        if st.button("保存单量"):
-            db[sel_proj].setdefault("发货数据", {})["总单量"] = total_qty
-            sync_save_db(sel_proj)
-            st.rerun()
-    in_a = out_a = 0
-    records = []
-    for item in inv_data.get("批次明细", []):
-        q = int(item.get('数量', 0))
-        if item.get('类型') == '内部领用': out_a += q
-        else: in_a += q
-        records.append({"日期": item['日期'], "类型": item['类型'],
-                         "数量": q, "用途": item.get('备注', '无')})
-    fac_left   = total_qty - in_a
-    real_stock = in_a - out_a
-    st.write(f"**累计入库:** {in_a} | **内部领用:** {out_a} | **📦 可用:** {real_stock} | **🏭 未交:** {fac_left}")
-    with st.expander("➕ 登记新流水"):
-        rc1, rc2, rc3, rc4 = st.columns(4)
-        with rc1: typ  = st.selectbox("类型", ["大货入库", "内部领用"])
-        with rc2: q    = st.number_input("数量", min_value=1, value=10)
-        with rc3: note = st.text_input("用途")
-        with rc4:
-            st.write("")
-            if st.button("登记"):
-                db[sel_proj].setdefault("发货数据", {}).setdefault("批次明细", []).append({
-                    "日期": str(datetime.date.today()), "类型": typ,
-                    "数量": int(q), "备注": note
-                })
-                sync_save_db(sel_proj)
-                st.rerun()
-    if records:
-        st.dataframe(pd.DataFrame(records), width='stretch')
-
-# ==========================================
-# 模块 5：成本台账
 # ==========================================
 elif menu == MENU_COST:
     st.title("💰 纯净动态成本控制台")
@@ -5705,202 +5869,208 @@ elif menu == MENU_COST:
             st.success("已保存")
             st.rerun()
 
-    st.divider()
-    st.subheader("🧩 预计报价模板（按工艺/工厂/头版方案）")
-    scenario_list = db[sel_proj].setdefault("成本数据", {}).setdefault("预计报价方案", [])
-    scenario_names = [x.get("方案名", f"方案{i+1}") for i, x in enumerate(scenario_list)]
-    scenario_pick = st.selectbox("选择方案", scenario_names + ["➕ 新建方案"], key=f"quote_pick_{sel_proj}")
+    tab_quote, tab_actual = st.tabs(["报价估算", "实际明细"])
+    with tab_quote:
+        st.divider()
+        st.subheader("🧩 预计报价模板（按工艺/工厂/头版方案）")
+        scenario_list = db[sel_proj].setdefault("成本数据", {}).setdefault("预计报价方案", [])
+        scenario_names = [x.get("方案名", f"方案{i+1}") for i, x in enumerate(scenario_list)]
+        scenario_pick = st.selectbox("选择方案", scenario_names + ["➕ 新建方案"], key=f"quote_pick_{sel_proj}")
 
-    if scenario_pick == "➕ 新建方案":
-        current = {
-            "方案名": "", "头版类型": "啤件头版", "工厂": "", "工艺": "",
-            "订单量": 0, "备注": "", "建议售价系数": 0.333333,
-            "条目": [{"报价项目": nm, "核算工厂报价": 0.0, "备注": ""} for nm in QUOTE_ITEM_DEFAULTS]
-        }
-        s_idx = None
-    else:
-        s_idx = scenario_names.index(scenario_pick)
-        current = scenario_list[s_idx]
-        current.setdefault("条目", [{"报价项目": nm, "核算工厂报价": 0.0, "备注": ""} for nm in QUOTE_ITEM_DEFAULTS])
-
-    form_key = f"{sel_proj}_{'new' if s_idx is None else s_idx}"
-    q1, q2, q3, q4, q5, q6 = st.columns([1.4, 1, 1, 1, 1, 1.2])
-    with q1: sc_name = st.text_input("方案名", value=current.get("方案名", ""), key=f"q_name_{form_key}")
-    with q2: sc_head = st.selectbox("头版类型", ["啤件头版", "翻模头版", "其他"], index=["啤件头版", "翻模头版", "其他"].index(current.get("头版类型", "啤件头版")) if current.get("头版类型", "啤件头版") in ["啤件头版", "翻模头版", "其他"] else 0, key=f"q_head_{form_key}")
-    with q3: sc_factory = st.text_input("工厂", value=current.get("工厂", ""), key=f"q_factory_{form_key}")
-    with q4: sc_process = st.text_input("工艺", value=current.get("工艺", ""), key=f"q_process_{form_key}")
-    with q5: sc_qty = st.number_input("订单量", min_value=0, value=int(current.get("订单量", 0)), step=100, key=f"q_qty_{form_key}")
-    with q6: sc_coef = st.number_input("建议售价系数(成本/系数)", min_value=0.05, max_value=1.0, value=float(current.get("建议售价系数", 0.333333)), step=0.01, key=f"q_coef_{form_key}")
-
-    sc_note = st.text_input("方案备注", value=current.get("备注", ""), key=f"q_note_{form_key}")
-    quote_df = pd.DataFrame(current.get("条目", []))
-    if quote_df.empty:
-        quote_df = pd.DataFrame([{"报价项目": nm, "核算工厂报价": 0.0, "备注": ""} for nm in QUOTE_ITEM_DEFAULTS])
-    quote_df = st.data_editor(quote_df, num_rows="dynamic", width='stretch', key=f"q_editor_{form_key}")
-    if "核算工厂报价" in quote_df.columns:
-        quote_df["核算工厂报价"] = pd.to_numeric(quote_df["核算工厂报价"], errors="coerce").fillna(0.0)
-    total_est = float(quote_df["核算工厂报价"].sum()) if "核算工厂报价" in quote_df.columns else 0.0
-    suggest_price = (total_est / sc_coef) if sc_coef > 0 else 0.0
-    st.info(f"预计整套成本价：¥{total_est:,.2f} | 建议售价：¥{suggest_price:,.2f}")
-
-    qa, qb, qc = st.columns([1,1,2])
-    with qa:
-        if st.button("💾 保存/更新报价方案", key=f"q_save_{form_key}", type="primary"):
-            payload = {
-                "方案名": sc_name or f"方案{len(scenario_list)+1}", "头版类型": sc_head,
-                "工厂": sc_factory, "工艺": sc_process, "订单量": int(sc_qty), "备注": sc_note,
-                "建议售价系数": float(sc_coef), "预计整套成本价": round(total_est, 2), "建议售价": round(suggest_price, 2),
-                "条目": quote_df.to_dict("records")
+        if scenario_pick == "➕ 新建方案":
+            current = {
+                "方案名": "", "头版类型": "啤件头版", "工厂": "", "工艺": "",
+                "订单量": 0, "备注": "", "建议售价系数": 0.333333,
+                "条目": [{"报价项目": nm, "核算工厂报价": 0.0, "备注": ""} for nm in QUOTE_ITEM_DEFAULTS]
             }
-            if s_idx is None:
-                scenario_list.append(payload)
-            else:
-                scenario_list[s_idx] = payload
-            sync_save_db(sel_proj); st.success("已保存报价方案"); st.rerun()
-    with qb:
-        if scenario_pick != "➕ 新建方案" and st.button("🗑️ 删除当前方案", key=f"q_del_{form_key}"):
-            scenario_list.pop(s_idx)
-            sync_save_db(sel_proj); st.success("已删除方案"); st.rerun()
+            s_idx = None
+        else:
+            s_idx = scenario_names.index(scenario_pick)
+            current = scenario_list[s_idx]
+            current.setdefault("条目", [{"报价项目": nm, "核算工厂报价": 0.0, "备注": ""} for nm in QUOTE_ITEM_DEFAULTS])
 
-    if scenario_list:
-        st.markdown("#### 📌 方案对比")
-        comp_df = pd.DataFrame([
-            {"方案名": x.get("方案名", ""), "头版": x.get("头版类型", ""), "工厂": x.get("工厂", ""), "工艺": x.get("工艺", ""),
-             "订单量": x.get("订单量", 0), "预计整套成本价": x.get("预计整套成本价", 0.0), "建议售价": x.get("建议售价", 0.0)}
-            for x in scenario_list
-        ])
-        st.dataframe(comp_df, width='stretch')
+        form_key = f"{sel_proj}_{'new' if s_idx is None else s_idx}"
+        q1, q2, q3, q4, q5, q6 = st.columns([1.4, 1, 1, 1, 1, 1.2])
+        with q1: sc_name = st.text_input("方案名", value=current.get("方案名", ""), key=f"q_name_{form_key}")
+        with q2: sc_head = st.selectbox("头版类型", ["啤件头版", "翻模头版", "其他"], index=["啤件头版", "翻模头版", "其他"].index(current.get("头版类型", "啤件头版")) if current.get("头版类型", "啤件头版") in ["啤件头版", "翻模头版", "其他"] else 0, key=f"q_head_{form_key}")
+        with q3: sc_factory = st.text_input("工厂", value=current.get("工厂", ""), key=f"q_factory_{form_key}")
+        with q4: sc_process = st.text_input("工艺", value=current.get("工艺", ""), key=f"q_process_{form_key}")
+        with q5: sc_qty = st.number_input("订单量", min_value=0, value=int(current.get("订单量", 0)), step=100, key=f"q_qty_{form_key}")
+        with q6: sc_coef = st.number_input("建议售价系数(成本/系数)", min_value=0.05, max_value=1.0, value=float(current.get("建议售价系数", 0.333333)), step=0.01, key=f"q_coef_{form_key}")
 
-    st.divider()
-    st.subheader("📥 批量导入成本明细 (CSV)")
-    cost_csv = st.file_uploader("选择成本 CSV 文件", type=['csv'], key="cost_csv")
-    if cost_csv and st.button("🚀 开始解析导入", type="primary"):
-        try:
-            try:
-                df_cost = pd.read_csv(cost_csv)
-            except UnicodeDecodeError:
-                cost_csv.seek(0)
-                df_cost = pd.read_csv(cost_csv, encoding='gbk')
-            col_cat    = next((c for c in df_cost.columns if any(k in str(c) for k in ['分类', '项目', '名称'])), None)
-            col_vendor = next((c for c in df_cost.columns if any(k in str(c) for k in ['供应商', '收款', '公司'])), None)
-            col_price  = next((c for c in df_cost.columns if any(k in str(c) for k in ['单价'])), None)
-            col_qty    = next((c for c in df_cost.columns if any(k in str(c) for k in ['数量', '件数'])), None)
-            col_amt    = next((c for c in df_cost.columns if any(k in str(c) for k in ['金额', '价', '总计'])), None)
-            col_tax    = next((c for c in df_cost.columns if '税' in str(c)), None)
-            count = 0
-            for _, row in df_cost.iterrows():
-                if not col_amt and not col_price: continue
-                if col_amt and pd.isna(row[col_amt]): continue
-                cat     = str(row[col_cat])    if col_cat    else "未分类"
-                vendor  = str(row[col_vendor]) if col_vendor else "未知"
-                raw_qty = float(row[col_qty])  if col_qty and not pd.isna(row[col_qty]) else 1.0
-                if col_price and not pd.isna(row[col_price]):
-                    raw_price = float(str(row[col_price]).replace(',', '').replace('¥', '').replace('￥', '').strip())
-                    tot_after = raw_price * raw_qty
-                elif col_amt:
-                    tot_after = float(str(row[col_amt]).replace(',', '').replace('¥', '').replace('￥', '').strip())
-                    raw_price = tot_after
-                    raw_qty   = 1.0
+        sc_note = st.text_input("方案备注", value=current.get("备注", ""), key=f"q_note_{form_key}")
+        quote_df = pd.DataFrame(current.get("条目", []))
+        if quote_df.empty:
+            quote_df = pd.DataFrame([{"报价项目": nm, "核算工厂报价": 0.0, "备注": ""} for nm in QUOTE_ITEM_DEFAULTS])
+        quote_df = st.data_editor(quote_df, num_rows="dynamic", width='stretch', key=f"q_editor_{form_key}")
+        if "核算工厂报价" in quote_df.columns:
+            quote_df["核算工厂报价"] = pd.to_numeric(quote_df["核算工厂报价"], errors="coerce").fillna(0.0)
+        total_est = float(quote_df["核算工厂报价"].sum()) if "核算工厂报价" in quote_df.columns else 0.0
+        suggest_price = (total_est / sc_coef) if sc_coef > 0 else 0.0
+        st.info(f"预计整套成本价：¥{total_est:,.2f} | 建议售价：¥{suggest_price:,.2f}")
+
+        qa, qb, qc = st.columns([1,1,2])
+        with qa:
+            if st.button("💾 保存/更新报价方案", key=f"q_save_{form_key}", type="primary"):
+                payload = {
+                    "方案名": sc_name or f"方案{len(scenario_list)+1}", "头版类型": sc_head,
+                    "工厂": sc_factory, "工艺": sc_process, "订单量": int(sc_qty), "备注": sc_note,
+                    "建议售价系数": float(sc_coef), "预计整套成本价": round(total_est, 2), "建议售价": round(suggest_price, 2),
+                    "条目": quote_df.to_dict("records")
+                }
+                if s_idx is None:
+                    scenario_list.append(payload)
                 else:
-                    continue
-                tax_str = str(row[col_tax]).replace('%', '') if col_tax else "0"
-                try:    tax_rate = float(tax_str)
-                except: tax_rate = 0.0
-                db[sel_proj].setdefault("成本数据", {}).setdefault("动态明细", []).append({
-                    "分类": cat, "供应商": vendor, "税后单价": raw_price, "数量": raw_qty,
-                    "税后总成本": tot_after, "税点": f"{tax_rate}%",
-                    "税前总成本": round(tot_after / (1 + tax_rate / 100), 2)
-                })
-                count += 1
-            sync_save_db(sel_proj)
-            if count > 0: st.success(f"🎉 导入 {count} 条明细！"); st.balloons()
-            else:          st.warning("⚠️ 未能识别金额数据。")
-        except Exception as e:
-            st.error(f"解析失败: {e}")
+                    scenario_list[s_idx] = payload
+                sync_save_db(sel_proj); st.success("已保存报价方案"); st.rerun()
+        with qb:
+            if scenario_pick != "➕ 新建方案" and st.button("🗑️ 删除当前方案", key=f"q_del_{form_key}"):
+                scenario_list.pop(s_idx)
+                sync_save_db(sel_proj); st.success("已删除方案"); st.rerun()
 
-    st.divider()
-    st.subheader("➕ 手动录入单笔成本")
-    ac1, ac2, ac3, ac4, ac5 = st.columns([2, 2, 2, 1.5, 1.5])
-    with ac1: c_name   = st.selectbox("成本分类", STD_COSTS_LIST)
-    with ac2: vendor   = st.text_input("供应商", placeholder="例：志昇")
-    with ac3: c_unit   = st.number_input("税后单价(¥)", min_value=0.0, step=100.0)
-    with ac4: c_qty    = st.number_input("数量", min_value=1.0, value=1.0, step=1.0)
-    with ac5: tax_rate = st.selectbox("税点(%)", [0, 1, 3, 6, 9, 13])
-    if st.button("入账"):
-        db[sel_proj].setdefault("成本数据", {}).setdefault("动态明细", []).append({
-            "分类": c_name, "供应商": vendor,
-            "税后单价": float(c_unit), "数量": float(c_qty),
-            "税后总成本": float(Decimal(str(c_unit)) * Decimal(str(c_qty))),
-            "税点": f"{tax_rate}%",
-            "税前总成本": float(round(
-                (Decimal(str(c_unit)) * Decimal(str(c_qty))) /
-                (Decimal("1") + Decimal(str(tax_rate)) / Decimal("100")), 2
-            ))
-        })
-        sync_save_db(sel_proj)
-        st.rerun()
+        if scenario_list:
+            st.markdown("#### 📌 方案对比")
+            comp_df = pd.DataFrame([
+                {"方案名": x.get("方案名", ""), "头版": x.get("头版类型", ""), "工厂": x.get("工厂", ""), "工艺": x.get("工艺", ""),
+                 "订单量": x.get("订单量", 0), "预计整套成本价": x.get("预计整套成本价", 0.0), "建议售价": x.get("建议售价", 0.0)}
+                for x in scenario_list
+            ])
+            st.dataframe(comp_df, width='stretch')
 
-    details = c_data.get("动态明细", [])
-    if details:
-        for d in details:
-            if '含税金额' in d and '税后总成本' not in d:
-                d['税后总成本'] = d['含税金额']; d['数量'] = 1.0; d['税后单价'] = d['含税金额']
-                if '税前金额' in d: d['税前总成本'] = d['税前金额']
-        df_cost_show  = pd.DataFrame(details)
-        display_cols  = ['分类', '供应商', '税后单价', '数量', '税后总成本', '税点', '税前总成本']
-        df_cost_show  = df_cost_show[[c for c in display_cols if c in df_cost_show.columns]]
-
+    with tab_actual:
         st.divider()
-        st.markdown("### 📊 各分类成本总计")
-        subtotals = df_cost_show.groupby('分类')['税后总成本'].sum().reset_index()
-        num_cols  = min(len(subtotals), 6)
-        if num_cols > 0:
-            metric_cols = st.columns(num_cols)
-            for i, row in subtotals.iterrows():
-                metric_cols[i % num_cols].metric(label=row['分类'], value=f"¥ {row['税后总成本']:,.2f}")
-
-        total_sub = float(subtotals['税后总成本'].sum()) if not subtotals.empty else 0.0
-        if total_sub > 0:
-            share_df = subtotals.copy()
-            share_df['成本占比'] = (share_df['税后总成本'] / total_sub * 100).round(2).astype(str) + '%'
-            st.markdown("#### 🧮 各分类成本占比")
-            st.dataframe(share_df.sort_values(by='税后总成本', ascending=False), width='stretch')
-
-        st.divider()
-        st.markdown("### 📝 动态明细管理")
-        edited_df = st.data_editor(df_cost_show, num_rows="dynamic", width='stretch')
-        if st.button("💾 确认并保存修改", type="primary"):
-            for idx, row in edited_df.iterrows():
+        st.subheader("📥 批量导入成本明细 (CSV)")
+        cost_csv = st.file_uploader("选择成本 CSV 文件", type=['csv'], key="cost_csv")
+        if cost_csv and st.button("🚀 开始解析导入", type="primary"):
+            try:
                 try:
-                    qty_d  = Decimal(str(row.get('数量', 1.0)))
-                    unit_d = Decimal(str(row.get('税后单价', 0.0)))
-                    tax_str = str(row.get('税点', '0%')).replace('%', '')
-                    rate_d  = Decimal(tax_str) if tax_str else Decimal("0.0")
-                    tot_d   = qty_d * unit_d
-                    tax_div = Decimal("1") + (rate_d / Decimal("100"))
-                    edited_df.at[idx, '税后总成本'] = float(tot_d)
-                    edited_df.at[idx, '税前总成本'] = float(round(tot_d / tax_div, 2))
-                except:
-                    pass
-            db[sel_proj]["成本数据"]["动态明细"] = edited_df.to_dict('records')
+                    df_cost = pd.read_csv(cost_csv)
+                except UnicodeDecodeError:
+                    cost_csv.seek(0)
+                    df_cost = pd.read_csv(cost_csv, encoding='gbk')
+                col_cat    = next((c for c in df_cost.columns if any(k in str(c) for k in ['分类', '项目', '名称'])), None)
+                col_vendor = next((c for c in df_cost.columns if any(k in str(c) for k in ['供应商', '收款', '公司'])), None)
+                col_price  = next((c for c in df_cost.columns if any(k in str(c) for k in ['单价'])), None)
+                col_qty    = next((c for c in df_cost.columns if any(k in str(c) for k in ['数量', '件数'])), None)
+                col_amt    = next((c for c in df_cost.columns if any(k in str(c) for k in ['金额', '价', '总计'])), None)
+                col_tax    = next((c for c in df_cost.columns if '税' in str(c)), None)
+                count = 0
+                for _, row in df_cost.iterrows():
+                    if not col_amt and not col_price: continue
+                    if col_amt and pd.isna(row[col_amt]): continue
+                    cat     = str(row[col_cat])    if col_cat    else "未分类"
+                    vendor  = str(row[col_vendor]) if col_vendor else "未知"
+                    raw_qty = float(row[col_qty])  if col_qty and not pd.isna(row[col_qty]) else 1.0
+                    if col_price and not pd.isna(row[col_price]):
+                        raw_price = float(str(row[col_price]).replace(',', '').replace('¥', '').replace('￥', '').strip())
+                        tot_after = raw_price * raw_qty
+                    elif col_amt:
+                        tot_after = float(str(row[col_amt]).replace(',', '').replace('¥', '').replace('￥', '').strip())
+                        raw_price = tot_after
+                        raw_qty   = 1.0
+                    else:
+                        continue
+                    tax_str = str(row[col_tax]).replace('%', '') if col_tax else "0"
+                    try:    tax_rate = float(tax_str)
+                    except: tax_rate = 0.0
+                    db[sel_proj].setdefault("成本数据", {}).setdefault("动态明细", []).append({
+                        "分类": cat, "供应商": vendor, "税后单价": raw_price, "数量": raw_qty,
+                        "税后总成本": tot_after, "税点": f"{tax_rate}%",
+                        "税前总成本": round(tot_after / (1 + tax_rate / 100), 2)
+                    })
+                    count += 1
+                sync_save_db(sel_proj)
+                if count > 0: st.success(f"🎉 导入 {count} 条明细！"); st.balloons()
+                else:          st.warning("⚠️ 未能识别金额数据。")
+            except Exception as e:
+                st.error(f"解析失败: {e}")
+
+        st.divider()
+        st.subheader("➕ 手动录入单笔成本")
+        ac1, ac2, ac3, ac4, ac5 = st.columns([2, 2, 2, 1.5, 1.5])
+        with ac1: c_name   = st.selectbox("成本分类", STD_COSTS_LIST)
+        with ac2: vendor   = st.text_input("供应商", placeholder="例：志昇")
+        with ac3: c_unit   = st.number_input("税后单价(¥)", min_value=0.0, step=100.0)
+        with ac4: c_qty    = st.number_input("数量", min_value=1.0, value=1.0, step=1.0)
+        with ac5: tax_rate = st.selectbox("税点(%)", [0, 1, 3, 6, 9, 13])
+        if st.button("入账"):
+            db[sel_proj].setdefault("成本数据", {}).setdefault("动态明细", []).append({
+                "分类": c_name, "供应商": vendor,
+                "税后单价": float(c_unit), "数量": float(c_qty),
+                "税后总成本": float(Decimal(str(c_unit)) * Decimal(str(c_qty))),
+                "税点": f"{tax_rate}%",
+                "税前总成本": float(round(
+                    (Decimal(str(c_unit)) * Decimal(str(c_qty))) /
+                    (Decimal("1") + Decimal(str(tax_rate)) / Decimal("100")), 2
+                ))
+            })
             sync_save_db(sel_proj)
-            st.success("✅ 成本明细已更新！")
             st.rerun()
 
-        st.divider()
-        total_c      = sum(edited_df['税后总成本']) if not edited_df.empty else 0
-        saved_orders = int(c_data.get("总订单数", orders))
-        saved_price  = float(c_data.get("销售单价", price))
-        unit_c       = total_c / saved_orders if saved_orders > 0 else 0
-        st.info(
-            f"**💰 累计税后总成本:** ¥{total_c:,.2f} | "
-            f"**单体核算成本:** ¥{unit_c:,.2f} | "
-            f"**单体毛利:** ¥{saved_price - unit_c:,.2f} | "
-            f"**预测毛利率:** {(saved_price - unit_c) / saved_price * 100 if saved_price > 0 else 0:.2f}%"
-        )
+        details = c_data.get("动态明细", [])
+        if details:
+            for d in details:
+                if '含税金额' in d and '税后总成本' not in d:
+                    d['税后总成本'] = d['含税金额']; d['数量'] = 1.0; d['税后单价'] = d['含税金额']
+                    if '税前金额' in d: d['税前总成本'] = d['税前金额']
+            df_cost_show  = pd.DataFrame(details)
+            display_cols  = ['分类', '供应商', '税后单价', '数量', '税后总成本', '税点', '税前总成本']
+            df_cost_show  = df_cost_show[[c for c in display_cols if c in df_cost_show.columns]]
 
-# ==========================================
-# 模块 6：历史溯源
+            st.divider()
+            st.markdown("### 📊 各分类成本总计")
+            subtotals = df_cost_show.groupby('分类')['税后总成本'].sum().reset_index()
+            num_cols  = min(len(subtotals), 6)
+            if num_cols > 0:
+                metric_cols = st.columns(num_cols)
+                for i, row in subtotals.iterrows():
+                    metric_cols[i % num_cols].metric(label=row['分类'], value=f"¥ {row['税后总成本']:,.2f}")
+
+            total_sub = float(subtotals['税后总成本'].sum()) if not subtotals.empty else 0.0
+            if total_sub > 0:
+                share_df = subtotals.copy()
+                share_df['成本占比'] = (share_df['税后总成本'] / total_sub * 100).round(2).astype(str) + '%'
+                st.markdown("#### 🧮 各分类成本占比")
+                st.dataframe(share_df.sort_values(by='税后总成本', ascending=False), width='stretch')
+
+            st.divider()
+            st.markdown("### 📝 动态明细管理")
+            edited_df = st.data_editor(df_cost_show, num_rows="dynamic", width='stretch')
+            if st.button("💾 确认并保存修改", type="primary"):
+                for idx, row in edited_df.iterrows():
+                    try:
+                        qty_d  = Decimal(str(row.get('数量', 1.0)))
+                        unit_d = Decimal(str(row.get('税后单价', 0.0)))
+                        tax_str = str(row.get('税点', '0%')).replace('%', '')
+                        rate_d  = Decimal(tax_str) if tax_str else Decimal("0.0")
+                        tot_d   = qty_d * unit_d
+                        tax_div = Decimal("1") + (rate_d / Decimal("100"))
+                        edited_df.at[idx, '税后总成本'] = float(tot_d)
+                        edited_df.at[idx, '税前总成本'] = float(round(tot_d / tax_div, 2))
+                    except:
+                        pass
+                db[sel_proj]["成本数据"]["动态明细"] = edited_df.to_dict('records')
+                sync_save_db(sel_proj)
+                st.success("✅ 成本明细已更新！")
+                st.rerun()
+
+            st.divider()
+            total_c      = sum(edited_df['税后总成本']) if not edited_df.empty else 0
+            saved_orders = int(c_data.get("总订单数", orders))
+            saved_price  = float(c_data.get("销售单价", price))
+            unit_c       = total_c / saved_orders if saved_orders > 0 else 0
+            st.info(
+                f"**💰 累计税后总成本:** ¥{total_c:,.2f} | "
+                f"**单体核算成本:** ¥{unit_c:,.2f} | "
+                f"**单体毛利:** ¥{saved_price - unit_c:,.2f} | "
+                f"**预测毛利率:** {(saved_price - unit_c) / saved_price * 100 if saved_price > 0 else 0:.2f}%"
+            )
+
+    # ==========================================
+    # 模块 6：历史溯源
+        st.divider()
+        with st.expander("?? 入库与领用台账", expanded=False):
+            render_project_inventory_ledger(sel_proj, key_prefix=f"cost_inv_{norm_text(sel_proj)[:24]}")
 # ==========================================
 elif menu == MENU_HISTORY:
     st.title("🔍 图文交接溯源档案 (全局/可编辑)")
@@ -5970,7 +6140,7 @@ elif menu == MENU_HISTORY:
     done_todos = [
         td for td in db.get("系统配置", {}).get("PM_TODO_LIST", [])
         if td.get("完成")
-        and str(td.get("关联项目", "")).strip() == sel_proj
+        and todo_matches_project(td, sel_proj)
         and str(td.get("完成时间", "")).strip()
     ]
 
@@ -6273,6 +6443,8 @@ elif menu == MENU_HISTORY:
 # ==========================================
 elif menu == MENU_SETTINGS:
     st.title("⚙️ 系统维护 (全局参数与词库管理)")
+    render_rd_csv_import_panel(expanded=False)
+    st.divider()
 
     with st.expander("🧭 项目管理（重命名 / 合并同类 / 别名学习）", expanded=True):
         all_proj_names = [p for p in db.keys() if p != "系统配置"]
@@ -6917,16 +7089,26 @@ elif menu == MENU_SETTINGS:
                     st.rerun()
                 else:
                     st.info("\u672c\u6b21\u64cd\u4f5c\u672a\u4ea7\u751f\u5b9e\u9645\u53d8\u66f4\u3002")
-    with st.expander("⏱️ 全局计划排期默认基线"):
-        st.info("设定各阶段的默认目标天数。")
-        cols     = st.columns(len(SYS_CFG["排期基线"]))
+    with st.expander("排期基线维护", expanded=False):
+        st.info("立项固定为 1 天；其余阶段可按团队节奏维护默认天数。")
+        cols = st.columns(len(SYS_CFG["排期基线"]))
         new_days = {}
         for i, (k, v) in enumerate(SYS_CFG["排期基线"].items()):
-            new_days[k] = cols[i].number_input(k, value=int(v), step=1, key=f"bd_{k}")
-        if st.button("💾 保存默认基线天数"):
+            fixed_launch = (str(k) == "立项")
+            show_val = 1 if fixed_launch else int(v)
+            new_days[k] = cols[i].number_input(
+                k,
+                value=show_val,
+                step=1,
+                key=f"bd_{k}",
+                disabled=fixed_launch,
+                help=("立项固定为 1 天" if fixed_launch else None),
+            )
+        new_days["立项"] = 1
+        if st.button("保存排期基线"):
             st.session_state.db["系统配置"]["排期基线"] = new_days
             sync_save_db()
-            st.success("已更新默认计划基线！")
+            st.success("排期基线已更新。")
     with st.expander("🧹 数据库瘦身 & Base64 图片迁移工具", expanded=True):
         target_label = "GridFS 持久附件" if get_storage_attachment_mode() == "gridfs" else "本地文件引用"
         st.warning(f"⚠️ 如果 JSON 文件很大，说明旧版 Base64 图片还留在数据库里。点击下方按钮可一键迁移到【{target_label}】。")
