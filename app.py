@@ -4124,13 +4124,21 @@ if menu == MENU_DASHBOARD:
                 return "past"
             return "neutral"
 
-        def _sync_todo_checkpoint_from_dynamic(project_name, event_text):
-            intent = _classify_dynamic_intent(event_text)
-            if intent != "todo":
-                return ""
 
-            due_dt, task_body = _extract_event_date_from_text(event_text, prefer_past=False)
+
+        def _sync_todo_checkpoint_from_dynamic(project_name, event_text, forced_due_dt=None, forced_task_body="", skip_intent_check=False):
+            if not skip_intent_check:
+                intent = _classify_dynamic_intent(event_text)
+                if intent != "todo":
+                    return ""
+
+            due_dt = forced_due_dt if isinstance(forced_due_dt, datetime.date) else None
+            task_body = str(forced_task_body or "").strip()
+            if due_dt is None:
+                due_dt, task_body = _extract_event_date_from_text(event_text, prefer_past=False)
             if not due_dt:
+                return ""
+            if (not skip_intent_check) and due_dt < datetime.date.today():
                 return ""
 
             task = str(task_body or event_text).strip(" |，,;；")
@@ -4189,7 +4197,7 @@ if menu == MENU_DASHBOARD:
 
         st.markdown("##### 🧩 大盘明细可编辑表")
         st.caption("直接在表格中修改基础字段和【最新全盘动态】；保存时选择是追加为最新动态，还是改写当前最新动态。")
-        st.caption("规则：含日期的待办语气会自动同步 To do checkpoint；含日期的过去式语气会按该日期写入历史。")
+        st.caption("规则：日期优先。未来日期自动同步到 To do；过去日期按该日期写入历史。无日期时再按语气词判断。")
 
         editable_cols = ["\u72b6\u6001", "\u9879\u76ee", "\u9879\u76ee\u5f53\u524d\u9636\u6bb5", "\u5f00\u5b9a\u65f6\u95f4", "\u9884\u8ba1\u53d1\u8d27", "\u8ddf\u5355", "\u6700\u65b0\u5168\u76d8\u52a8\u6001", "\u65ad\u66f4", "\u5f00\u5b9a\u5ef6\u8fdf\u9884\u8b66", "\u53d1\u8d27\u5ef6\u8fdf\u9884\u8b66"]
         editable_df = show_df[editable_cols].copy()
@@ -4316,10 +4324,25 @@ if menu == MENU_DASHBOARD:
                     if not latest_after:
                         error_msgs.append(f"{proj}: 最新全盘动态不能为空或无数据。")
                     else:
+
+                        parsed_date, parsed_body = _extract_event_date_from_text(latest_after, prefer_past=False)
                         intent = _classify_dynamic_intent(latest_after)
+                        today_ref = datetime.date.today()
+                        date_bucket = ""
+                        if isinstance(parsed_date, datetime.date):
+                            if parsed_date > today_ref:
+                                date_bucket = "future"
+                            elif parsed_date < today_ref:
+                                date_bucket = "past"
+                            else:
+                                date_bucket = "today"
+
                         event_date = None
-                        if dynamic_mode == "append_latest" and intent == "past":
-                            event_date, _ = _extract_event_date_from_text(latest_after, prefer_past=True)
+                        if dynamic_mode == "append_latest":
+                            if date_bucket == "past":
+                                event_date = parsed_date
+                            elif (not date_bucket) and intent == "past":
+                                event_date, _ = _extract_event_date_from_text(latest_after, prefer_past=True)
 
                         ok, msg = _apply_latest_dynamic_update(
                             proj,
@@ -4332,7 +4355,26 @@ if menu == MENU_DASHBOARD:
                             dynamic_updates += 1
                             changed_projects.add(proj)
                             if dynamic_mode == "append_latest":
-                                todo_state = _sync_todo_checkpoint_from_dynamic(proj, latest_after)
+                                todo_state = ""
+                                if date_bucket == "future" and isinstance(parsed_date, datetime.date):
+                                    todo_state = _sync_todo_checkpoint_from_dynamic(
+                                        proj,
+                                        latest_after,
+                                        forced_due_dt=parsed_date,
+                                        forced_task_body=parsed_body,
+                                        skip_intent_check=True,
+                                    )
+                                elif date_bucket == "today" and intent == "todo" and isinstance(parsed_date, datetime.date):
+                                    todo_state = _sync_todo_checkpoint_from_dynamic(
+                                        proj,
+                                        latest_after,
+                                        forced_due_dt=parsed_date,
+                                        forced_task_body=parsed_body,
+                                        skip_intent_check=True,
+                                    )
+                                elif not date_bucket:
+                                    todo_state = _sync_todo_checkpoint_from_dynamic(proj, latest_after)
+
                                 if todo_state == "created":
                                     todo_created += 1
                                 elif todo_state == "updated":
