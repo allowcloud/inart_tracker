@@ -6283,85 +6283,158 @@ elif menu == MENU_SETTINGS:
                         st.success(f"已删除 {len(del_ids)} 条历史记录。")
                         st.rerun()
 
-    with st.expander("🛠️ 团队成员清洗 (支持按职能/姓名替换)", expanded=True):
-        st.info("替换某个人的特定职能（如：将 `建模-雨萱` 替换为 `设计-雨萱`），留空即彻底抹除。")
-        all_names = set()
-        for p_data in db.values():
-            if not isinstance(p_data, dict) or "部件列表" not in p_data: continue
-            for c_data in p_data['部件列表'].values():
-                for pair in re.split(r'[,，|]', c_data.get('负责人', '')):
-                    pair = pair.strip()
-                    if pair and pair != '未分配':
-                        all_names.add(pair)
-        c_old, c_new, c_btn = st.columns([1.5, 1.5, 1])
-        with c_old: old_n = st.selectbox("1. 选中要清洗的组合", [""] + sorted(list(all_names)))
-        with c_new: new_n = st.text_input("2. 替换为新组合 (留空即删除)")
-        with c_btn:
-            st.write("")
-            if st.button("🚨 确认全库替换", type="primary") and old_n:
-                count_fixed = 0
-                for p_data in db.values():
-                    if not isinstance(p_data, dict) or "部件列表" not in p_data: continue
-                    for c_data in p_data['部件列表'].values():
-                        owner_str = c_data.get('负责人', '')
-                        if not owner_str: continue
-                        pairs     = [x.strip() for x in re.split(r'[,，]', owner_str) if x.strip()]
-                        new_pairs = []; changed = False
-                        for p in pairs:
-                            if p == old_n:
-                                if new_n.strip(): new_pairs.append(new_n.strip())
-                                changed = True
-                            else:
-                                new_pairs.append(p)
-                        if changed:
-                            c_data['负责人'] = ", ".join(new_pairs)
-                            count_fixed += 1
-                sync_save_db()
-                st.success(f"✅ 清洗完成！全库共修正 {count_fixed} 处记录。")
-                st.rerun()
-
-    with st.expander("🧩 职能-人名维护（替换 / 删除，含 To do 关联）", expanded=False):
-        st.caption("支持按【职能】、【姓名】或【职能-姓名组合】批量替换 / 删除，会同步更新部件负责人、To do 关联人员及扩展词库。")
+    with st.expander("\u56e2\u961f\u6210\u5458\u7ef4\u62a4\uff08\u65b0\u589e / \u66ff\u6362 / \u5220\u9664 + \u540e\u6094\u836f\uff09", expanded=True):
+        st.caption("\u7edf\u4e00\u5165\u53e3\uff1a\u652f\u6301\u65b0\u589e\u6210\u5458\u6c60\u3001\u6309\u6761\u4ef6\u66ff\u6362/\u5220\u9664\uff0c\u5e76\u53ef\u64a4\u9500\u4e0a\u4e00\u6b65\u8bef\u64cd\u4f5c\u3002")
 
         def _split_role_tokens(raw_text):
-            return [x.strip() for x in re.split(r"[,，|/]+", str(raw_text or "")) if x.strip()]
+            return [x.strip() for x in re.split(r"[,\uff0c|/]+", str(raw_text or "")) if x.strip()]
 
         def _join_role_tokens(tokens):
             out = []
             for t in tokens:
                 t = str(t or "").strip()
-                if (not t) or t == "未分配" or t in out:
+                if (not t) or t == "\u672a\u5206\u914d" or t in out:
                     continue
                 out.append(t)
             return ", ".join(out)
+
+        cfg = db.setdefault("\u7cfb\u7edf\u914d\u7f6e", {})
+        todo_all = cfg.setdefault("PM_TODO_LIST", [])
+
+        def _token_parts(token):
+            role, person = parse_role_person_label(token)
+            combo = f"{role}-{person}" if role != "\u7efc\u5408" else person
+            return role, person, combo
+
+        def _capture_member_snapshot(label):
+            owners = {}
+            for p_name, p_data in db.items():
+                if p_name == "\u7cfb\u7edf\u914d\u7f6e" or not isinstance(p_data, dict):
+                    continue
+                comp_map = {}
+                for c_name, c_data in p_data.get("\u90e8\u4ef6\u5217\u8868", {}).items():
+                    comp_map[c_name] = str(c_data.get("\u8d1f\u8d23\u4eba", "")).strip()
+                owners[p_name] = comp_map
+
+            todo_snap = []
+            for idx, td in enumerate(todo_all):
+                todo_snap.append({
+                    "idx": idx,
+                    "_id": str(td.get("_id", "")).strip(),
+                    "\u5173\u8054\u4eba\u5458": str(td.get("\u5173\u8054\u4eba\u5458", "")).strip(),
+                })
+
+            extra_people = cfg.get("TODO_EXTRA_ROLE_PEOPLE", [])
+            if isinstance(extra_people, str):
+                extra_people = split_people_text(extra_people)
+            if not isinstance(extra_people, list):
+                extra_people = []
+
+            return {
+                "id": str(uuid.uuid4())[:8],
+                "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+                "label": str(label or "\u56e2\u961f\u6210\u5458\u7ef4\u62a4").strip(),
+                "owners": owners,
+                "todo": todo_snap,
+                "extra_people": list(extra_people),
+            }
+
+        def _push_member_snapshot(label):
+            stack = cfg.setdefault("ROLE_PERSON_UNDO_STACK", [])
+            if not isinstance(stack, list):
+                stack = []
+            stack.append(_capture_member_snapshot(label))
+            cfg["ROLE_PERSON_UNDO_STACK"] = stack[-10:]
+
+        def _restore_member_snapshot(snap):
+            owners_map = snap.get("owners", {}) if isinstance(snap, dict) else {}
+            for p_name, p_data in db.items():
+                if p_name == "\u7cfb\u7edf\u914d\u7f6e" or not isinstance(p_data, dict):
+                    continue
+                snap_comp = owners_map.get(p_name, {})
+                if not isinstance(snap_comp, dict):
+                    continue
+                for c_name, c_data in p_data.get("\u90e8\u4ef6\u5217\u8868", {}).items():
+                    if c_name in snap_comp:
+                        c_data["\u8d1f\u8d23\u4eba"] = str(snap_comp.get(c_name, "")).strip()
+
+            todo_snap = snap.get("todo", []) if isinstance(snap, dict) else []
+            todo_by_id = {
+                str(x.get("_id", "")).strip(): str(x.get("\u5173\u8054\u4eba\u5458", "")).strip()
+                for x in todo_snap
+                if str(x.get("_id", "")).strip()
+            }
+            todo_by_idx = {
+                int(x.get("idx", -1)): str(x.get("\u5173\u8054\u4eba\u5458", "")).strip()
+                for x in todo_snap
+                if str(x.get("idx", "")).strip().isdigit()
+            }
+
+            for idx, td in enumerate(todo_all):
+                tid = str(td.get("_id", "")).strip()
+                if tid and tid in todo_by_id:
+                    td["\u5173\u8054\u4eba\u5458"] = todo_by_id[tid]
+                elif idx in todo_by_idx:
+                    td["\u5173\u8054\u4eba\u5458"] = todo_by_idx[idx]
+
+            extra_people = snap.get("extra_people", []) if isinstance(snap, dict) else []
+            if isinstance(extra_people, str):
+                extra_people = split_people_text(extra_people)
+            if not isinstance(extra_people, list):
+                extra_people = []
+            cfg["TODO_EXTRA_ROLE_PEOPLE"] = list(dict.fromkeys([str(x).strip() for x in extra_people if str(x).strip()]))
+
+        undo_stack = cfg.setdefault("ROLE_PERSON_UNDO_STACK", [])
+        if not isinstance(undo_stack, list):
+            undo_stack = []
+            cfg["ROLE_PERSON_UNDO_STACK"] = undo_stack
+
+        if undo_stack:
+            latest = undo_stack[-1]
+            st.info(f"\u540e\u6094\u836f\u53ef\u7528\uff1a{latest.get('ts', '')} | {latest.get('label', '\u56e2\u961f\u6210\u5458\u7ef4\u62a4')}")
+            if st.button("\u21a9\ufe0f \u540e\u6094\u836f\uff1a\u64a4\u9500\u4e0a\u4e00\u6b65\u6210\u5458\u7ef4\u62a4", key="btn_member_undo"):
+                snap = undo_stack.pop()
+                cfg["ROLE_PERSON_UNDO_STACK"] = undo_stack
+                _restore_member_snapshot(snap)
+                sync_save_db()
+                st.success("\u5df2\u64a4\u9500\u4e0a\u4e00\u6b65\u6210\u5458\u7ef4\u62a4\u64cd\u4f5c\u3002")
+                st.rerun()
+        else:
+            st.caption("\u5f53\u524d\u6ca1\u6709\u53ef\u64a4\u9500\u7684\u6210\u5458\u7ef4\u62a4\u64cd\u4f5c\u3002")
 
         combo_counter = Counter()
         role_set = set()
         person_set = set()
 
         for p_name, p_data in db.items():
-            if p_name == "系统配置" or not isinstance(p_data, dict):
+            if p_name == "\u7cfb\u7edf\u914d\u7f6e" or not isinstance(p_data, dict):
                 continue
-            for c_data in p_data.get("部件列表", {}).values():
-                for tk in _split_role_tokens(c_data.get("负责人", "")):
-                    role, person = parse_role_person_label(tk)
+            for c_data in p_data.get("\u90e8\u4ef6\u5217\u8868", {}).values():
+                for tk in _split_role_tokens(c_data.get("\u8d1f\u8d23\u4eba", "")):
+                    role, person, combo = _token_parts(tk)
                     if not person:
                         continue
-                    combo = f"{role}-{person}" if role != "综合" else person
                     combo_counter[combo] += 1
                     role_set.add(role)
                     person_set.add(person)
 
-        cfg = db.setdefault("系统配置", {})
+        for td in todo_all:
+            for tk in _split_role_tokens(td.get("\u5173\u8054\u4eba\u5458", "")):
+                role, person, combo = _token_parts(tk)
+                if not person:
+                    continue
+                combo_counter[combo] += 1
+                role_set.add(role)
+                person_set.add(person)
+
         extra_people = cfg.get("TODO_EXTRA_ROLE_PEOPLE", [])
         if isinstance(extra_people, str):
             extra_people = split_people_text(extra_people)
         if isinstance(extra_people, list):
             for tk in extra_people:
-                role, person = parse_role_person_label(tk)
+                role, person, combo = _token_parts(tk)
                 if not person:
                     continue
-                combo = f"{role}-{person}" if role != "综合" else person
                 combo_counter[combo] += 1
                 role_set.add(role)
                 person_set.add(person)
@@ -6370,32 +6443,36 @@ elif menu == MENU_SETTINGS:
             rp_rows = []
             for combo, cnt in sorted(combo_counter.items(), key=lambda x: (-x[1], x[0])):
                 role, person = parse_role_person_label(combo)
-                rp_rows.append({"组合": combo, "职能": role, "姓名": person, "出现次数": int(cnt)})
+                rp_rows.append({"\u7ec4\u5408": combo, "\u804c\u80fd": role, "\u59d3\u540d": person, "\u51fa\u73b0\u6b21\u6570": int(cnt)})
             st.dataframe(pd.DataFrame(rp_rows), width='stretch', hide_index=True)
         else:
-            st.caption("当前未找到可维护的职能-人名组合。")
+            st.caption("\u5f53\u524d\u672a\u627e\u5230\u53ef\u7ef4\u62a4\u7684\u804c\u80fd-\u4eba\u540d\u7ec4\u5408\u3002")
 
-        role_opts = ["(全部)"] + sorted(role_set)
-        person_opts = ["(全部)"] + sorted(person_set)
-        combo_opts = ["(不限定)"] + sorted(combo_counter.keys())
+        st.markdown("#### \u64cd\u4f5c\u9762\u677f")
+        op_mode = st.radio("\u64cd\u4f5c\u7c7b\u578b", ["\u65b0\u589e", "\u66ff\u6362", "\u5220\u9664"], horizontal=True, key="rp_mode_unified")
 
-        f1, f2, f3 = st.columns([1, 1, 1.3])
-        with f1:
-            old_role = st.selectbox("原职能", role_opts, key="rp_old_role")
-            old_person = st.selectbox("原姓名", person_opts, key="rp_old_person")
-        with f2:
-            old_combo = st.selectbox("原组合（可选）", combo_opts, key="rp_old_combo")
-            op_mode = st.radio("操作", ["替换", "删除"], horizontal=True, key="rp_mode")
-        with f3:
-            new_role = st.text_input("新职能（替换时可选）", key="rp_new_role", placeholder="例：设计")
-            new_person = st.text_input("新姓名（替换时可选）", key="rp_new_person", placeholder="例：宇涵")
+        role_opts = ["(\u5168\u90e8)"] + sorted(role_set)
+        person_opts = ["(\u5168\u90e8)"] + sorted(person_set)
+        combo_opts = ["(\u4e0d\u9650\u5b9a)"] + sorted(combo_counter.keys())
+
+        c1, c2, c3 = st.columns([1, 1, 1.2])
+        with c1:
+            old_role = st.selectbox("\u539f\u804c\u80fd", role_opts, key="rp_old_role_unified")
+            old_person = st.selectbox("\u539f\u59d3\u540d", person_opts, key="rp_old_person_unified")
+        with c2:
+            old_combo = st.selectbox("\u539f\u7ec4\u5408\uff08\u53ef\u9009\uff09", combo_opts, key="rp_old_combo_unified")
+            add_to_matched = st.checkbox("\u65b0\u589e\u65f6\u8ffd\u52a0\u5230\u547d\u4e2d\u8bb0\u5f55", value=False, key="rp_add_matched_unified")
+        with c3:
+            new_role = st.text_input("\u65b0\u804c\u80fd", key="rp_new_role_unified", placeholder="\u4f8b\uff1a\u8bbe\u8ba1")
+            new_person = st.text_input("\u65b0\u59d3\u540d", key="rp_new_person_unified", placeholder="\u4f8b\uff1aVenchar")
+            add_to_pool = st.checkbox("\u65b0\u589e\u5230\u6210\u5458\u6c60\uff08\u63a8\u8350\uff09", value=True, key="rp_add_pool_unified")
 
         def _rp_match(role, person, combo):
-            if old_role != "(全部)" and role != old_role:
+            if old_role != "(\u5168\u90e8)" and role != old_role:
                 return False
-            if old_person != "(全部)" and person != old_person:
+            if old_person != "(\u5168\u90e8)" and person != old_person:
                 return False
-            if old_combo != "(不限定)" and combo != old_combo:
+            if old_combo != "(\u4e0d\u9650\u5b9a)" and combo != old_combo:
                 return False
             return True
 
@@ -6404,109 +6481,173 @@ elif menu == MENU_SETTINGS:
             role, person = parse_role_person_label(combo)
             if _rp_match(role, person, combo):
                 preview_count += int(cnt)
-        st.caption(f"预计命中 {preview_count} 条。")
+        st.caption(f"\u5f53\u524d\u7b5b\u9009\u547d\u4e2d\u7ec4\u5408 {preview_count} \u6761\u3002")
 
-        if st.button("💾 执行职能-人名维护", type="primary", key="btn_role_person_maintain"):
-            if op_mode == "替换" and (not str(new_role).strip()) and (not str(new_person).strip()):
-                st.warning("【替换】模式下至少需填写新职能或新姓名。")
-            elif preview_count <= 0:
-                st.info("未命中需处理的组合。")
+        dangerous_scope = (old_role == "(\u5168\u90e8)" and old_person == "(\u5168\u90e8)" and old_combo == "(\u4e0d\u9650\u5b9a)")
+        need_confirm = (op_mode in ["\u66ff\u6362", "\u5220\u9664"]) or (op_mode == "\u65b0\u589e" and add_to_matched and dangerous_scope)
+        confirm_all = True
+        if need_confirm and dangerous_scope:
+            st.warning("\u5f53\u524d\u662f\u5168\u91cf\u8303\u56f4\u64cd\u4f5c\uff0c\u8bf7\u52fe\u9009\u786e\u8ba4\uff0c\u9632\u6b62\u8bef\u8986\u76d6\u3002")
+            confirm_all = st.checkbox("\u6211\u786e\u8ba4\u5bf9\u5168\u91cf\u8303\u56f4\u6267\u884c\u672c\u6b21\u64cd\u4f5c", value=False, key="rp_confirm_all_unified")
+
+        if st.button("\ud83d\udcbe \u6267\u884c\u56e2\u961f\u6210\u5458\u7ef4\u62a4", type="primary", key="btn_role_person_maintain_unified"):
+            if not confirm_all:
+                st.warning("\u672a\u786e\u8ba4\u5168\u91cf\u64cd\u4f5c\uff0c\u5df2\u53d6\u6d88\u6267\u884c\u3002")
             else:
                 comp_changed = 0
                 token_changed = 0
                 todo_people_changed = 0
                 extra_changed = 0
 
+                nr = str(new_role or "").strip()
+                np = str(new_person or "").strip()
+                new_token = f"{nr}-{np}" if (nr and nr != "\u7efc\u5408") else np
+
                 def _map_token(token):
-                    role, person = parse_role_person_label(token)
-                    combo = f"{role}-{person}" if role != "综合" else person
+                    role, person, combo = _token_parts(token)
                     if not _rp_match(role, person, combo):
                         return token, False
-                    if op_mode == "删除":
+                    if op_mode == "\u5220\u9664":
                         return "", True
-                    nr = str(new_role or "").strip() or role
-                    np = str(new_person or "").strip() or person
-                    if (not np) or np == "未分配":
+                    mapped_role = nr or role
+                    mapped_person = np or person
+                    if (not mapped_person) or mapped_person == "\u672a\u5206\u914d":
                         return "", True
-                    mapped = f"{nr}-{np}" if nr and nr != "综合" else np
+                    mapped = f"{mapped_role}-{mapped_person}" if mapped_role and mapped_role != "\u7efc\u5408" else mapped_person
                     return mapped, True
 
-                for p_name, p_data in db.items():
-                    if p_name == "系统配置" or not isinstance(p_data, dict):
-                        continue
-                    for c_data in p_data.get("部件列表", {}).values():
-                        owner_str = str(c_data.get("负责人", "")).strip()
-                        tokens = _split_role_tokens(owner_str)
-                        if not tokens:
-                            continue
-                        new_tokens = []
-                        hit_local = False
-                        for tk in tokens:
+                label = f"{op_mode}:{old_role}/{old_person}/{old_combo}"
+                should_save = False
+                abort_reason = ""
+
+                if op_mode == "\u65b0\u589e":
+                    if not np:
+                        abort_reason = "\u3010\u65b0\u589e\u3011\u81f3\u5c11\u9700\u8981\u586b\u5199\u201c\u65b0\u59d3\u540d\u201d\u3002"
+                    else:
+                        _push_member_snapshot(label)
+
+                        if add_to_pool:
+                            raw_extra = cfg.get("TODO_EXTRA_ROLE_PEOPLE", [])
+                            if isinstance(raw_extra, str):
+                                raw_extra = split_people_text(raw_extra)
+                            if not isinstance(raw_extra, list):
+                                raw_extra = []
+                            if new_token and new_token not in raw_extra:
+                                raw_extra.append(new_token)
+                                cfg["TODO_EXTRA_ROLE_PEOPLE"] = list(dict.fromkeys([str(x).strip() for x in raw_extra if str(x).strip()]))
+                                extra_changed += 1
+                                should_save = True
+
+                        if add_to_matched:
+                            for p_name, p_data in db.items():
+                                if p_name == "\u7cfb\u7edf\u914d\u7f6e" or not isinstance(p_data, dict):
+                                    continue
+                                for c_data in p_data.get("\u90e8\u4ef6\u5217\u8868", {}).values():
+                                    owner_str = str(c_data.get("\u8d1f\u8d23\u4eba", "")).strip()
+                                    tokens = _split_role_tokens(owner_str)
+                                    hit_local = any(_rp_match(*_token_parts(tk)) for tk in tokens if _token_parts(tk)[1])
+                                    if hit_local and new_token and new_token not in tokens:
+                                        c_data["\u8d1f\u8d23\u4eba"] = _join_role_tokens(tokens + [new_token])
+                                        comp_changed += 1
+                                        token_changed += 1
+                                        should_save = True
+
+                            for td in todo_all:
+                                people_raw = str(td.get("\u5173\u8054\u4eba\u5458", "")).strip()
+                                tokens = _split_role_tokens(people_raw)
+                                hit_local = any(_rp_match(*_token_parts(tk)) for tk in tokens if _token_parts(tk)[1])
+                                if hit_local and new_token and new_token not in tokens:
+                                    td["\u5173\u8054\u4eba\u5458"] = _join_role_tokens(tokens + [new_token])
+                                    todo_people_changed += 1
+                                    should_save = True
+
+                else:
+                    if op_mode == "\u66ff\u6362" and (not nr and not np):
+                        abort_reason = "\u3010\u66ff\u6362\u3011\u81f3\u5c11\u9700\u586b\u5199\u65b0\u804c\u80fd\u6216\u65b0\u59d3\u540d\u3002"
+                    elif preview_count <= 0:
+                        abort_reason = "\u672a\u547d\u4e2d\u9700\u5904\u7406\u7684\u7ec4\u5408\u3002"
+                    else:
+                        _push_member_snapshot(label)
+
+                        for p_name, p_data in db.items():
+                            if p_name == "\u7cfb\u7edf\u914d\u7f6e" or not isinstance(p_data, dict):
+                                continue
+                            for c_data in p_data.get("\u90e8\u4ef6\u5217\u8868", {}).values():
+                                owner_str = str(c_data.get("\u8d1f\u8d23\u4eba", "")).strip()
+                                tokens = _split_role_tokens(owner_str)
+                                if not tokens:
+                                    continue
+                                new_tokens = []
+                                hit_local = False
+                                for tk in tokens:
+                                    mapped, hit = _map_token(tk)
+                                    if hit:
+                                        token_changed += 1
+                                        hit_local = True
+                                        if mapped:
+                                            new_tokens.append(mapped)
+                                    else:
+                                        new_tokens.append(tk)
+                                if hit_local:
+                                    new_owner = _join_role_tokens(new_tokens)
+                                    if new_owner != owner_str:
+                                        c_data["\u8d1f\u8d23\u4eba"] = new_owner
+                                        comp_changed += 1
+                                        should_save = True
+
+                        for td in todo_all:
+                            people_raw = str(td.get("\u5173\u8054\u4eba\u5458", "")).strip()
+                            tokens = _split_role_tokens(people_raw)
+                            if not tokens:
+                                continue
+                            new_tokens = []
+                            hit_local = False
+                            for tk in tokens:
+                                mapped, hit = _map_token(tk)
+                                if hit:
+                                    hit_local = True
+                                    if mapped:
+                                        new_tokens.append(mapped)
+                                else:
+                                    new_tokens.append(tk)
+                            if hit_local:
+                                new_people = _join_role_tokens(new_tokens)
+                                if new_people != people_raw:
+                                    td["\u5173\u8054\u4eba\u5458"] = new_people
+                                    todo_people_changed += 1
+                                    should_save = True
+
+                        raw_extra = cfg.get("TODO_EXTRA_ROLE_PEOPLE", [])
+                        if isinstance(raw_extra, str):
+                            raw_extra = split_people_text(raw_extra)
+                        if not isinstance(raw_extra, list):
+                            raw_extra = []
+                        new_extra = []
+                        for tk in raw_extra:
                             mapped, hit = _map_token(tk)
                             if hit:
-                                token_changed += 1
-                                hit_local = True
+                                extra_changed += 1
                                 if mapped:
-                                    new_tokens.append(mapped)
+                                    new_extra.append(mapped)
                             else:
-                                new_tokens.append(tk)
-                        if hit_local:
-                            new_owner = _join_role_tokens(new_tokens)
-                            if new_owner != owner_str:
-                                c_data["负责人"] = new_owner
-                                comp_changed += 1
+                                new_extra.append(str(tk).strip())
+                        new_extra = list(dict.fromkeys([x for x in new_extra if str(x).strip()]))
+                        if new_extra != raw_extra:
+                            cfg["TODO_EXTRA_ROLE_PEOPLE"] = new_extra
+                            should_save = True
 
-                todo_all = cfg.setdefault("PM_TODO_LIST", [])
-                for td in todo_all:
-                    people_raw = str(td.get("关联人员", "")).strip()
-                    if not people_raw:
-                        continue
-                    tokens = _split_role_tokens(people_raw)
-                    if not tokens:
-                        continue
-                    new_tokens = []
-                    hit_local = False
-                    for tk in tokens:
-                        mapped, hit = _map_token(tk)
-                        if hit:
-                            hit_local = True
-                            if mapped:
-                                new_tokens.append(mapped)
-                        else:
-                            new_tokens.append(tk)
-                    if hit_local:
-                        new_people = _join_role_tokens(new_tokens)
-                        if new_people != people_raw:
-                            td["关联人员"] = new_people
-                            todo_people_changed += 1
-
-                raw_extra = cfg.get("TODO_EXTRA_ROLE_PEOPLE", [])
-                if isinstance(raw_extra, str):
-                    raw_extra = split_people_text(raw_extra)
-                if not isinstance(raw_extra, list):
-                    raw_extra = []
-                new_extra = []
-                for tk in raw_extra:
-                    mapped, hit = _map_token(tk)
-                    if hit:
-                        extra_changed += 1
-                        if mapped:
-                            new_extra.append(mapped)
-                    else:
-                        new_extra.append(str(tk).strip())
-                cfg["TODO_EXTRA_ROLE_PEOPLE"] = list(dict.fromkeys([x for x in new_extra if str(x).strip()]))
-
-                if comp_changed or todo_people_changed or extra_changed:
+                if abort_reason:
+                    st.warning(abort_reason)
+                elif should_save:
                     sync_save_db()
                     st.success(
-                        f"✅ 已完成职能-人名维护：部件修正 {comp_changed} 处，"
-                        f"匹配组合 {token_changed} 条，To do人员修正 {todo_people_changed} 条，"
-                        f"扩展词库处理 {extra_changed} 条。"
+                        f"\u2705 \u5df2\u5b8c\u6210\u56e2\u961f\u6210\u5458\u7ef4\u62a4\uff1a\u90e8\u4ef6\u4fee\u6b63 {comp_changed} \u5904\uff0c"
+                        f"\u547d\u4e2d\u7ec4\u5408 {token_changed} \u6761\uff0cTo do \u4eba\u5458\u4fee\u6b63 {todo_people_changed} \u6761\uff0c"
+                        f"\u6210\u5458\u6c60\u5904\u7406 {extra_changed} \u6761\u3002"
                     )
                     st.rerun()
                 else:
-                    st.info("命中了组合，但未产生实际变更。")
-
+                    st.info("\u672c\u6b21\u64cd\u4f5c\u672a\u4ea7\u751f\u5b9e\u9645\u53d8\u66f4\u3002")
     with st.expander("⏱️ 全局计划排期默认基线"):
         st.info("设定各阶段的默认目标天数。")
         cols     = st.columns(len(SYS_CFG["排期基线"]))
