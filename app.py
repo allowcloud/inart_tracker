@@ -6402,6 +6402,118 @@ elif menu == MENU_SETTINGS:
         else:
             st.caption("\u5f53\u524d\u6ca1\u6709\u53ef\u64a4\u9500\u7684\u6210\u5458\u7ef4\u62a4\u64cd\u4f5c\u3002")
 
+        st.markdown("##### \u4ece\u5907\u4efd\u56de\u6eda\u6210\u5458\u5b57\u6bb5")
+        restore_member_file = st.file_uploader("\u4e0a\u4f20\u5907\u4efd\u6587\u4ef6\uff08zip/json\uff09", type=["zip", "json"], key="rp_member_restore_file")
+        if restore_member_file is not None and st.button("\u21a9\ufe0f \u4ece\u5907\u4efd\u56de\u6eda\u6210\u5458\u5b57\u6bb5", key="btn_rp_restore_from_backup"):
+            try:
+                source_data = None
+                file_name = str(getattr(restore_member_file, "name", "") or "").lower()
+                if file_name.endswith(".zip"):
+                    with zipfile.ZipFile(restore_member_file, "r") as zf:
+                        if "database.json" not in zf.namelist():
+                            st.error("\u538b\u7f29\u5305\u7f3a\u5c11 database.json\uff0c\u65e0\u6cd5\u56de\u6eda\u3002")
+                        else:
+                            with zf.open("database.json") as f:
+                                source_data = json.load(f)
+                else:
+                    source_data = json.load(restore_member_file)
+
+                if not isinstance(source_data, dict):
+                    st.error("\u5907\u4efd\u6587\u4ef6\u683c\u5f0f\u4e0d\u6b63\u786e\uff0c\u672a\u6267\u884c\u56de\u6eda\u3002")
+                else:
+                    _push_member_snapshot("rollback_from_backup")
+                    comp_restored = 0
+                    todo_restored = 0
+                    extra_restored = 0
+
+                    source_sys = source_data.get("\u7cfb\u7edf\u914d\u7f6e", {}) if isinstance(source_data.get("\u7cfb\u7edf\u914d\u7f6e", {}), dict) else {}
+                    source_todo = source_sys.get("PM_TODO_LIST", [])
+                    if not isinstance(source_todo, list):
+                        source_todo = []
+
+                    for p_name, p_data in db.items():
+                        if p_name == "\u7cfb\u7edf\u914d\u7f6e" or not isinstance(p_data, dict):
+                            continue
+                        src_proj = source_data.get(p_name, {})
+                        if not isinstance(src_proj, dict):
+                            continue
+                        src_comps = src_proj.get("\u90e8\u4ef6\u5217\u8868", {})
+                        if not isinstance(src_comps, dict):
+                            continue
+                        for c_name, c_data in p_data.get("\u90e8\u4ef6\u5217\u8868", {}).items():
+                            src_c = src_comps.get(c_name, {})
+                            if not isinstance(src_c, dict):
+                                continue
+                            old_owner = str(c_data.get("\u8d1f\u8d23\u4eba", "")).strip()
+                            new_owner = str(src_c.get("\u8d1f\u8d23\u4eba", "")).strip()
+                            if old_owner != new_owner:
+                                c_data["\u8d1f\u8d23\u4eba"] = new_owner
+                                comp_restored += 1
+
+                    src_todo_by_id = {
+                        str(x.get("_id", "")).strip(): str(x.get("\u5173\u8054\u4eba\u5458", "")).strip()
+                        for x in source_todo
+                        if isinstance(x, dict) and str(x.get("_id", "")).strip()
+                    }
+                    src_todo_by_key = {}
+                    for x in source_todo:
+                        if not isinstance(x, dict):
+                            continue
+                        k = (
+                            str(x.get("\u5173\u8054\u9879\u76ee", "")).strip(),
+                            norm_text(str(x.get("\u4efb\u52a1", "")).strip()),
+                            str(x.get("\u521b\u5efa", "")).strip(),
+                        )
+                        src_todo_by_key[k] = str(x.get("\u5173\u8054\u4eba\u5458", "")).strip()
+
+                    for td in todo_all:
+                        tid = str(td.get("_id", "")).strip()
+                        old_people = str(td.get("\u5173\u8054\u4eba\u5458", "")).strip()
+                        new_people = None
+                        if tid and tid in src_todo_by_id:
+                            new_people = src_todo_by_id[tid]
+                        else:
+                            key = (
+                                str(td.get("\u5173\u8054\u9879\u76ee", "")).strip(),
+                                norm_text(str(td.get("\u4efb\u52a1", "")).strip()),
+                                str(td.get("\u521b\u5efa", "")).strip(),
+                            )
+                            if key in src_todo_by_key:
+                                new_people = src_todo_by_key[key]
+                        if new_people is not None and old_people != str(new_people).strip():
+                            td["\u5173\u8054\u4eba\u5458"] = str(new_people).strip()
+                            todo_restored += 1
+
+                    src_extra = source_sys.get("TODO_EXTRA_ROLE_PEOPLE", [])
+                    if isinstance(src_extra, str):
+                        src_extra = split_people_text(src_extra)
+                    if not isinstance(src_extra, list):
+                        src_extra = []
+                    src_extra = list(dict.fromkeys([str(x).strip() for x in src_extra if str(x).strip()]))
+
+                    cur_extra = cfg.get("TODO_EXTRA_ROLE_PEOPLE", [])
+                    if isinstance(cur_extra, str):
+                        cur_extra = split_people_text(cur_extra)
+                    if not isinstance(cur_extra, list):
+                        cur_extra = []
+                    cur_extra = list(dict.fromkeys([str(x).strip() for x in cur_extra if str(x).strip()]))
+
+                    if src_extra != cur_extra:
+                        cfg["TODO_EXTRA_ROLE_PEOPLE"] = src_extra
+                        extra_restored = abs(len(src_extra) - len(cur_extra)) or 1
+
+                    if comp_restored or todo_restored or extra_restored:
+                        sync_save_db()
+                        st.success(
+                            f"\u5df2\u56de\u6eda\u6210\u5458\u5b57\u6bb5\uff1a\u90e8\u4ef6\u8d1f\u8d23\u4eba {comp_restored} \u5904\uff0c"
+                            f"To do \u5173\u8054\u4eba\u5458 {todo_restored} \u6761\uff0c\u6210\u5458\u6c60 {extra_restored} \u5904\u3002"
+                        )
+                        st.rerun()
+                    else:
+                        st.info("\u5907\u4efd\u4e0e\u5f53\u524d\u6210\u5458\u5b57\u6bb5\u4e00\u81f4\uff0c\u65e0\u9700\u56de\u6eda\u3002")
+            except Exception as e:
+                st.error(f"\u56de\u6eda\u5931\u8d25\uff1a{e}")
+
         combo_counter = Counter()
         role_set = set()
         person_set = set()
