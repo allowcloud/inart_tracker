@@ -1,4 +1,4 @@
-import streamlit as st
+﻿import streamlit as st
 import json
 import os
 import datetime
@@ -5895,7 +5895,7 @@ elif menu == MENU_HISTORY:
                 sync_save_db(p_name)
 
         day_global_df = pd.DataFrame(day_global_rows)
-        day_date_values = day_global_df["??"].tolist() if "??" in day_global_df.columns else []
+        day_date_values = day_global_df["日期"].tolist() if "日期" in day_global_df.columns else []
         day_options = sorted(
             {str(x).strip() for x in day_date_values if str(x).strip()},
             reverse=True,
@@ -6664,3 +6664,4 @@ elif menu == MENU_GUIDE:
         st.markdown(
             "每次收工建议下载全量备份（数据+图片）；换设备后通过上传备份一键恢复。"
         )
+
