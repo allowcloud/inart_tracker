@@ -5763,6 +5763,7 @@ elif menu == MENU_HISTORY:
 
     grouped_logs = {}
     log_ref_map  = {}
+    log_comp_map = {}
     for c_name, comp in db[sel_proj].get("部件列表", {}).items():
         if sel_comp != "🌐 全部展示" and c_name != sel_comp:
             continue
@@ -5770,6 +5771,7 @@ elif menu == MENU_HISTORY:
             if is_hidden_system_log(log):
                 continue
             log_ref_map[log["_id"]] = log
+            log_comp_map[log["_id"]] = c_name
             key = (log.get("日期",""), log.get("工序",""), log.get("流转",""), log.get("事件",""), log.get("提审类型",""), log.get("提审结果",""), log.get("提审轮次",""))
             if key not in grouped_logs:
                 grouped_logs[key] = {"_ids": [log["_id"]], "部件": [c_name], "log": log}
@@ -5834,6 +5836,137 @@ elif menu == MENU_HISTORY:
     if flat_data:
         df_logs = pd.DataFrame(flat_data).sort_values(by="日期", ascending=False).reset_index(drop=True)
         df_logs.insert(0, '序号', range(len(df_logs), 0, -1))
+
+        day_options = sorted(
+            {str(x).strip() for x in df_logs["日期"].tolist() if str(x).strip()},
+            reverse=True,
+        )
+        with st.expander("📅 按日查看 / 修正操作历史", expanded=False):
+            if day_options:
+                day_key_prefix = f"{norm_text(sel_proj)}_{norm_text(sel_comp)}"
+                sel_day = st.selectbox("选择日期", day_options, key=f"hist_day_pick_{day_key_prefix}")
+                day_source_df = df_logs[df_logs["日期"].astype(str) == str(sel_day)].copy().reset_index(drop=True)
+                st.caption(f"当日共 {len(day_source_df)} 条历史记录。支持修改或勾选删除。")
+
+                day_edit_df = day_source_df.drop(columns=["_ids", "图片"]).copy()
+                day_edit_df["删除"] = False
+                day_edited_df = st.data_editor(
+                    day_edit_df,
+                    column_config={
+                        "序号": st.column_config.NumberColumn(disabled=True),
+                        "部件": st.column_config.TextColumn(disabled=True),
+                        "日期": st.column_config.TextColumn("日期"),
+                        "工序": st.column_config.SelectboxColumn("工序", options=STAGES_UNIFIED, required=True),
+                        "提审类型": st.column_config.SelectboxColumn("提审类型", options=REVIEW_TYPE_OPTIONS, required=True),
+                        "提审结果": st.column_config.SelectboxColumn("提审结果", options=REVIEW_RESULT_OPTIONS, required=True),
+                        "提审状态": st.column_config.TextColumn("提审状态", disabled=True),
+                        "提审轮次": st.column_config.NumberColumn("提审轮次", min_value=1, step=1),
+                        "删除": st.column_config.CheckboxColumn("删除"),
+                    },
+                    num_rows="fixed",
+                    width='stretch',
+                    key=f"hist_day_editor_{day_key_prefix}_{sel_day}",
+                )
+
+                if st.button("💾 保存当日修正", type="primary", key=f"btn_hist_day_save_{day_key_prefix}_{sel_day}"):
+                    touched_components = set()
+                    update_count = 0
+                    delete_ids = set()
+                    delete_count = 0
+                    day_errors = []
+
+                    for ridx, row in day_edited_df.iterrows():
+                        old_ids = day_source_df.at[ridx, "_ids"] if ridx in day_source_df.index else []
+                        if not isinstance(old_ids, list):
+                            old_ids = [old_ids] if old_ids else []
+                        old_ids = [str(x).strip() for x in old_ids if str(x).strip()]
+                        if not old_ids:
+                            continue
+
+                        if bool(row.get("删除", False)):
+                            delete_ids.update(old_ids)
+                            continue
+
+                        new_date = str(row.get("日期", "")).strip() or str(day_source_df.at[ridx, "日期"]).strip()
+                        if parse_date_safe(new_date) is None:
+                            day_errors.append(f"无效日期：{new_date}")
+                            continue
+
+                        new_stage = str(row.get("工序", "")).strip() or str(day_source_df.at[ridx, "工序"]).strip()
+                        if new_stage not in STAGES_UNIFIED:
+                            new_stage = str(day_source_df.at[ridx, "工序"]).strip()
+
+                        new_type = str(row.get("类型", "")).strip() or str(day_source_df.at[ridx, "类型"]).strip()
+                        new_event = str(row.get("事件", "")).strip() or str(day_source_df.at[ridx, "事件"]).strip()
+
+                        new_rt = str(row.get("提审类型", "(无)")).strip() or "(无)"
+                        if new_rt not in REVIEW_TYPE_OPTIONS:
+                            new_rt = "(无)"
+                        new_rr = str(row.get("提审结果", "(无)")).strip() or "(无)"
+                        if new_rr not in REVIEW_RESULT_OPTIONS:
+                            new_rr = "(无)"
+                        new_round = normalize_review_round(row.get("提审轮次", "")) if new_rt != "(无)" else ""
+
+                        for lid in old_ids:
+                            lg = log_ref_map.get(lid)
+                            if not isinstance(lg, dict):
+                                continue
+                            changed = False
+                            if str(lg.get("日期", "")) != new_date:
+                                lg["日期"] = new_date
+                                changed = True
+                            if str(lg.get("工序", "")) != new_stage:
+                                lg["工序"] = new_stage
+                                changed = True
+                            if str(lg.get("流转", "")) != new_type:
+                                lg["流转"] = new_type
+                                changed = True
+                            if str(lg.get("事件", "")) != new_event:
+                                lg["事件"] = new_event
+                                changed = True
+                            if str(lg.get("提审类型", "(无)")) != new_rt:
+                                lg["提审类型"] = new_rt
+                                changed = True
+                            if str(lg.get("提审结果", "(无)")) != new_rr:
+                                lg["提审结果"] = new_rr
+                                changed = True
+                            if str(lg.get("提审轮次", "")) != str(new_round):
+                                lg["提审轮次"] = new_round
+                                changed = True
+                            if changed:
+                                update_count += 1
+                                comp_name = str(log_comp_map.get(lid, "")).strip()
+                                if comp_name:
+                                    touched_components.add(comp_name)
+
+                    if delete_ids:
+                        for c_name, c_info in db[sel_proj].get("部件列表", {}).items():
+                            logs_old = c_info.get("日志流", [])
+                            logs_new = [lg for lg in logs_old if str((lg or {}).get("_id", "")).strip() not in delete_ids]
+                            removed = len(logs_old) - len(logs_new)
+                            if removed > 0:
+                                c_info["日志流"] = logs_new
+                                delete_count += removed
+                                touched_components.add(str(c_name))
+
+                    if touched_components:
+                        for c_name in touched_components:
+                            c_info = db[sel_proj].get("部件列表", {}).get(c_name, {})
+                            c_info["日志流"] = sorted(c_info.get("日志流", []), key=lambda x: str((x or {}).get("日期", "")))
+                        sync_save_db(sel_proj)
+                        msg = f"当日修正已保存：更新 {update_count} 条，删除 {delete_count} 条。"
+                        if day_errors:
+                            msg += f" 另有 {len(day_errors)} 条日期无效已跳过。"
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        if day_errors:
+                            st.warning("\n".join(day_errors[:5]))
+                        else:
+                            st.info("当日无可保存变更。")
+            else:
+                st.caption("当前无可按日查看的历史记录。")
+
         review_ctx = df_logs["事件"].astype(str).str.contains(r"提审|过审|review|打回|驳回|退回|待反馈|2d|3d|二维|三维|实物提审|包装提审", case=False, regex=True)
         mismatch_mask = (df_logs['提审类型'].astype(str) == '(无)') & (df_logs['提审结果'].astype(str).isin(['待反馈', '通过', '打回'])) & (~review_ctx)
         mismatch_cnt = int(mismatch_mask.sum())
@@ -6123,6 +6256,193 @@ elif menu == MENU_SETTINGS:
                 sync_save_db()
                 st.success(f"✅ 清洗完成！全库共修正 {count_fixed} 处记录。")
                 st.rerun()
+
+    with st.expander("🧩 职能-人名维护（替换 / 删除，含 To do 关联）", expanded=False):
+        st.caption("支持按【职能】、【姓名】或【职能-姓名组合】批量替换 / 删除，会同步更新部件负责人、To do 关联人员及扩展词库。")
+
+        def _split_role_tokens(raw_text):
+            return [x.strip() for x in re.split(r"[,，|/]+", str(raw_text or "")) if x.strip()]
+
+        def _join_role_tokens(tokens):
+            out = []
+            for t in tokens:
+                t = str(t or "").strip()
+                if (not t) or t == "未分配" or t in out:
+                    continue
+                out.append(t)
+            return ", ".join(out)
+
+        combo_counter = Counter()
+        role_set = set()
+        person_set = set()
+
+        for p_name, p_data in db.items():
+            if p_name == "系统配置" or not isinstance(p_data, dict):
+                continue
+            for c_data in p_data.get("部件列表", {}).values():
+                for tk in _split_role_tokens(c_data.get("负责人", "")):
+                    role, person = parse_role_person_label(tk)
+                    if not person:
+                        continue
+                    combo = f"{role}-{person}" if role != "综合" else person
+                    combo_counter[combo] += 1
+                    role_set.add(role)
+                    person_set.add(person)
+
+        cfg = db.setdefault("系统配置", {})
+        extra_people = cfg.get("TODO_EXTRA_ROLE_PEOPLE", [])
+        if isinstance(extra_people, str):
+            extra_people = split_people_text(extra_people)
+        if isinstance(extra_people, list):
+            for tk in extra_people:
+                role, person = parse_role_person_label(tk)
+                if not person:
+                    continue
+                combo = f"{role}-{person}" if role != "综合" else person
+                combo_counter[combo] += 1
+                role_set.add(role)
+                person_set.add(person)
+
+        if combo_counter:
+            rp_rows = []
+            for combo, cnt in sorted(combo_counter.items(), key=lambda x: (-x[1], x[0])):
+                role, person = parse_role_person_label(combo)
+                rp_rows.append({"组合": combo, "职能": role, "姓名": person, "出现次数": int(cnt)})
+            st.dataframe(pd.DataFrame(rp_rows), width='stretch', hide_index=True)
+        else:
+            st.caption("当前未找到可维护的职能-人名组合。")
+
+        role_opts = ["(全部)"] + sorted(role_set)
+        person_opts = ["(全部)"] + sorted(person_set)
+        combo_opts = ["(不限定)"] + sorted(combo_counter.keys())
+
+        f1, f2, f3 = st.columns([1, 1, 1.3])
+        with f1:
+            old_role = st.selectbox("原职能", role_opts, key="rp_old_role")
+            old_person = st.selectbox("原姓名", person_opts, key="rp_old_person")
+        with f2:
+            old_combo = st.selectbox("原组合（可选）", combo_opts, key="rp_old_combo")
+            op_mode = st.radio("操作", ["替换", "删除"], horizontal=True, key="rp_mode")
+        with f3:
+            new_role = st.text_input("新职能（替换时可选）", key="rp_new_role", placeholder="例：设计")
+            new_person = st.text_input("新姓名（替换时可选）", key="rp_new_person", placeholder="例：宇涵")
+
+        def _rp_match(role, person, combo):
+            if old_role != "(全部)" and role != old_role:
+                return False
+            if old_person != "(全部)" and person != old_person:
+                return False
+            if old_combo != "(不限定)" and combo != old_combo:
+                return False
+            return True
+
+        preview_count = 0
+        for combo, cnt in combo_counter.items():
+            role, person = parse_role_person_label(combo)
+            if _rp_match(role, person, combo):
+                preview_count += int(cnt)
+        st.caption(f"预计命中 {preview_count} 条。")
+
+        if st.button("💾 执行职能-人名维护", type="primary", key="btn_role_person_maintain"):
+            if op_mode == "替换" and (not str(new_role).strip()) and (not str(new_person).strip()):
+                st.warning("【替换】模式下至少需填写新职能或新姓名。")
+            elif preview_count <= 0:
+                st.info("未命中需处理的组合。")
+            else:
+                comp_changed = 0
+                token_changed = 0
+                todo_people_changed = 0
+                extra_changed = 0
+
+                def _map_token(token):
+                    role, person = parse_role_person_label(token)
+                    combo = f"{role}-{person}" if role != "综合" else person
+                    if not _rp_match(role, person, combo):
+                        return token, False
+                    if op_mode == "删除":
+                        return "", True
+                    nr = str(new_role or "").strip() or role
+                    np = str(new_person or "").strip() or person
+                    if (not np) or np == "未分配":
+                        return "", True
+                    mapped = f"{nr}-{np}" if nr and nr != "综合" else np
+                    return mapped, True
+
+                for p_name, p_data in db.items():
+                    if p_name == "系统配置" or not isinstance(p_data, dict):
+                        continue
+                    for c_data in p_data.get("部件列表", {}).values():
+                        owner_str = str(c_data.get("负责人", "")).strip()
+                        tokens = _split_role_tokens(owner_str)
+                        if not tokens:
+                            continue
+                        new_tokens = []
+                        hit_local = False
+                        for tk in tokens:
+                            mapped, hit = _map_token(tk)
+                            if hit:
+                                token_changed += 1
+                                hit_local = True
+                                if mapped:
+                                    new_tokens.append(mapped)
+                            else:
+                                new_tokens.append(tk)
+                        if hit_local:
+                            new_owner = _join_role_tokens(new_tokens)
+                            if new_owner != owner_str:
+                                c_data["负责人"] = new_owner
+                                comp_changed += 1
+
+                todo_all = cfg.setdefault("PM_TODO_LIST", [])
+                for td in todo_all:
+                    people_raw = str(td.get("关联人员", "")).strip()
+                    if not people_raw:
+                        continue
+                    tokens = _split_role_tokens(people_raw)
+                    if not tokens:
+                        continue
+                    new_tokens = []
+                    hit_local = False
+                    for tk in tokens:
+                        mapped, hit = _map_token(tk)
+                        if hit:
+                            hit_local = True
+                            if mapped:
+                                new_tokens.append(mapped)
+                        else:
+                            new_tokens.append(tk)
+                    if hit_local:
+                        new_people = _join_role_tokens(new_tokens)
+                        if new_people != people_raw:
+                            td["关联人员"] = new_people
+                            todo_people_changed += 1
+
+                raw_extra = cfg.get("TODO_EXTRA_ROLE_PEOPLE", [])
+                if isinstance(raw_extra, str):
+                    raw_extra = split_people_text(raw_extra)
+                if not isinstance(raw_extra, list):
+                    raw_extra = []
+                new_extra = []
+                for tk in raw_extra:
+                    mapped, hit = _map_token(tk)
+                    if hit:
+                        extra_changed += 1
+                        if mapped:
+                            new_extra.append(mapped)
+                    else:
+                        new_extra.append(str(tk).strip())
+                cfg["TODO_EXTRA_ROLE_PEOPLE"] = list(dict.fromkeys([x for x in new_extra if str(x).strip()]))
+
+                if comp_changed or todo_people_changed or extra_changed:
+                    sync_save_db()
+                    st.success(
+                        f"✅ 已完成职能-人名维护：部件修正 {comp_changed} 处，"
+                        f"匹配组合 {token_changed} 条，To do人员修正 {todo_people_changed} 条，"
+                        f"扩展词库处理 {extra_changed} 条。"
+                    )
+                    st.rerun()
+                else:
+                    st.info("命中了组合，但未产生实际变更。")
 
     with st.expander("⏱️ 全局计划排期默认基线"):
         st.info("设定各阶段的默认目标天数。")
