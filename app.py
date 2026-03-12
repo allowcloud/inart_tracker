@@ -235,6 +235,10 @@ QUOTE_ITEM_DEFAULTS = ["生产价", "衣服+皮布件", "头+装配", "模具费
 REVIEW_TYPE_OPTIONS = ["(无)", "2D提审", "3D提审", "实物提审", "包装提审"]
 REVIEW_RESULT_OPTIONS = ["(无)", "待反馈", "通过", "打回"]
 
+PROJECT_RATIO_OPTIONS = ["1/1", "1/3", "1/4", "1/6", "1/12"]
+GARMENT_STAGES = ["Follow Global", "Design", "Sampling", "Under Review", "Review Passed", "Pre-Mass", "Mass Done"]
+PRINT_TRACK_STATUS_OPTIONS = ["Pending Arrival", "Arrived/Need Feedback", "Feedback Sent", "Rework In Progress", "Signed Off"]
+
 DEFAULT_SYS_CFG = {
     "标准部件": ["头雕(表情)", "素体", "手型", "服装", "配件", "地台", "包装"],
     "标准阶段": ["立项", "建模(含打印/签样)", "涂装", "设计", "工程拆件", "手板/结构板", "官图", "工厂复样(含胶件/上色等)", "大货", "⏸️ 暂停/搁置", "✅ 已完成(结束)"],
@@ -243,6 +247,7 @@ DEFAULT_SYS_CFG = {
     "项目别名": {},
     "AI_COMP_KW":  {},
     "AI_STAGE_KW": {}
+    ,"PROJECT_TEMPLATE": {"default_ratio": "1/6", "default_ip_owner": "", "ratio_options": PROJECT_RATIO_OPTIONS.copy()}
 }
 DEFAULT_DB = {"系统配置": DEFAULT_SYS_CFG}
 
@@ -567,6 +572,8 @@ def _ensure_db_shape(db_obj):
         d.setdefault("Milestone", "待立项")
         d.setdefault("Target", "TBD")
         d.setdefault("发货区间", "")
+        d.setdefault("ratio_preset", "1/6")
+        d.setdefault("ip_owner", "")
         if not isinstance(d.get("计划排期"), list):
             d["计划排期"] = []
         if not isinstance(d.get("周会备注"), list):
@@ -577,6 +584,10 @@ def _ensure_db_shape(db_obj):
             d["发货数据"] = {}
         if not isinstance(d.get("成本数据"), dict):
             d["成本数据"] = {}
+        if not isinstance(d.get("print_tracking"), list):
+            d["print_tracking"] = []
+        if not isinstance(d.get("garment_flow"), dict):
+            d["garment_flow"] = {}
     return db_obj
 
 
@@ -1853,28 +1864,45 @@ def register_extra_role_people(raw_people_tokens):
     return added
 
 
-def create_project_shell_if_missing(project_name, owner_name=""):
-    proj = str(project_name or "").strip()
-    if not proj or proj == "系统配置":
-        return False
-    if proj in db and isinstance(db.get(proj), dict):
-        return False
+def build_project_shell(owner_name="", ratio_preset="", ip_owner=""):
+    cfg = db.get("系统配置", {}) if isinstance(db, dict) else {}
+    tpl = cfg.get("PROJECT_TEMPLATE", {}) if isinstance(cfg, dict) else {}
+    ratio_opts = tpl.get("ratio_options", PROJECT_RATIO_OPTIONS)
+    if not isinstance(ratio_opts, list) or not ratio_opts:
+        ratio_opts = PROJECT_RATIO_OPTIONS
+
     owner = str(owner_name or "").strip() or "Mo"
-    db[proj] = {
+    ratio = str(ratio_preset or "").strip() or str(tpl.get("default_ratio", "1/6")).strip() or "1/6"
+    if ratio not in ratio_opts:
+        ratio = ratio_opts[0]
+    ip_text = str(ip_owner or "").strip() or str(tpl.get("default_ip_owner", "")).strip()
+
+    return {
         "负责人": owner,
         "跟单": "",
         "Milestone": "待立项",
         "Target": "TBD",
         "发货区间": "",
+        "ratio_preset": ratio,
+        "ip_owner": ip_text,
         "计划排期": [],
         "周会备注": [],
         "部件列表": {},
         "发货数据": {},
         "成本数据": {},
+        "print_tracking": [],
+        "garment_flow": {"stage": "Follow Global", "records": []},
     }
+
+
+def create_project_shell_if_missing(project_name, owner_name="", ratio_preset="", ip_owner=""):
+    proj = str(project_name or "").strip()
+    if not proj or proj == "系统配置":
+        return False
+    if proj in db and isinstance(db.get(proj), dict):
+        return False
+    db[proj] = build_project_shell(owner_name=owner_name, ratio_preset=ratio_preset, ip_owner=ip_owner)
     return True
-
-
 def split_people_text(raw_text):
     return [x.strip() for x in re.split(r'[,，;；、/|\n]+', str(raw_text or "")) if x.strip()]
 
@@ -2613,17 +2641,32 @@ def render_pm_todo_manager(valid_projs, current_pm):
 
         resolved_ref_proj_list = [x for x in todo_ref_projs if x and x != todo_new_proj_option]
         new_proj_name = ""
-        new_proj_owner = current_pm if current_pm != "所有人" else (owner_pool[0] if owner_pool else "Mo")
+        all_view = "所有人"
+        new_proj_owner = current_pm if current_pm != all_view else (owner_pool[0] if owner_pool else "Mo")
+        tpl_cfg = db.get("系统配置", {}).get("PROJECT_TEMPLATE", {}) if isinstance(db.get("系统配置", {}), dict) else {}
+        ratio_opts = tpl_cfg.get("ratio_options", PROJECT_RATIO_OPTIONS)
+        if not isinstance(ratio_opts, list) or not ratio_opts:
+            ratio_opts = PROJECT_RATIO_OPTIONS
+        default_ratio = str(tpl_cfg.get("default_ratio", "1/6")).strip() or "1/6"
+        if default_ratio not in ratio_opts:
+            default_ratio = ratio_opts[0]
+        new_proj_ratio = default_ratio
+        new_proj_ip_owner = str(tpl_cfg.get("default_ip_owner", "")).strip()
+
         if todo_new_proj_option in todo_ref_projs:
-            np1, np2 = st.columns([2.2, 1.2])
+            np1, np2, np3, np4 = st.columns([1.7, 1.0, 0.9, 1.4])
             with np1:
-                new_proj_name = st.text_input("新增项目名称", key="todo_new_proj_name", placeholder="例：1/6 新IP")
+                new_proj_name = st.text_input("新增项目名", key="todo_new_proj_name", placeholder="例：1/6 New IP")
             with np2:
-                if current_pm == "所有人":
+                if current_pm == all_view:
                     new_proj_owner = st.selectbox("新增项目负责人", owner_pool or ["Mo"], key="todo_new_proj_owner")
                 else:
                     new_proj_owner = current_pm
                     st.text_input("新增项目负责人", value=current_pm, key="todo_new_proj_owner_ro", disabled=True)
+            with np3:
+                new_proj_ratio = st.selectbox("Scale", ratio_opts, index=ratio_opts.index(default_ratio) if default_ratio in ratio_opts else 0, key="todo_new_proj_ratio")
+            with np4:
+                new_proj_ip_owner = st.text_input("IP Owner", value=new_proj_ip_owner, key="todo_new_proj_ip_owner", placeholder="optional")
             if str(new_proj_name).strip():
                 resolved_ref_proj_list.append(str(new_proj_name).strip())
 
@@ -2673,7 +2716,12 @@ def render_pm_todo_manager(valid_projs, current_pm):
 
                 created_projects = []
                 for linked_proj in resolved_ref_proj_list:
-                    if create_project_shell_if_missing(linked_proj, new_proj_owner):
+                    if create_project_shell_if_missing(
+                        linked_proj,
+                        new_proj_owner,
+                        ratio_preset=new_proj_ratio,
+                        ip_owner=new_proj_ip_owner,
+                    ):
                         created_projects.append(linked_proj)
 
                 added_people = register_extra_role_people(split_people_text(final_people))
@@ -3354,6 +3402,99 @@ def render_pm_batch_fastlog_integrated(visible_projects, default_proj=""):
             "提审轮次": st.column_config.NumberColumn("提审轮次", min_value=1, step=1),
         }
     )
+
+    if st.button("🪄 一键生成 To do（仅未来日期）", key="pm_batch_todo_only"):
+        SYS_KEY = "系统配置"
+        TASK_KEY = "任务"
+        DONE_KEY = "完成"
+        CPDDL_KEY = "CPDDL"
+        CP_KEY = "CP"
+        DDL_KEY = "DDL"
+        PROJ_KEY = "关联项目"
+        PROJ_LIST_KEY = "关联项目列表"
+        PEOPLE_KEY = "关联人员"
+        VIEW_KEY = "所属视角"
+        CREATOR_VIEW_KEY = "创建者视角"
+        CREATE_KEY = "创建"
+        DONE_TIME_KEY = "完成时间"
+
+        cfg = db.setdefault(SYS_KEY, {})
+        todo_all = cfg.setdefault("PM_TODO_LIST", [])
+        created = 0
+        updated = 0
+
+        for _, row in edited_df.iterrows():
+            proj_raw = str(row.get("项目", "")).strip()
+            proj = resolve_alias_project(proj_raw, PROJECT_ALIAS_MAP)
+            if proj not in db or proj == SYS_KEY or MANUAL_PICK in proj_raw:
+                continue
+            evt = str(row.get("事件", "")).strip()
+            if not evt:
+                continue
+
+            due_dt = extract_deadline_from_text(evt, ref_date=rec_date)
+            if (not isinstance(due_dt, datetime.date)) or due_dt < datetime.date.today():
+                continue
+
+            body = re.sub(r"(20\d{2})[-/](\d{1,2})[-/](\d{1,2})", "", evt)
+            body = re.sub(r"(^|\D)(\d{1,2})/(\d{1,2})(\D|$)", " ", body)
+            task = str(body).strip(" ?,;?|:-") or evt
+            cpddl_txt = f"{due_dt.month}/{due_dt.day} {task}"
+
+            hit = None
+            for td in todo_all:
+                if bool((td or {}).get(DONE_KEY)):
+                    continue
+                if not todo_matches_project(td, proj):
+                    continue
+                if norm_text(str((td or {}).get(TASK_KEY, ""))) == norm_text(task):
+                    hit = td
+                    break
+
+            if hit:
+                changed = False
+                if str(hit.get(DDL_KEY, "")).strip() != str(due_dt):
+                    hit[DDL_KEY] = str(due_dt)
+                    changed = True
+                if str(hit.get(CPDDL_KEY, "")).strip() != cpddl_txt:
+                    hit[CPDDL_KEY] = cpddl_txt
+                    hit[CP_KEY] = cpddl_txt
+                    changed = True
+                old_proj = normalize_todo_project_list(hit.get(PROJ_LIST_KEY, []))
+                new_proj = list(dict.fromkeys(old_proj + [proj]))
+                if old_proj != new_proj:
+                    hit[PROJ_LIST_KEY] = new_proj
+                    hit[PROJ_KEY] = new_proj[0] if new_proj else ""
+                    changed = True
+                if changed:
+                    updated += 1
+                continue
+
+            owner = str(db.get(proj, {}).get("负责人", "")).strip() or "未分配"
+            people = str(db.get(proj, {}).get("跟单", "")).strip()
+            todo_all.append({
+                "_id": uuid.uuid4().hex[:10],
+                TASK_KEY: task,
+                CPDDL_KEY: cpddl_txt,
+                CP_KEY: cpddl_txt,
+                DDL_KEY: str(due_dt),
+                DONE_KEY: False,
+                PROJ_KEY: proj,
+                PROJ_LIST_KEY: [proj],
+                PEOPLE_KEY: people,
+                VIEW_KEY: owner,
+                CREATOR_VIEW_KEY: owner,
+                CREATE_KEY: str(datetime.date.today()),
+                DONE_TIME_KEY: "",
+                "历史版本": [],
+            })
+            created += 1
+
+        if created or updated:
+            sync_save_db(SYS_KEY)
+            st.success(f"To do synced: created {created}, updated {updated}.")
+        else:
+            st.info("No future-date rows detected for To do generation.")
 
     st.markdown("##### 🖼️ 附件图片")
     files = st.file_uploader("上传图片（可多张）", type=["png", "jpg", "jpeg"], accept_multiple_files=True, key="pm_batch_files")
@@ -4124,6 +4265,208 @@ def render_small_scale_signoff_board(sel_proj, ui_prefix="small_scale"):
         st.rerun()
 
 
+def _normalize_print_tracking_rows(raw_rows):
+    rows = raw_rows if isinstance(raw_rows, list) else []
+    out = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        day_txt = str(row.get("date", "")).strip() or str(datetime.date.today())
+        try:
+            day_txt = str(datetime.datetime.strptime(day_txt, "%Y-%m-%d").date())
+        except Exception:
+            day_txt = str(datetime.date.today())
+        round_name = str(row.get("round", "")).strip()
+        if not round_name:
+            continue
+        status = str(row.get("status", "Pending Arrival")).strip()
+        if status not in PRINT_TRACK_STATUS_OPTIONS:
+            status = PRINT_TRACK_STATUS_OPTIONS[0]
+        slot = str(row.get("slot", "AM")).strip()
+        if slot not in ["AM", "PM", "Not Held"]:
+            slot = "AM"
+        out.append({
+            "date": day_txt,
+            "round": round_name,
+            "status": status,
+            "slot": slot,
+            "attendees": str(row.get("attendees", "")).strip(),
+            "note": str(row.get("note", "")).strip(),
+        })
+    return sorted(out, key=lambda x: (x.get("date", ""), x.get("round", "")), reverse=True)
+
+
+def render_print_tracking_board(sel_proj, ui_prefix="print_track"):
+    comp_key = "部件列表"
+    global_comp = "全局进度"
+    stage_key = "主流程"
+    log_key = "日志流"
+    date_key = "日期"
+    flow_key = "流转"
+    process_key = "工序"
+    event_key = "事件"
+
+    st.markdown("##### 🧪 Print Tracking")
+    st.caption("Track T1~TN / M rounds and optionally sync entries to project logs.")
+
+    rows = _normalize_print_tracking_rows(db.get(sel_proj, {}).get("print_tracking", []))
+    comp_map = db.get(sel_proj, {}).get(comp_key, {})
+    comp_options = [global_comp] + [c for c in comp_map.keys() if c != global_comp]
+
+    c1, c2, c3, c4 = st.columns([1.0, 1.0, 1.4, 1.0])
+    with c1:
+        add_date = st.date_input("Date", datetime.date.today(), key=f"{ui_prefix}_date")
+    with c2:
+        add_round = st.text_input("Round", key=f"{ui_prefix}_round", placeholder="T1 / T2 / M")
+    with c3:
+        add_status = st.selectbox("Status", PRINT_TRACK_STATUS_OPTIONS, key=f"{ui_prefix}_status")
+    with c4:
+        add_slot = st.selectbox("Feedback Slot", ["AM", "PM", "Not Held"], key=f"{ui_prefix}_slot")
+
+    d1, d2 = st.columns([2.5, 1.5])
+    with d1:
+        add_attendees = st.text_input("Attendees", value="ENG / VEN / Designer / Yezi / Godo", key=f"{ui_prefix}_att")
+    with d2:
+        sync_comp = st.selectbox("Sync Component", comp_options, key=f"{ui_prefix}_comp")
+
+    add_note = st.text_input("Note", key=f"{ui_prefix}_note", placeholder="Key findings / actions")
+    sync_log = st.checkbox("Sync to component log", value=True, key=f"{ui_prefix}_sync")
+
+    if st.button("➕ Add Print Round", key=f"{ui_prefix}_add", type="primary"):
+        if not str(add_round).strip():
+            st.warning("Please fill round name (e.g. T1 / T2 / M).")
+        else:
+            rows.append({
+                "date": str(add_date),
+                "round": str(add_round).strip(),
+                "status": add_status,
+                "slot": add_slot,
+                "attendees": str(add_attendees).strip(),
+                "note": str(add_note).strip(),
+            })
+            db[sel_proj]["print_tracking"] = _normalize_print_tracking_rows(rows)
+
+            if sync_log:
+                target_comp = str(sync_comp).strip() or global_comp
+                comp_data = db[sel_proj].setdefault(comp_key, {})
+                if target_comp not in comp_data:
+                    comp_data[target_comp] = {stage_key: STAGES_UNIFIED[0], log_key: []}
+                evt = f"[PrintTracking][{str(add_round).strip()}] {add_status}" + (f" | {str(add_note).strip()}" if str(add_note).strip() else "")
+                comp_data[target_comp].setdefault(log_key, []).append({
+                    date_key: str(add_date),
+                    flow_key: "PrintTracking",
+                    process_key: "建模(含打印/签样)",
+                    event_key: evt,
+                })
+                comp_data[target_comp][stage_key] = "建模(含打印/签样)"
+
+            sync_save_db(sel_proj)
+            st.success("Print tracking saved.")
+            st.rerun()
+
+    if rows:
+        df = pd.DataFrame(rows)
+        edited_df = st.data_editor(df, num_rows="dynamic", width='stretch', hide_index=True, key=f"{ui_prefix}_editor")
+        if st.button("💾 Save Print Table", key=f"{ui_prefix}_save"):
+            db[sel_proj]["print_tracking"] = _normalize_print_tracking_rows(edited_df.to_dict("records"))
+            sync_save_db(sel_proj)
+            st.success("Print table saved.")
+            st.rerun()
+
+
+def _normalize_garment_flow(raw_obj):
+    obj = raw_obj if isinstance(raw_obj, dict) else {}
+    stage = str(obj.get("stage", "Follow Global")).strip()
+    if stage not in GARMENT_STAGES:
+        stage = "Follow Global"
+    rows = obj.get("records", []) if isinstance(obj.get("records", []), list) else []
+    out = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        day_txt = str(row.get("date", "")).strip() or str(datetime.date.today())
+        try:
+            day_txt = str(datetime.datetime.strptime(day_txt, "%Y-%m-%d").date())
+        except Exception:
+            day_txt = str(datetime.date.today())
+        out.append({
+            "date": day_txt,
+            "stage": str(row.get("stage", stage)).strip() or stage,
+            "note": str(row.get("note", "")).strip(),
+        })
+    return {"stage": stage, "records": sorted(out, key=lambda x: x.get("date", ""), reverse=True)}
+
+
+def render_garment_special_board(sel_proj, ui_prefix="garment_flow"):
+    comp_key = "部件列表"
+    stage_key = "主流程"
+    log_key = "日志流"
+    date_key = "日期"
+    flow_key = "流转"
+    process_key = "工序"
+    event_key = "事件"
+
+    st.markdown("##### 👔 Garment Flow")
+    st.caption("Dedicated garment flow, with optional sync to garment component logs.")
+
+    flow = _normalize_garment_flow(db.get(sel_proj, {}).get("garment_flow", {}))
+    curr_stage = flow.get("stage", "Follow Global")
+
+    x1, x2 = st.columns([1.3, 2.7])
+    with x1:
+        new_stage = st.selectbox("Garment Stage", GARMENT_STAGES, index=GARMENT_STAGES.index(curr_stage) if curr_stage in GARMENT_STAGES else 0, key=f"{ui_prefix}_stage")
+    with x2:
+        note = st.text_input("Stage Note", key=f"{ui_prefix}_note", placeholder="What changed in this step")
+
+    y1, y2 = st.columns([1.2, 2.8])
+    with y1:
+        action_date = st.date_input("Date", datetime.date.today(), key=f"{ui_prefix}_date")
+    with y2:
+        sync_comp_log = st.checkbox("Sync to garment component log", value=True, key=f"{ui_prefix}_sync")
+
+    if st.button("💾 Save Garment Stage", key=f"{ui_prefix}_save", type="primary"):
+        flow["stage"] = new_stage
+        flow.setdefault("records", []).append({"date": str(action_date), "stage": new_stage, "note": str(note).strip()})
+
+        if sync_comp_log and new_stage != "Follow Global":
+            stage_design = next((s for s in STAGES_UNIFIED if "设计" in s), STAGES_UNIFIED[0])
+            stage_sample = next((s for s in STAGES_UNIFIED if "建模" in s), STAGES_UNIFIED[0])
+            stage_review = next((s for s in STAGES_UNIFIED if "官图" in s), STAGES_UNIFIED[0])
+            stage_pre_mass = next((s for s in STAGES_UNIFIED if "复样" in s), STAGES_UNIFIED[0])
+            stage_mass = next((s for s in STAGES_UNIFIED if "大货" in s), STAGES_UNIFIED[-1])
+
+            stage_map = {
+                "Design": stage_design,
+                "Sampling": stage_sample,
+                "Under Review": stage_review,
+                "Review Passed": stage_review,
+                "Pre-Mass": stage_pre_mass,
+                "Mass Done": stage_mass,
+            }
+            target_stage = stage_map.get(new_stage, stage_design)
+            comp_name = next((k for k in db[sel_proj].get(comp_key, {}).keys() if "服装" in str(k)), "服装")
+            comp_data = db[sel_proj].setdefault(comp_key, {})
+            if comp_name not in comp_data:
+                comp_data[comp_name] = {stage_key: STAGES_UNIFIED[0], log_key: []}
+            evt = f"[GarmentFlow] stage={new_stage}" + (f" | {str(note).strip()}" if str(note).strip() else "")
+            comp_data[comp_name].setdefault(log_key, []).append({
+                date_key: str(action_date),
+                flow_key: "GarmentFlow",
+                process_key: target_stage,
+                event_key: evt,
+            })
+            comp_data[comp_name][stage_key] = target_stage
+
+        db[sel_proj]["garment_flow"] = flow
+        sync_save_db(sel_proj)
+        st.success("Garment flow saved.")
+        st.rerun()
+
+    rows = flow.get("records", [])
+    if rows:
+        st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
+
+
 def render_project_inventory_ledger(sel_proj, key_prefix="inv"):
     inv_data = db[sel_proj].get("发货数据", {"总单量": 0, "批次明细": []})
     c1, c2 = st.columns([1, 2])
@@ -4806,11 +5149,8 @@ def render_rd_csv_import_panel(expanded=False):
                             count_update = 0
                             for p_name, tgt_val in target_map.items():
                                 if p_name not in db:
-                                    db[p_name] = {
-                                        "负责人": "", "跟单": "", "Milestone": "待立项",
-                                        "Target": tgt_val, "发货区间": "",
-                                        "部件列表": {}, "发货数据": {}, "成本数据": {}
-                                    }
+                                    db[p_name] = build_project_shell(owner_name="Mo")
+                                    db[p_name]["Target"] = tgt_val
                                     count_new += 1
                                 else:
                                     if str(db[p_name].get("Target", "")).strip() != tgt_val:
@@ -5146,8 +5486,74 @@ if menu == MENU_DASHBOARD:
     st.divider()
     render_dashboard_plan_board(valid_projs)
 
+    st.divider()
+    st.subheader("Weekly Focus")
+    SYS_KEY = "系统配置"
+    DONE_KEY = "完成"
+    DONE_TIME_KEY = "完成时间"
+    TASK_KEY = "任务"
+    STATE_KEY = "状态"
+    PROJECT_KEY = "项目"
+    STAGE_KEY = "阶段"
 
-    st.subheader("📋 大盘状态明细表")
+    todo_all = db.get(SYS_KEY, {}).get("PM_TODO_LIST", []) if isinstance(db.get(SYS_KEY, {}), dict) else []
+    todos_visible = [td for td in todo_all if todo_visible_for_view(td, current_pm)]
+    todo_overdue = [td for td in todos_visible if (not td.get(DONE_KEY)) and todo_due_date(td) and todo_due_date(td) < datetime.date.today()]
+    todo_soon = [td for td in todos_visible if (not td.get(DONE_KEY)) and todo_due_date(td) and 0 <= (todo_due_date(td) - datetime.date.today()).days <= 3]
+
+    plan_rows, soon_cnt, delay_cnt = build_plan_board_rows(valid_projs)
+    week_start = datetime.date.today() - datetime.timedelta(days=datetime.date.today().weekday())
+    week_end = week_start + datetime.timedelta(days=6)
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Todo Overdue", len(todo_overdue))
+    m2.metric("Todo Due <=3d", len(todo_soon))
+    m3.metric("Plan Soon", int(soon_cnt))
+    m4.metric("Plan Delay", int(delay_cnt))
+
+    focus_rows = []
+    for td in todo_overdue[:6]:
+        focus_rows.append({"Type": "Todo Overdue", "Project": todo_project_text(td), "Detail": str(td.get(TASK_KEY, "")).strip()})
+    for row in plan_rows:
+        if row.get(STATE_KEY) == "计划-Delay":
+            focus_rows.append({"Type": "Plan Delay", "Project": str(row.get(PROJECT_KEY, "")).strip(), "Detail": str(row.get(STAGE_KEY, "")).strip()})
+    if focus_rows:
+        st.dataframe(pd.DataFrame(focus_rows[:12]), width='stretch', hide_index=True)
+    else:
+        st.caption("No high-priority alerts this week.")
+
+    if st.button("Generate Weekly Notes", key="dash_weekly_digest_gen"):
+        done_this_week = 0
+        for td in todos_visible:
+            if not bool(td.get(DONE_KEY)):
+                continue
+            d_done = parse_date_safe(td.get(DONE_TIME_KEY, ""))
+            if d_done and week_start <= d_done <= week_end:
+                done_this_week += 1
+
+        lines = [
+            f"Weekly Notes ({week_start} ~ {week_end})",
+            "",
+            f"- Todo overdue: {len(todo_overdue)}",
+            f"- Todo due within 3 days: {len(todo_soon)}",
+            f"- Plan soon: {soon_cnt}",
+            f"- Plan delay: {delay_cnt}",
+            f"- Todo completed this week: {done_this_week}",
+            "",
+            "Top focus items:",
+        ]
+        if focus_rows:
+            for row in focus_rows[:10]:
+                lines.append(f"- [{row['Type']}] {row['Project']} | {row['Detail']}")
+        else:
+            lines.append("- None")
+        st.session_state["dash_weekly_digest_text"] = "\n".join(lines)
+
+    digest_text = str(st.session_state.get("dash_weekly_digest_text", "")).strip()
+    if digest_text:
+        st.text_area("Weekly Notes Draft", value=digest_text, height=240, key="dash_weekly_digest_output")
+
+    st.subheader("📋 全局大盘明细")
     if table_data:
         df_table = pd.DataFrame(table_data)
         df_table["开定延迟预警"] = ""
@@ -5677,25 +6083,37 @@ elif menu == MENU_SPECIFIC:
         st.session_state.new_proj_mode = not st.session_state.get('new_proj_mode', False)
     if st.session_state.get('new_proj_mode', False):
         with st.container(border=True):
-            c_n1, c_n2, c_n3 = st.columns(3)
-            with c_n1: new_p  = st.text_input("新项目名称 (如: 1/6 新蝙蝠侠)")
-            with c_n2: new_pm = st.selectbox("分配负责人", ["Mo", "越", "袁"], index=0)
+            tpl_cfg = db.get("系统配置", {}).get("PROJECT_TEMPLATE", {}) if isinstance(db.get("系统配置", {}), dict) else {}
+            ratio_opts = tpl_cfg.get("ratio_options", PROJECT_RATIO_OPTIONS)
+            if not isinstance(ratio_opts, list) or not ratio_opts:
+                ratio_opts = PROJECT_RATIO_OPTIONS
+            default_ratio = str(tpl_cfg.get("default_ratio", "1/6")).strip() or "1/6"
+            if default_ratio not in ratio_opts:
+                default_ratio = ratio_opts[0]
+
+            c_n1, c_n2, c_n3, c_n4, c_n5 = st.columns([2.0, 1.0, 1.0, 1.4, 1.0])
+            with c_n1:
+                new_p = st.text_input("Project Name (e.g. 1/6 Batman)")
+            with c_n2:
+                new_pm = st.selectbox("Owner", [x for x in pm_list if x != "所有人"], index=0)
             with c_n3:
+                new_ratio = st.selectbox("Scale", ratio_opts, index=ratio_opts.index(default_ratio) if default_ratio in ratio_opts else 0)
+            with c_n4:
+                new_ip_owner = st.text_input("IP Owner", value=str(tpl_cfg.get("default_ip_owner", "")).strip(), placeholder="optional")
+            with c_n5:
                 st.write("")
-                if st.button("✅ 确认创建", type="primary"):
+                if st.button("创建", type="primary"):
                     if new_p and new_p not in db:
-                        db[new_p] = {"负责人": new_pm, "跟单": "", "Milestone": "待立项",
-                                     "Target": "TBD", "发货区间": "",
-                                     "部件列表": {}, "发货数据": {}, "成本数据": {}}
+                        db[new_p] = build_project_shell(new_pm, new_ratio, new_ip_owner)
                         sync_save_db(new_p)
-                        st.success(f"建档成功！已分配给 {new_pm}")
-                        st.toast(f"📌 已创建项目：{new_p}")
+                        st.success(f"Created and assigned to {new_pm}")
+                        st.toast(f"✅ Created: {new_p}")
                         st.session_state.new_proj_mode = False
                         st.rerun()
                     elif new_p in db:
-                        st.warning("项目已存在，请更换名称。")
+                        st.warning("Project already exists.")
                     else:
-                        st.error("项目名称不能为空。")
+                        st.error("Project name is required.")
 
     todo_list = render_pm_todo_manager(valid_projs, current_pm)
     st.divider()
@@ -6443,13 +6861,19 @@ elif menu == MENU_SPECIFIC:
                     todo_msg = f"；联动待办 {len(linked_todo_titles)} 条" if linked_todo_titles else ""
                     st.success(f"记录已保存{todo_msg}。")
                     st.rerun()
-        with st.expander("🧪 3. 小比例签板流程", expanded=False):
+        with st.expander("🧪 3. Print Tracking", expanded=False):
+            render_print_tracking_board(sel_proj, ui_prefix=f"pm_print_{norm_text(sel_proj)[:24]}")
+
+        with st.expander("👔 4. Garment Flow", expanded=False):
+            render_garment_special_board(sel_proj, ui_prefix=f"pm_garment_{norm_text(sel_proj)[:24]}")
+
+        with st.expander("🧩 5. 小比例签板", expanded=False):
             render_small_scale_signoff_board(sel_proj, ui_prefix=f"pm_small_{norm_text(sel_proj)[:24]}")
 
-        with st.expander("📦 4. 包装&入库", expanded=False):
+        with st.expander("📦 6. 包装与入库", expanded=False):
             render_pm_packing_inventory_integrated(sel_proj)
 
-        with st.expander("💰 5. 成本面板", expanded=False):
+        with st.expander("💰 7. 成本台账", expanded=False):
             render_pm_cost_integrated(sel_proj)
 # ==========================================
 # 模块 3：AI 速记
@@ -6666,11 +7090,7 @@ elif menu == MENU_FASTLOG:
                         new_p_pm   = st.selectbox("负责人", ["Mo", "越", "袁"], key=f"new_ppm_{i}")
                         if st.button("✅ 建档并选中", key=f"new_pbtn_{i}", type="primary"):
                             if new_p_name and new_p_name not in db:
-                                db[new_p_name] = {
-                                    "负责人": new_p_pm, "跟单": "", "Milestone": "待立项",
-                                    "Target": "TBD", "发货区间": "",
-                                    "部件列表": {}, "发货数据": {}, "成本数据": {}
-                                }
+                                db[new_p_name] = build_project_shell(owner_name=new_p_pm)
                                 sync_save_db(new_p_name)
                                 # 更新识别结果为新建的项目
                                 st.session_state.parsed_logs[i]['识别项目'] = new_p_name
@@ -8282,6 +8702,7 @@ elif menu == MENU_GUIDE:
         st.markdown(
             "每次收工建议下载全量备份（数据+图片）；换设备后通过上传备份一键恢复。"
         )
+
 
 
 
