@@ -6039,103 +6039,213 @@ elif menu == MENU_SPECIFIC:
     st.divider()
 
     st.markdown("**2. 细分配件交接工作台**")
-    st.caption("说明：提审是独立维度，不会自动改变主阶段；仅做一致性校验提醒。")
+    st.caption("定位：文件流转看板。默认只保留核心字段；提审与强制提交放在高级选项里。")
+
     fk = st.session_state.form_key
     handoff_todos = [
         x for x in db.get("系统配置", {}).get("PM_TODO_LIST", [])
         if (not x.get("完成")) and todo_visible_for_view(x, current_pm) and todo_matches_project(x, sel_proj)
     ]
     handoff_todo_map = {str(x.get("_id", "")).strip(): x for x in handoff_todos}
+
     prefill = st.session_state.get("todo_handoff_prefill")
     if prefill and str(prefill.get("项目", "")).strip() == sel_proj:
         if prefill.get("部件"):
-            st.session_state[f"ms_{fk}"] = prefill.get("部件")
+            st.session_state[f"wb_comp_{fk}"] = prefill.get("部件")
         if prefill.get("阶段") in STAGES_UNIFIED:
-            st.session_state[f"stg_{fk}"] = prefill.get("阶段")
+            st.session_state[f"wb_stage_{fk}"] = prefill.get("阶段")
         if prefill.get("内容"):
-            st.session_state[f"txt_{fk}"] = prefill.get("内容")
+            st.session_state[f"wb_text_{fk}"] = prefill.get("内容")
         if prefill.get("todo_ids"):
-            st.session_state[f"todo_link_prefill_ids_{fk}"] = [
+            st.session_state[f"wb_todo_prefill_ids_{fk}"] = [
                 str(tid).strip() for tid in prefill.get("todo_ids", []) if str(tid).strip()
             ]
-            st.session_state[f"todo_auto_done_{fk}"] = True
+            st.session_state[f"wb_todo_auto_done_{fk}"] = True
         st.session_state.todo_handoff_prefill = None
+
     prefill_ids = [
-        tid for tid in st.session_state.get(f"todo_link_prefill_ids_{fk}", [])
+        tid for tid in st.session_state.get(f"wb_todo_prefill_ids_{fk}", [])
         if tid in handoff_todo_map
     ]
-    st.session_state[f"todo_link_prefill_ids_{fk}"] = prefill_ids
+    st.session_state[f"wb_todo_prefill_ids_{fk}"] = prefill_ids
 
-    existing_comps = list(db[sel_proj].get('部件列表', {}).keys())
-    custom_comps   = sorted([c for c in existing_comps if c not in STD_COMPONENTS and "全局" not in c])
-    all_comps      = ["➕ 新增细分配件...", "🌐 全局进度 (Overall)"] + STD_COMPONENTS + custom_comps
+    existing_comps = list(db[sel_proj].get("部件列表", {}).keys())
+    custom_comps = sorted([c for c in existing_comps if c not in STD_COMPONENTS and "全局" not in c])
+    wb_comp_opts = ["🌐 全局进度 (Overall)"] + STD_COMPONENTS + custom_comps + ["➕ 新增细分配件..."]
+
+    def _collect_timeline_logs(proj_name):
+        rows = []
+        proj_data = db.get(proj_name, {})
+
+        for comp_name, comp_data in proj_data.get("部件列表", {}).items():
+            for lg in comp_data.get("日志流", []):
+                if is_hidden_system_log(lg):
+                    continue
+                evt = str(lg.get("事件", "")).strip()
+                if "[属性更新]" in evt:
+                    continue
+
+                lid = str(lg.get("_id", "")).strip()
+                if not lid:
+                    base = f"{comp_name}|{lg.get('日期','')}|{lg.get('工序','')}|{evt}"
+                    lid = hashlib.md5(base.encode("utf-8", "ignore")).hexdigest()[:16]
+                    lg["_id"] = lid
+
+                imgs = lg.get("图片", [])
+                if not isinstance(imgs, list):
+                    imgs = [imgs] if imgs else []
+
+                rows.append({
+                    "date": str(lg.get("日期", "")),
+                    "source": str(lg.get("流转", "")),
+                    "comp": comp_name,
+                    "stage": str(lg.get("工序", "")),
+                    "text": evt,
+                    "imgs": imgs,
+                    "_log_id": lid,
+                    "_log_ref": lg,
+                })
+
+        for wlog in proj_data.get("workbench_logs", []):
+            if not isinstance(wlog, dict):
+                continue
+            lid = str(wlog.get("_id", "")).strip() or hashlib.md5(str(wlog).encode("utf-8", "ignore")).hexdigest()[:16]
+            imgs = wlog.get("图片", [])
+            if not isinstance(imgs, list):
+                imgs = [imgs] if imgs else []
+            rows.append({
+                "date": str(wlog.get("日期", "")),
+                "source": "工作台",
+                "comp": str(wlog.get("部件", "")).strip(),
+                "stage": "",
+                "text": str(wlog.get("内容", "")).strip(),
+                "imgs": imgs,
+                "_log_id": f"wb_{lid}",
+                "_log_ref": wlog,
+            })
+
+        rows.sort(key=lambda r: (str(r.get("date", "")), str(r.get("_log_id", ""))), reverse=True)
+        return rows
+
+    timeline_logs = _collect_timeline_logs(sel_proj)
+    log_attachments = db[sel_proj].setdefault("log_attachments", {})
+
+    with st.expander("📋 最近日志时间线（可挂图）", expanded=True):
+        if not timeline_logs:
+            st.caption("当前项目暂无可展示日志。")
+        else:
+            for idx, lg in enumerate(timeline_logs[:30]):
+                log_id = str(lg.get("_log_id", "")).strip()
+                log_key = hashlib.md5(log_id.encode("utf-8", "ignore")).hexdigest()[:10]
+                attach_pool = list(log_attachments.get(log_id, [])) + list(lg.get("imgs", []) or [])
+                attach_pool = list(dict.fromkeys([x for x in attach_pool if x]))
+
+                meta = " | ".join([x for x in [str(lg.get("date", "")), str(lg.get("comp", "")), str(lg.get("stage", "")), str(lg.get("source", ""))] if x])
+                st.caption(meta if meta else "-")
+                st.markdown(str(lg.get("text", "")).strip() or "_(无内容)_")
+
+                if attach_pool:
+                    img_cols = st.columns(min(len(attach_pool), 4))
+                    for ii, img_ref in enumerate(attach_pool[:4]):
+                        with img_cols[ii % 4]:
+                            render_image(img_ref, width='stretch')
+
+                open_key = f"wb_attach_open_{sel_proj}"
+                if st.button("📎 给这条挂图", key=f"wb_attach_btn_{sel_proj}_{log_key}"):
+                    st.session_state[open_key] = log_id
+
+                if st.session_state.get(open_key) == log_id:
+                    with st.container(border=True):
+                        up_imgs = st.file_uploader(
+                            "上传图片",
+                            type=["png", "jpg", "jpeg"],
+                            accept_multiple_files=True,
+                            key=f"wb_attach_up_{sel_proj}_{log_key}",
+                        )
+                        try:
+                            from streamlit_paste_button import paste_image_button
+                            paste_res = paste_image_button(
+                                "📋 粘贴截图",
+                                key=f"wb_attach_paste_{sel_proj}_{log_key}",
+                                background_color="#f1f5f9",
+                            )
+                        except ImportError:
+                            paste_res = None
+
+                        csa, csb = st.columns(2)
+                        with csa:
+                            if st.button("💾 保存挂图", key=f"wb_attach_save_{sel_proj}_{log_key}", type="primary"):
+                                new_refs = []
+                                for f in (up_imgs or []):
+                                    ref = save_uploaded_file_ref(f, prefix="wb_attach")
+                                    if ref:
+                                        new_refs.append(ref)
+                                if paste_res is not None and hasattr(paste_res, "image_data") and paste_res.image_data is not None:
+                                    ref = save_image_ref_data(paste_res.image_data, filename="paste.png", prefix="wb_attach")
+                                    if ref:
+                                        new_refs.append(ref)
+
+                                if not new_refs:
+                                    st.warning("请先选择或粘贴图片。")
+                                else:
+                                    old_attach = log_attachments.get(log_id, [])
+                                    if not isinstance(old_attach, list):
+                                        old_attach = [old_attach] if old_attach else []
+                                    merged_attach = list(dict.fromkeys(old_attach + new_refs))
+                                    log_attachments[log_id] = merged_attach
+                                    db[sel_proj]["log_attachments"] = log_attachments
+
+                                    raw_ref = lg.get("_log_ref")
+                                    if isinstance(raw_ref, dict):
+                                        old_imgs = raw_ref.get("图片", [])
+                                        if not isinstance(old_imgs, list):
+                                            old_imgs = [old_imgs] if old_imgs else []
+                                        raw_ref["图片"] = list(dict.fromkeys(old_imgs + new_refs))
+
+                                    sync_save_db(sel_proj)
+                                    st.success(f"已挂图 {len(new_refs)} 张。")
+                                    st.session_state[open_key] = ""
+                                    st.rerun()
+                        with csb:
+                            if st.button("取消", key=f"wb_attach_cancel_{sel_proj}_{log_key}"):
+                                st.session_state[open_key] = ""
+                                st.rerun()
+                st.divider()
 
     with st.container(border=True):
-        st.markdown("**(1) 基础流转信息**")
-        c1, c2, c3, c4, c5, c6, c7 = st.columns([1, 1, 1, 1, 1, 1, 0.9])
-        with c1: selected_comps_raw = st.multiselect("操作部件", all_comps, default=[], key=f"ms_{fk}")
-        with c2: evt_type  = st.selectbox("记录类型", ["🔄 内部进展/正常流转", "⬅️ 收到反馈/被打回"], key=f"evt_{fk}")
-        with c3: new_stage = st.selectbox("🎯 目标工序阶段", STAGES_UNIFIED, key=f"stg_{fk}")
-        with c4: handoff   = st.selectbox("关联媒介", HANDOFF_METHODS, key=f"hd_{fk}")
-        with c5: review_type = st.selectbox("🧾 提审类型", REVIEW_TYPE_OPTIONS, key=f"rv_type_{fk}")
-        with c6: review_result = st.selectbox("🧾 提审结果", REVIEW_RESULT_OPTIONS, key=f"rv_res_{fk}")
-        with c7: review_round = st.number_input("提审轮次", min_value=1, value=1, step=1, key=f"rv_round_{fk}")
+        st.markdown("**✍️ 新建一条流转记录**")
 
-        comps_to_process = selected_comps_raw if selected_comps_raw else ["🌐 全局进度 (Overall)"]
-        new_comp_name    = ""
-        if "➕ 新增细分配件..." in comps_to_process:
-            sub_cat       = st.selectbox("所属主分类", STD_COMPONENTS, key=f"ncat_{fk}")
-            sub_name      = st.text_input("细分名称", key=f"nname_{fk}")
-            new_comp_name = f"{sub_cat} - {sub_name}" if sub_name else ""
+        a1, a2, a3, a4 = st.columns([1.3, 1.1, 1.2, 1.2])
+        with a1:
+            wb_comp_raw = st.selectbox("操作部件", wb_comp_opts, key=f"wb_comp_{fk}")
+        with a2:
+            wb_stage = st.selectbox("目标阶段", STAGES_UNIFIED, key=f"wb_stage_{fk}")
+        with a3:
+            wb_evt_type = st.selectbox("记录类型", ["🔄 内部进展/正常流转", "⬅️ 收到反馈/被打回"], key=f"wb_evt_{fk}")
+        with a4:
+            wb_handoff = st.selectbox("关联媒介", HANDOFF_METHODS, key=f"wb_handoff_{fk}")
 
-        st.markdown("**(2) 细分角色分配**")
-        all_historical_names = set()
-        for p_data in db.values():
-            if not isinstance(p_data, dict): continue
-            for c_data in p_data.get('部件列表', {}).values():
-                for pair in re.split(r'[,，|]', c_data.get('负责人', '')):
-                    pair = pair.strip()
-                    if pair and pair != '未分配':
-                        if '-' in pair:   all_historical_names.add(pair.split('-', 1)[-1].strip())
-                        elif ':' in pair: all_historical_names.add(pair.split(':', 1)[-1].strip())
-                        else:             all_historical_names.add(pair)
-        base_options = ["(留空/暂不分配)"] + sorted(list(all_historical_names)) + ["➕ 手动输入新成员..."]
+        wb_new_comp_name = ""
+        if wb_comp_raw == "➕ 新增细分配件...":
+            n1, n2 = st.columns([1.2, 2.2])
+            with n1:
+                wb_sub_cat = st.selectbox("所属主分类", STD_COMPONENTS, key=f"wb_new_cat_{fk}")
+            with n2:
+                wb_sub_name = st.text_input("细分名称", key=f"wb_new_name_{fk}", placeholder="例：头雕-咬牙")
+            wb_new_comp_name = f"{wb_sub_cat} - {wb_sub_name}" if str(wb_sub_name).strip() else ""
 
-        ref_c         = comps_to_process[0] if comps_to_process[0] != "🌐 全局进度 (Overall)" else "全局进度"
-        old_owner_str = db[sel_proj].get('部件列表', {}).get(ref_c, {}).get('负责人', '')
-        old_dict      = {}
-        for pair in old_owner_str.split(','):
-            if '-' in pair:   parts = pair.split('-', 1)
-            elif ':' in pair: parts = pair.split(':', 1)
-            else: continue
-            if len(parts) == 2: old_dict[parts[0].strip()] = parts[1].strip()
+        b1, b2 = st.columns([1.1, 3.1])
+        with b1:
+            wb_date = st.date_input("发生日期", datetime.date.today(), key=f"wb_date_{fk}")
+        with b2:
+            wb_text = st.text_area(
+                "这次发了什么文件给谁（自由填写）",
+                height=90,
+                key=f"wb_text_{fk}",
+                placeholder="例：把建模文件v2发给工程，待确认结构干涉；下午同步设计核对头雕比例",
+            )
 
-        role_list = ["建模", "设计", "工程", "监修", "打印", "涂装"]
-        role_vals = {}
-        r_cols    = st.columns(6)
-        for idx, r in enumerate(role_list):
-            with r_cols[idx]:
-                old_v      = old_dict.get(r, "")
-                temp_opts  = base_options.copy()
-                if old_v and old_v not in temp_opts and old_v != "(留空/暂不分配)":
-                    temp_opts.insert(1, old_v)
-                sel_val = st.selectbox(f"{r}", temp_opts,
-                                       index=temp_opts.index(old_v) if old_v in temp_opts else 0,
-                                       key=f"role_{r}_{fk}")
-                if sel_val == "➕ 手动输入新成员...":
-                    final_val = st.text_input("👉 新姓名", key=f"rnew_{r}_{fk}")
-                elif sel_val == "(留空/暂不分配)":
-                    final_val = ""
-                else:
-                    final_val = sel_val
-                role_vals[r] = final_val
-
-        st.markdown("**(3) 日期与进展**")
-        d_col, t_col = st.columns([1, 3])
-        with d_col: detail_record_date = st.date_input("🕒 发生日期", datetime.date.today(), key=f"date_{fk}")
-        with t_col: log_txt = st.text_area("📝 详细进展 (按需写打回原因)", height=80, key=f"txt_{fk}")
-
-        st.markdown("**(3.5) 关联 To do**")
+        st.markdown("**关联 To do（可选）**")
         todo_link_labels = []
         todo_link_label_to_id = {}
         todo_link_id_to_label = {}
@@ -6152,114 +6262,94 @@ elif menu == MENU_SPECIFIC:
             todo_link_id_to_label[todo_id] = label
 
         prefill_link_ids = [
-            tid for tid in st.session_state.get(f"todo_link_prefill_ids_{fk}", [])
+            tid for tid in st.session_state.get(f"wb_todo_prefill_ids_{fk}", [])
             if tid in todo_link_id_to_label
         ]
         if prefill_link_ids:
-            st.session_state[f"todo_link_labels_{fk}"] = [todo_link_id_to_label[tid] for tid in prefill_link_ids]
-            st.session_state[f"todo_link_prefill_ids_{fk}"] = []
+            st.session_state[f"wb_todo_link_labels_{fk}"] = [todo_link_id_to_label[tid] for tid in prefill_link_ids]
+            st.session_state[f"wb_todo_prefill_ids_{fk}"] = []
+
         default_todo_labels = [
-            label for label in st.session_state.get(f"todo_link_labels_{fk}", [])
-            if label in todo_link_label_to_id
+            lb for lb in st.session_state.get(f"wb_todo_link_labels_{fk}", [])
+            if lb in todo_link_label_to_id
         ]
+
         linked_todo_labels = st.multiselect(
             "本次记录关联哪些待办",
             options=todo_link_labels,
             default=default_todo_labels,
-            key=f"todo_link_labels_{fk}"
+            key=f"wb_todo_link_labels_{fk}",
         )
-        linked_todo_ids = [todo_link_label_to_id[label] for label in linked_todo_labels if label in todo_link_label_to_id]
+        linked_todo_ids = [todo_link_label_to_id[lb] for lb in linked_todo_labels if lb in todo_link_label_to_id]
         todo_auto_done = st.checkbox(
-            "保存交接后自动完成所关联 To do",
-            value=bool(st.session_state.get(f"todo_auto_done_{fk}", False) or linked_todo_ids),
-            key=f"todo_auto_done_{fk}"
+            "保存后自动完成所关联 To do",
+            value=bool(st.session_state.get(f"wb_todo_auto_done_{fk}", False) or linked_todo_ids),
+            key=f"wb_todo_auto_done_{fk}",
         )
 
-        st.markdown("**(4) 参考图 (支持连按 Ctrl+V 缓存)**")
+        st.markdown("**参考图（可选）**")
+        wb_files = st.file_uploader(
+            "上传图片",
+            type=["png", "jpg", "jpeg"],
+            accept_multiple_files=True,
+            key=f"wb_up_{sel_proj}_{fk}",
+        )
         try:
             from streamlit_paste_button import paste_image_button
-            paste_result = paste_image_button(
+            wb_paste = paste_image_button(
                 "📋 粘贴截图",
-                background_color="#f1f5f9", hover_background_color="#e2e8f0",
-                key=f"paste_log_{sel_proj}_{fk}"
+                background_color="#f1f5f9",
+                hover_background_color="#e2e8f0",
+                key=f"wb_paste_{sel_proj}_{fk}",
             )
-            if paste_result is not None and hasattr(paste_result, 'image_data') \
-                    and paste_result.image_data is not None:
-                buffered = io.BytesIO()
-                paste_result.image_data.save(buffered, format="PNG")
-                h_key = hashlib.md5(buffered.getvalue()).hexdigest()
-                if h_key not in st.session_state.pasted_cache:
-                    st.session_state.pasted_cache[h_key] = paste_result.image_data
         except ImportError:
-            pass
-    
-    
-        img_files = st.file_uploader("或选择文件上传", type=['png', 'jpg', 'jpeg'],
-                                     accept_multiple_files=True, key=f"up_log_{sel_proj}_{fk}")
-        preview_imgs = []
-        if img_files:
-            for f in img_files:
-                preview_imgs.append({"type": "file", "id": f.name, "data": f})
-        for h_key, img_obj in st.session_state.pasted_cache.items():
-            preview_imgs.append({"type": "paste", "id": h_key, "data": img_obj})
-        preview_imgs = [img for img in preview_imgs if img["id"] not in st.session_state.exclude_imgs]
-    
-        if preview_imgs:
-            st.markdown("**👀 待上传池**")
-            p_cols = st.columns(min(len(preview_imgs), 6) or 1)
-            for idx, img_info in enumerate(preview_imgs):
-                with p_cols[idx % 6]:
-                    if img_info["type"] == "paste":
-                        st.image(img_info["data"], width='stretch')
-                    else:
-                        img_info["data"].seek(0)
-                        st.image(img_info["data"], width='stretch')
-                    if st.button("🗑️ 移除", key=f"del_{img_info['id']}_{idx}",
-                                 width='stretch', type="primary"):
-                        st.session_state.exclude_imgs.add(img_info["id"])
-                        st.rerun()
-    
-        st.markdown("---")
-        is_completed = st.checkbox(
-            f"✅ 标记所选部件的【{new_stage}】阶段已彻底完成 (矩阵变绿)",
-            value=False, key=f"comp_{fk}"
-        )
-        force_submit_detail = st.checkbox("⚠️ 强制提交（忽略阶段/提审 warning）", value=False, key=f"force_detail_{fk}")
-    
-        if st.button("🚀 批量保存交接与进度", type="primary", width='stretch'):
-            if "➕ 新增细分配件..." in comps_to_process and not new_comp_name:
-                st.error("❌ 新增名称为空！")
+            wb_paste = None
+
+        with st.expander("高级选项（可选）", expanded=False):
+            c_adv1, c_adv2, c_adv3 = st.columns([1.1, 1.1, 0.8])
+            with c_adv1:
+                review_type = st.selectbox("提审类型", REVIEW_TYPE_OPTIONS, key=f"wb_rv_type_{fk}")
+            with c_adv2:
+                review_result = st.selectbox("提审结果", REVIEW_RESULT_OPTIONS, key=f"wb_rv_res_{fk}")
+            with c_adv3:
+                review_round = st.number_input("提审轮次", min_value=1, value=1, step=1, key=f"wb_rv_round_{fk}")
+            is_completed = st.checkbox(f"标记【{wb_stage}】已彻底完成", value=False, key=f"wb_done_{fk}")
+            force_submit_detail = st.checkbox("忽略阶段/提审 warning 强制提交", value=False, key=f"wb_force_{fk}")
+
+        if st.button("💾 保存交接记录", type="primary", key=f"wb_save_{sel_proj}_{fk}"):
+            if wb_comp_raw == "➕ 新增细分配件..." and not wb_new_comp_name:
+                st.warning("你选择了新增细分配件，请先填写细分名称。")
+            elif not str(wb_text).strip() and not linked_todo_ids:
+                st.warning("请至少填写一条记录内容，或关联一个 To do。")
             else:
-                new_owner_final = ", ".join([f"{k}-{v}" for k, v in role_vals.items() if v])
-                img_ref_list    = []
-                for img_info in preview_imgs:
-                    if img_info["type"] == "paste":
-                        img_ref = save_image_ref_data(img_info["data"], filename=f"detail_{img_info['id']}.jpg", prefix="detail")
-                    else:
-                        img_ref = save_uploaded_file_ref(img_info["data"], prefix="detail")
-                    if img_ref:
-                        img_ref_list.append(img_ref)
-    
-                global_pause_cascade = ("🌐 全局进度 (Overall)" in comps_to_process and is_pause_stage(new_stage))
-                saved_records = 0
-                processed_components = []
-                global_touched = False
-    
-                for c_raw in comps_to_process:
-                    if c_raw == "🌐 全局进度 (Overall)":
-                        actual_c = "全局进度"
-                    elif c_raw == "➕ 新增细分配件...":
-                        actual_c = new_comp_name
-                    else:
-                        actual_c = c_raw
-    
-                    if actual_c not in db[sel_proj].setdefault("部件列表", {}):
-                        db[sel_proj]["部件列表"][actual_c] = {"主流程": STAGES_UNIFIED[0], "日志流": []}
-                    if new_owner_final:
-                        db[sel_proj]["部件列表"][actual_c]['负责人'] = new_owner_final
-    
-                    base_log = (f"【{evt_type} | {handoff}】补充: {log_txt}"
-                                if log_txt else f"【{evt_type} | {handoff}】")
+                if wb_comp_raw == "🌐 全局进度 (Overall)":
+                    actual_c = "全局进度"
+                elif wb_comp_raw == "➕ 新增细分配件...":
+                    actual_c = wb_new_comp_name
+                else:
+                    actual_c = wb_comp_raw
+
+                if actual_c not in db[sel_proj].setdefault("部件列表", {}):
+                    db[sel_proj]["部件列表"][actual_c] = {"主流程": STAGES_UNIFIED[0], "日志流": []}
+
+                curr_stage_detail = db[sel_proj]["部件列表"][actual_c].get("主流程", STAGES_UNIFIED[0])
+                stage_warn = validate_transition_warning(curr_stage_detail, wb_stage, STAGES_UNIFIED)
+                review_warn = validate_review_with_stage(review_type, wb_stage, actual_c, STAGES_UNIFIED)
+                if (stage_warn or review_warn) and not force_submit_detail:
+                    warn_txt = "；".join([w for w in [stage_warn, review_warn] if w])
+                    st.warning(f"[{actual_c}] {warn_txt}（如确认无误可在高级选项里勾选强制提交）")
+                else:
+                    img_ref_list = []
+                    for f in (wb_files or []):
+                        ref = save_uploaded_file_ref(f, prefix="detail")
+                        if ref:
+                            img_ref_list.append(ref)
+                    if wb_paste is not None and hasattr(wb_paste, "image_data") and wb_paste.image_data is not None:
+                        ref = save_image_ref_data(wb_paste.image_data, filename="detail_paste.png", prefix="detail")
+                        if ref:
+                            img_ref_list.append(ref)
+
+                    base_log = (f"【{wb_evt_type} | {wb_handoff}】补充: {str(wb_text).strip()}" if str(wb_text).strip() else f"【{wb_evt_type} | {wb_handoff}】")
                     todo_names_for_log = [
                         str(handoff_todo_map.get(str(tid).strip(), {}).get("任务", "")).strip()
                         for tid in linked_todo_ids
@@ -6267,105 +6357,91 @@ elif menu == MENU_SPECIFIC:
                     ]
                     if todo_names_for_log:
                         base_log += " [关联To do] " + "；".join(todo_names_for_log[:3])
-
                     if is_completed:
                         base_log += " [系统]彻底完成"
-                    curr_stage_detail = db[sel_proj]["部件列表"][actual_c].get("主流程", STAGES_UNIFIED[0])
-                    stage_warn = validate_transition_warning(curr_stage_detail, new_stage, STAGES_UNIFIED)
-                    review_warn = validate_review_with_stage(review_type, new_stage, actual_c, STAGES_UNIFIED)
-                    if (stage_warn or review_warn) and not force_submit_detail:
-                        warn_txt = "；".join([w for w in [stage_warn, review_warn] if w])
-                        st.warning(f"[{actual_c}] {warn_txt}（如确认无误可勾选强制提交）")
-                        continue
-                    if (stage_warn or review_warn) and force_submit_detail:
-                        warn_txt = " | ".join([w for w in [stage_warn, review_warn] if w])
-                        st.warning(f"[{actual_c}] {warn_txt} (forced submit)")
 
-                    processed_components.append(actual_c)
-                    if "全局" in str(actual_c):
-                        global_touched = True
-
-                    if new_stage == "立项":
-                        db[sel_proj]["部件列表"][actual_c]['日志流'].append({
-                            "日期": str(detail_record_date), "流转": evt_type,
-                            "工序": "立项", "事件": base_log, "图片": img_ref_list,
-                            "提审类型": review_type, "提审结果": review_result, "提审轮次": int(review_round) if review_type != "(无)" else ""
+                    if wb_stage == "立项":
+                        db[sel_proj]["部件列表"][actual_c]["日志流"].append({
+                            "日期": str(wb_date),
+                            "流转": wb_evt_type,
+                            "工序": "立项",
+                            "事件": base_log,
+                            "图片": img_ref_list,
+                            "提审类型": review_type,
+                            "提审结果": review_result,
+                            "提审轮次": int(review_round) if review_type != "(无)" else "",
                         })
-                        saved_records += 1
-                        db[sel_proj]["部件列表"][actual_c]['日志流'].append({
-                            "日期": str(detail_record_date + datetime.timedelta(days=1)),
-                            "流转": "系统自动", "工序": "建模(含打印/签样)",
-                            "事件": "[系统] 立项完成自动推演"
+                        db[sel_proj]["部件列表"][actual_c]["日志流"].append({
+                            "日期": str(wb_date + datetime.timedelta(days=1)),
+                            "流转": "系统自动",
+                            "工序": "建模(含打印/签样)",
+                            "事件": "[系统] 立项完成自动推演",
                         })
-                        db[sel_proj]["部件列表"][actual_c]['主流程'] = "建模(含打印/签样)"
+                        db[sel_proj]["部件列表"][actual_c]["主流程"] = "建模(含打印/签样)"
                     else:
-                        db[sel_proj]["部件列表"][actual_c]['日志流'].append({
-                            "日期": str(detail_record_date), "流转": evt_type,
-                            "工序": new_stage, "事件": base_log, "图片": img_ref_list,
-                            "提审类型": review_type, "提审结果": review_result, "提审轮次": int(review_round) if review_type != "(无)" else ""
+                        db[sel_proj]["部件列表"][actual_c]["日志流"].append({
+                            "日期": str(wb_date),
+                            "流转": wb_evt_type,
+                            "工序": wb_stage,
+                            "事件": base_log,
+                            "图片": img_ref_list,
+                            "提审类型": review_type,
+                            "提审结果": review_result,
+                            "提审轮次": int(review_round) if review_type != "(无)" else "",
                         })
-                        saved_records += 1
-                        db[sel_proj]["部件列表"][actual_c]['主流程'] = new_stage
-    
-                if global_pause_cascade:
-                    db[sel_proj]["Milestone"] = "暂停研发"
-                    for sub_c, sub_info in db[sel_proj].get("部件列表", {}).items():
-                        if "全局" in sub_c:
-                            continue
-                        if sub_info.get("主流程") != new_stage:
-                            sub_info.setdefault('日志流', []).append({
-                                "日期": str(detail_record_date), "流转": "系统自动",
-                                "工序": new_stage, "事件": "[系统] 全局已暂停，子部件自动同步为暂停"
-                            })
-                            sub_info["主流程"] = new_stage
-    
-                auto_follow_count = 0
-                if saved_records > 0 and global_touched:
-                    auto_follow_count = sync_core_components_follow_global(
-                        sel_proj,
-                        action_date=detail_record_date,
-                        source_module="交接工作台",
-                        skip_components=processed_components,
-                    )
+                        db[sel_proj]["部件列表"][actual_c]["主流程"] = wb_stage
 
-                linked_todo_titles = []
-                if saved_records > 0 and linked_todo_ids:
-                    todo_all_cfg = db.setdefault("系统配置", {}).setdefault("PM_TODO_LIST", [])
-                    todo_cfg_map = {str(x.get("_id", "")).strip(): x for x in todo_all_cfg}
-                    comp_label = "、".join([
-                        (new_comp_name if c == "➕ 新增细分配件..." and new_comp_name else ("全局进度" if c == "🌐 全局进度 (Overall)" else c))
-                        for c in comps_to_process
-                    ])
-                    write_ts = datetime.datetime.now().isoformat(timespec="seconds")
-                    for todo_id in linked_todo_ids:
-                        td_obj = todo_cfg_map.get(str(todo_id).strip())
-                        if not td_obj:
-                            continue
-                        td_obj["最近联动模块"] = "交接工作台"
-                        td_obj["最近联动日期"] = str(detail_record_date)
-                        td_obj["最近联动项目"] = sel_proj
-                        td_obj["最近联动部件"] = comp_label
-                        td_obj["最近联动阶段"] = new_stage
-                        td_obj["最近联动写入时间"] = write_ts
-                        if todo_auto_done:
-                            was_done = bool(td_obj.get("完成", False))
-                            td_obj["完成"] = True
-                            if not was_done:
-                                td_obj["完成时间"] = str(detail_record_date)
-                                append_todo_completion_history(td_obj, detail_record_date)
-                        linked_todo_titles.append(str(td_obj.get("任务", "")).strip())
+                    if "全局" in str(actual_c) and is_pause_stage(wb_stage):
+                        db[sel_proj]["Milestone"] = "暂停研发"
+                        for sub_c, sub_info in db[sel_proj].get("部件列表", {}).items():
+                            if "全局" in sub_c:
+                                continue
+                            if sub_info.get("主流程") != wb_stage:
+                                sub_info.setdefault("日志流", []).append({
+                                    "日期": str(wb_date),
+                                    "流转": "系统自动",
+                                    "工序": wb_stage,
+                                    "事件": "[系统] 全局已暂停，子部件自动同步为暂停",
+                                })
+                                sub_info["主流程"] = wb_stage
 
-                if saved_records <= 0:
-                    st.warning("未写入任何记录：请检查提审/阶段 warning，或勾选强制提交。")
-                else:
-                    st.session_state.form_key    += 1
-                    st.session_state.pasted_cache = {}
-                    st.session_state.exclude_imgs = set()
+                    if "全局" in str(actual_c):
+                        sync_core_components_follow_global(
+                            sel_proj,
+                            action_date=wb_date,
+                            source_module="交接工作台",
+                            skip_components=[actual_c],
+                        )
+
+                    linked_todo_titles = []
+                    if linked_todo_ids:
+                        todo_all_cfg = db.setdefault("系统配置", {}).setdefault("PM_TODO_LIST", [])
+                        todo_cfg_map = {str(x.get("_id", "")).strip(): x for x in todo_all_cfg}
+                        write_ts = datetime.datetime.now().isoformat(timespec="seconds")
+                        for todo_id in linked_todo_ids:
+                            td_obj = todo_cfg_map.get(str(todo_id).strip())
+                            if not td_obj:
+                                continue
+                            td_obj["最近联动模块"] = "交接工作台"
+                            td_obj["最近联动日期"] = str(wb_date)
+                            td_obj["最近联动项目"] = sel_proj
+                            td_obj["最近联动部件"] = actual_c
+                            td_obj["最近联动阶段"] = wb_stage
+                            td_obj["最近联动写入时间"] = write_ts
+                            if todo_auto_done:
+                                was_done = bool(td_obj.get("完成", False))
+                                td_obj["完成"] = True
+                                if not was_done:
+                                    td_obj["完成时间"] = str(wb_date)
+                                    append_todo_completion_history(td_obj, wb_date)
+                            linked_todo_titles.append(str(td_obj.get("任务", "")).strip())
+
+                    st.session_state.form_key += 1
                     sync_save_db(sel_proj)
                     if linked_todo_ids:
                         sync_save_db("系统配置")
                     todo_msg = f"；联动待办 {len(linked_todo_titles)} 条" if linked_todo_titles else ""
-                    st.success(f"🎉 记录成功！本次写入 {saved_records} 条{todo_msg}。")
+                    st.success(f"记录已保存{todo_msg}。")
                     st.rerun()
         with st.expander("🧪 3. 小比例签板流程", expanded=False):
             render_small_scale_signoff_board(sel_proj, ui_prefix=f"pm_small_{norm_text(sel_proj)[:24]}")
