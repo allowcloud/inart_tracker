@@ -214,6 +214,13 @@ section[data-testid="stSidebar"] .stButton button { width: 100%; border-radius: 
 /* metric cards */
 [data-testid="stMetric"] { border: 1px solid var(--pm-border); border-radius: 10px; padding: 6px 10px; background: var(--pm-card); }
 [data-testid="stMetric"] [data-testid="stMetricLabel"] { color: var(--pm-text-soft); }
+/* localize streamlit uploader default English copy */
+[data-testid="stFileUploaderDropzoneInstructions"] span { display: none !important; }
+[data-testid="stFileUploaderDropzoneInstructions"]::before { content: "拖拽文件到这里"; font-size: 14px; color: var(--pm-text-soft); }
+[data-testid="stFileUploader"] small { font-size: 0 !important; }
+[data-testid="stFileUploader"] small::after { content: "单文件上限 200MB（PNG/JPG/JPEG）"; font-size: 12px; color: var(--pm-text-soft); }
+[data-testid="stFileUploaderDropzone"] button { font-size: 0 !important; }
+[data-testid="stFileUploaderDropzone"] button::after { content: "选择文件"; font-size: 14px; }
 /* hide streamlit footer */
 footer { visibility: hidden; }
 </style>
@@ -221,6 +228,7 @@ footer { visibility: hidden; }
 
 MENU_DASHBOARD = "📊 全局大盘与甘特图"
 MENU_SPECIFIC  = "🎯 PM 工作台"
+MENU_PRINT     = "🖨️ 打印追踪"
 MENU_FASTLOG   = "📝 手机 AI 速记"
 MENU_PACKING   = "📦 包装与入库特殊领用"
 MENU_COST      = "💰 专属成本台账"
@@ -237,7 +245,22 @@ REVIEW_RESULT_OPTIONS = ["(无)", "待反馈", "通过", "打回"]
 
 PROJECT_RATIO_OPTIONS = ["1/1", "1/3", "1/4", "1/6", "1/12"]
 GARMENT_STAGES = ["Follow Global", "Design", "Sampling", "Under Review", "Review Passed", "Pre-Mass", "Mass Done"]
-PRINT_TRACK_STATUS_OPTIONS = ["Pending Arrival", "Arrived/Need Feedback", "Feedback Sent", "Rework In Progress", "Signed Off"]
+GARMENT_STAGE_LABELS = {
+    "Follow Global": "跟随全局",
+    "Design": "设计",
+    "Sampling": "打样",
+    "Under Review": "提审中",
+    "Review Passed": "提审通过",
+    "Pre-Mass": "量产前确认",
+    "Mass Done": "大货完成",
+}
+PRINT_TRACK_STATUS_OPTIONS = ["待收件", "已收件待反馈", "反馈已发出", "返修中", "已签板"]
+PRINT_TRACK_LOCATION_DEFAULTS = ["内部", "博泰", "逸博", "小样儿"]
+PRINT_TRACK_SOURCE_LABELS = {
+    "Todo自动捞取": "📌 待办自动捞取",
+    "日志自动捞取": "📋 日志自动捞取",
+    "手动录入": "✏️ 手动录入",
+}
 
 DEFAULT_SYS_CFG = {
     "标准部件": ["头雕(表情)", "素体", "手型", "服装", "配件", "地台", "包装"],
@@ -246,7 +269,9 @@ DEFAULT_SYS_CFG = {
     "排期基线": {"立项": 1, "建模": 42, "设计": 35, "工程": 49, "模具": 28, "修模": 14, "生产": 30},
     "项目别名": {},
     "AI_COMP_KW":  {},
-    "AI_STAGE_KW": {}
+    "AI_STAGE_KW":  {},
+    "打印追踪列表": [],
+    "打印地点选项": PRINT_TRACK_LOCATION_DEFAULTS.copy()
     ,"PROJECT_TEMPLATE": {"default_ratio": "1/6", "default_ip_owner": "", "ratio_options": PROJECT_RATIO_OPTIONS.copy()}
 }
 DEFAULT_DB = {"系统配置": DEFAULT_SYS_CFG}
@@ -561,6 +586,10 @@ def _ensure_db_shape(db_obj):
     for k, v in DEFAULT_SYS_CFG.items():
         if k not in cfg:
             cfg[k] = _deep_copy_obj(v)
+    if not isinstance(cfg.get("\u6253\u5370\u8ffd\u8e2a\u5217\u8868"), list):
+        cfg["\u6253\u5370\u8ffd\u8e2a\u5217\u8868"] = []
+    if not isinstance(cfg.get("\u6253\u5370\u5730\u70b9\u9009\u9879"), list):
+        cfg["\u6253\u5370\u5730\u70b9\u9009\u9879"] = PRINT_TRACK_LOCATION_DEFAULTS.copy()
     for p, d in list(db_obj.items()):
         if p == cfg_key:
             continue
@@ -960,7 +989,7 @@ def refresh_project_todo_links(proj_name):
             evt = item["event"]
             evt_norm = item["event_norm"]
             matched = False
-            if "[\u5173\u8054To do]" in evt and (task in evt or (task_norm and task_norm in evt_norm)):
+            if ("[\u5173\u8054To do]" in evt or "[\u5173\u8054\u5f85\u529e]" in evt) and (task in evt or (task_norm and task_norm in evt_norm)):
                 matched = True
             elif len(task_norm) >= 4 and task_norm in evt_norm:
                 matched = True
@@ -1304,9 +1333,7 @@ def todo_scope_of(td):
 
 def todo_visible_for_view(td, pm_view):
     if pm_view == "所有人":
-        raw_scope = str((td or {}).get("所属视角", "")).strip()
-        raw_creator = str((td or {}).get("创建者视角", "")).strip()
-        return raw_scope in ["", "所有人", "未分配"] and raw_creator in ["", "所有人", "未分配"]
+        return todo_scope_of(td) == "未分配"
     scope = todo_scope_of(td)
     return scope == pm_view
 
@@ -2118,7 +2145,7 @@ def infer_todo_handoff_prefill(td, proj_name):
     if cpddl:
         log_txt = f"{log_txt} | {cpddl}" if log_txt else cpddl
     if not log_txt:
-        log_txt = "To do 联动补充"
+        log_txt = "待办联动补充"
 
     return {
         "项目": proj,
@@ -2154,7 +2181,7 @@ def append_todo_completion_history(td, action_date=None):
             comps[global_key] = {"主流程": STAGES_UNIFIED[0], "日志流": []}
         stage_name = str(comps[global_key].get("主流程", "")).strip() or STAGES_UNIFIED[0]
 
-        event_bits = [f"[To do完成] {title}", f"项目:{proj_name}"]
+        event_bits = [f"[待办完成] {title}", f"项目:{proj_name}"]
         if cpddl:
             event_bits.append(f"CP/DDL:{cpddl}")
         if people:
@@ -2172,7 +2199,7 @@ def append_todo_completion_history(td, action_date=None):
 
         logs.append({
             "日期": str(action_date),
-            "流转": "To do",
+            "流转": "待办",
             "工序": stage_name,
             "事件": event_text,
         })
@@ -2517,8 +2544,8 @@ def build_project_stage_segments(proj_label, proj_data):
 
 
 def render_pm_todo_manager(valid_projs, current_pm):
-    st.subheader("🗂️ To do List（CP/DDL 合并）")
-    st.caption("To do 专注任务、DDL/CP、关联项目、关联人员。图片统一在进度明细里补；人员只写姓名时，系统会优先匹配库中的完整角色-姓名。")
+    st.subheader("🗂️ 待办清单（CP/DDL 合并）")
+    st.caption("待办专注任务、DDL/CP、关联项目、关联人员。图片统一在进度明细里补；人员只写姓名时，系统会优先匹配库中的完整角色-姓名。")
     cfg = db.setdefault("系统配置", {})
     todo_all = cfg.setdefault("PM_TODO_LIST", [])
 
@@ -2630,7 +2657,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
         with c2:
             todo_cpddl = st.text_input("CP/DDL(合并)", key="todo_cpddl_global", placeholder="例：3/7 结构件确认")
         with c3:
-            todo_ref_projs = st.multiselect("关联项目（可多选）", todo_proj_options_create, key="todo_ref_global_multi")
+            todo_ref_projs = st.multiselect("关联项目（可多选）", todo_proj_options_create, key="todo_ref_global_multi", placeholder="请选择关联项目")
         with c4:
             if current_pm == "所有人":
                 todo_scope = st.selectbox("所属视角", scope_options, key="todo_scope_global")
@@ -2663,15 +2690,15 @@ def render_pm_todo_manager(valid_projs, current_pm):
                     new_proj_owner = current_pm
                     st.text_input("新增项目负责人", value=current_pm, key="todo_new_proj_owner_ro", disabled=True)
             with np3:
-                new_proj_ratio = st.selectbox("Scale", ratio_opts, index=ratio_opts.index(default_ratio) if default_ratio in ratio_opts else 0, key="todo_new_proj_ratio")
+                new_proj_ratio = st.selectbox("比例", ratio_opts, index=ratio_opts.index(default_ratio) if default_ratio in ratio_opts else 0, key="todo_new_proj_ratio")
             with np4:
-                new_proj_ip_owner = st.text_input("IP Owner", value=new_proj_ip_owner, key="todo_new_proj_ip_owner", placeholder="optional")
+                new_proj_ip_owner = st.text_input("版权方", value=new_proj_ip_owner, key="todo_new_proj_ip_owner", placeholder="可选")
             if str(new_proj_name).strip():
                 resolved_ref_proj_list.append(str(new_proj_name).strip())
 
         resolved_ref_proj_list = list(dict.fromkeys([p for p in resolved_ref_proj_list if p]))
         st.caption("人员录入建议：优先在下拉选择；如果库里没有，点“➕ 新增关联人员...”即可。")
-        todo_people_sel = st.multiselect("关联人员（可多选/留空）", role_person_options_create, key="todo_people_global")
+        todo_people_sel = st.multiselect("关联人员（可多选/留空）", role_person_options_create, key="todo_people_global", placeholder="请选择关联人员")
 
         todo_people_sel_clean = [x for x in todo_people_sel if x != todo_new_person_option]
         todo_new_person_token = ""
@@ -2702,7 +2729,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
         st.caption("人员识别：" + format_todo_people_hint(tmp_td))
         people_bundle = infer_todo_people_bundle(tmp_td)
         if not people_input and (people_bundle["ambiguous"] or people_bundle["unknown"]):
-            st.warning("人员没有唯一识别，建议在 To do 里直接补充【关联人员】；图片和细节再放到下方进度明细。")
+            st.warning("人员没有唯一识别，建议在待办里直接补充【关联人员】；图片和细节再放到下方进度明细。")
 
         if st.button("➕ 添加", key="todo_add_global", type="primary"):
             if not todo_title.strip():
@@ -2746,7 +2773,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
                 else:
                     sync_save_db("系统配置")
 
-                success_bits = ["To do 已添加。"]
+                success_bits = ["待办已添加。"]
                 if created_projects:
                     success_bits.append("已新建项目：" + " / ".join(created_projects[:3]) + (" ..." if len(created_projects) > 3 else "") + "。")
                 if added_people:
@@ -2757,9 +2784,9 @@ def render_pm_todo_manager(valid_projs, current_pm):
                 st.success(" ".join(success_bits))
                 st.rerun()
 
-    st.markdown("##### 当前 To do")
+    st.markdown("##### 当前待办")
     if not todo_list:
-        st.info("当前视角下暂无 To do。")
+        st.info("当前视角下暂无待办。")
         return todo_list
 
     all_proj_filter_opts = sorted(list(dict.fromkeys([p for td in todo_list for p in todo_project_list(td)])))
@@ -2859,7 +2886,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
         key="todo_editor_df",
     )
 
-    if st.button("💾 保存 To do 状态", key="todo_save_global"):
+    if st.button("💾 保存待办状态", key="todo_save_global"):
         id_map = {str(td.get("_id", "")): td for td in todo_all}
         delete_ids = set()
         skipped = 0
@@ -2956,10 +2983,10 @@ def render_pm_todo_manager(valid_projs, current_pm):
         else:
             sync_save_db("系统配置")
 
-        st.success(f"To do 已保存：保留 {len(todo_all)} 条，删除 {len(delete_ids)} 条，跳过 {skipped} 条空任务。")
+        st.success(f"待办已保存：保留 {len(todo_all)} 条，删除 {len(delete_ids)} 条，跳过 {skipped} 条空任务。")
         st.rerun()
 
-    st.caption("建议：To do 先做轻量提醒；图片、附件、流转详情统一在【细分配件交接工作台】里补充。")
+    st.caption("建议：待办先做轻量提醒；图片、附件、流转详情统一在【细分配件交接工作台】里补充。")
     return [td for td in todo_all if todo_visible_for_view(td, current_pm)]
 def render_sidebar_todo_panel(pm_view):
     cfg = db.setdefault("系统配置", {})
@@ -2970,10 +2997,10 @@ def render_sidebar_todo_panel(pm_view):
     completed_count = len([td for td in visible if td.get("完成")])
 
     st.sidebar.divider()
-    st.sidebar.markdown("### 🗂️ To do")
+    st.sidebar.markdown("### 🗂️ 待办")
     st.sidebar.caption(f"未完成 {len(pending)} | 已完成 {completed_count}")
     if not pending:
-        st.sidebar.caption("当前视角下没有未完成 To do。")
+        st.sidebar.caption("当前视角下没有未完成待办。")
         return
 
     for idx, td in enumerate(pending[:6], 1):
@@ -3402,7 +3429,7 @@ def render_pm_batch_fastlog_integrated(visible_projects, default_proj=""):
         }
     )
 
-    if st.button("🪄 一键生成 To do（仅未来日期）", key="pm_batch_todo_only"):
+    if st.button("🪄 一键生成待办（仅未来日期）", key="pm_batch_todo_only"):
         SYS_KEY = "系统配置"
         TASK_KEY = "任务"
         DONE_KEY = "完成"
@@ -3491,9 +3518,9 @@ def render_pm_batch_fastlog_integrated(visible_projects, default_proj=""):
 
         if created or updated:
             sync_save_db(SYS_KEY)
-            st.success(f"To do synced: created {created}, updated {updated}.")
+            st.success(f"待办同步完成：新建 {created} 条，更新 {updated} 条。")
         else:
-            st.info("No future-date rows detected for To do generation.")
+            st.info("未检测到未来日期记录，未生成待办。")
 
     st.markdown("##### 🖼️ 附件图片")
     files = st.file_uploader("上传图片（可多张）", type=["png", "jpg", "jpeg"], accept_multiple_files=True, key="pm_batch_files")
@@ -3902,7 +3929,7 @@ def render_packing_lightweight_board(sel_proj, ui_prefix="pack_board"):
     with rr1:
         rv_date = st.date_input("提审日期", datetime.date.today(), key=f"{ui_prefix}_review_date")
     with rr2:
-        rv_targets = st.multiselect("提审对象", review_targets, key=f"{ui_prefix}_review_targets")
+        rv_targets = st.multiselect("提审对象", review_targets, key=f"{ui_prefix}_review_targets", placeholder="请选择提审对象")
     with rr3:
         rv_result = st.selectbox("结果", ["通过", "打回"], key=f"{ui_prefix}_review_result")
     with rr4:
@@ -4270,107 +4297,411 @@ def _normalize_print_tracking_rows(raw_rows):
     for row in rows:
         if not isinstance(row, dict):
             continue
-        day_txt = str(row.get("date", "")).strip() or str(datetime.date.today())
+        row_id = str(row.get("_id", "")).strip() or uuid.uuid4().hex[:12]
+        day_txt = str(row.get("\u65e5\u671f", row.get("date", ""))).strip() or str(datetime.date.today())
         try:
             day_txt = str(datetime.datetime.strptime(day_txt, "%Y-%m-%d").date())
         except Exception:
             day_txt = str(datetime.date.today())
-        round_name = str(row.get("round", "")).strip()
-        if not round_name:
-            continue
-        status = str(row.get("status", "Pending Arrival")).strip()
-        if status not in PRINT_TRACK_STATUS_OPTIONS:
-            status = PRINT_TRACK_STATUS_OPTIONS[0]
-        slot = str(row.get("slot", "AM")).strip()
-        if slot not in ["AM", "PM", "Not Held"]:
-            slot = "AM"
+
+        recv_date = str(row.get("\u6536\u5230\u65e5\u671f", "")).strip()
+        if recv_date:
+            try:
+                recv_date = str(datetime.datetime.strptime(recv_date, "%Y-%m-%d").date())
+            except Exception:
+                recv_date = ""
+
+        src = str(row.get("\u6765\u6e90", "")).strip() or "\u624b\u52a8\u5f55\u5165"
+        if src not in PRINT_TRACK_SOURCE_LABELS:
+            src = "\u624b\u52a8\u5f55\u5165"
+
         out.append({
-            "date": day_txt,
-            "round": round_name,
-            "status": status,
-            "slot": slot,
-            "attendees": str(row.get("attendees", "")).strip(),
-            "note": str(row.get("note", "")).strip(),
+            "_id": row_id,
+            "\u65e5\u671f": day_txt,
+            "\u9879\u76ee": str(row.get("\u9879\u76ee", "")).strip(),
+            "\u90e8\u4ef6": str(row.get("\u90e8\u4ef6", "")).strip() or "\u5168\u5c40\u8fdb\u5ea6",
+            "\u63cf\u8ff0": str(row.get("\u63cf\u8ff0", "")).strip(),
+            "\u6253\u5370\u5730\u70b9": str(row.get("\u6253\u5370\u5730\u70b9", "")).strip(),
+            "\u5df2\u6536\u5230": bool(row.get("\u5df2\u6536\u5230", False)),
+            "\u6536\u5230\u65e5\u671f": recv_date,
+            "\u6765\u6e90": src,
         })
-    return sorted(out, key=lambda x: (x.get("date", ""), x.get("round", "")), reverse=True)
+
+    out.sort(key=lambda x: (0 if not x.get("\u5df2\u6536\u5230") else 1, str(x.get("\u65e5\u671f", "")), str(x.get("\u9879\u76ee", ""))), reverse=False)
+    return out
 
 
-def render_print_tracking_board(sel_proj, ui_prefix="print_track"):
-    comp_key = "部件列表"
-    global_comp = "全局进度"
-    stage_key = "主流程"
-    log_key = "日志流"
-    date_key = "日期"
-    flow_key = "流转"
-    process_key = "工序"
-    event_key = "事件"
+def _normalize_print_location_options(raw_options):
+    vals = list(PRINT_TRACK_LOCATION_DEFAULTS)
+    if isinstance(raw_options, list):
+        for x in raw_options:
+            sx = str(x).strip()
+            if sx:
+                vals.append(sx)
+    return list(dict.fromkeys(vals))
 
-    st.markdown("##### 🧪 Print Tracking")
-    st.caption("Track T1~TN / M rounds and optionally sync entries to project logs.")
 
-    rows = _normalize_print_tracking_rows(db.get(sel_proj, {}).get("print_tracking", []))
-    comp_map = db.get(sel_proj, {}).get(comp_key, {})
-    comp_options = [global_comp] + [c for c in comp_map.keys() if c != global_comp]
+def _extract_print_location(text, locations):
+    txt = str(text or "").strip()
+    if not txt:
+        return ""
+    for loc in locations:
+        if str(loc).strip() and str(loc) in txt:
+            return str(loc)
+    return ""
 
-    c1, c2, c3, c4 = st.columns([1.0, 1.0, 1.4, 1.0])
-    with c1:
-        add_date = st.date_input("Date", datetime.date.today(), key=f"{ui_prefix}_date")
-    with c2:
-        add_round = st.text_input("Round", key=f"{ui_prefix}_round", placeholder="T1 / T2 / M")
-    with c3:
-        add_status = st.selectbox("Status", PRINT_TRACK_STATUS_OPTIONS, key=f"{ui_prefix}_status")
-    with c4:
-        add_slot = st.selectbox("Feedback Slot", ["AM", "PM", "Not Held"], key=f"{ui_prefix}_slot")
 
-    d1, d2 = st.columns([2.5, 1.5])
-    with d1:
-        add_attendees = st.text_input("Attendees", value="ENG / VEN / Designer / Yezi / Godo", key=f"{ui_prefix}_att")
-    with d2:
-        sync_comp = st.selectbox("Sync Component", comp_options, key=f"{ui_prefix}_comp")
+def _infer_print_component(project_name, free_text):
+    proj = str(project_name or "").strip()
+    if proj not in db:
+        return "\u5168\u5c40\u8fdb\u5ea6"
 
-    add_note = st.text_input("Note", key=f"{ui_prefix}_note", placeholder="Key findings / actions")
-    sync_log = st.checkbox("Sync to component log", value=True, key=f"{ui_prefix}_sync")
+    td_probe = {
+        "\u4efb\u52a1": str(free_text or "").strip(),
+        "CPDDL": "",
+        "\u5173\u8054\u9879\u76ee": proj,
+        "\u5173\u8054\u9879\u76ee\u5217\u8868": [proj],
+    }
+    guessed = infer_todo_handoff_prefill(td_probe, proj)
+    comp_list = guessed.get("\u90e8\u4ef6", []) if isinstance(guessed, dict) else []
+    first = str(comp_list[0]).strip() if comp_list else ""
+    if "\u5168\u5c40\u8fdb\u5ea6" in first:
+        return "\u5168\u5c40\u8fdb\u5ea6"
+    if first:
+        return first
+    return "\u5168\u5c40\u8fdb\u5ea6"
 
-    if st.button("➕ Add Print Round", key=f"{ui_prefix}_add", type="primary"):
-        if not str(add_round).strip():
-            st.warning("Please fill round name (e.g. T1 / T2 / M).")
-        else:
+
+def _build_auto_print_rows_from_todo(pm_view, visible_projects, locations):
+    cfg = db.get("\u7cfb\u7edf\u914d\u7f6e", {}) if isinstance(db.get("\u7cfb\u7edf\u914d\u7f6e", {}), dict) else {}
+    todo_all = cfg.get("PM_TODO_LIST", []) if isinstance(cfg.get("PM_TODO_LIST", []), list) else []
+    rows = []
+    visible_set = set([p for p in visible_projects if p in db])
+
+    for td in todo_all:
+        if bool((td or {}).get("\u5b8c\u6210")):
+            continue
+        if not todo_visible_for_view(td, pm_view):
+            continue
+
+        task = str((td or {}).get("\u4efb\u52a1", "")).strip()
+        cpddl = todo_cpddl_text(td)
+        combined = f"{task} {cpddl}".strip()
+        if "\u6253\u5370" not in combined:
+            continue
+
+        proj_list = [p for p in todo_project_list(td) if p in visible_set]
+        if not proj_list:
+            continue
+
+        due = todo_due_date(td) or parse_date_safe((td or {}).get("\u521b\u5efa", "")) or datetime.date.today()
+        src_loc = _extract_print_location(combined, locations)
+        base_todo_id = str((td or {}).get("_id", "")).strip() or hashlib.md5(combined.encode("utf-8", "ignore")).hexdigest()[:10]
+
+        for proj in proj_list:
+            comp = _infer_print_component(proj, combined)
+            rid = "todo_" + hashlib.md5(f"{base_todo_id}|{proj}".encode("utf-8", "ignore")).hexdigest()[:12]
             rows.append({
-                "date": str(add_date),
-                "round": str(add_round).strip(),
-                "status": add_status,
-                "slot": add_slot,
-                "attendees": str(add_attendees).strip(),
-                "note": str(add_note).strip(),
+                "_id": rid,
+                "\u65e5\u671f": str(due),
+                "\u9879\u76ee": proj,
+                "\u90e8\u4ef6": comp,
+                "\u63cf\u8ff0": task or combined,
+                "\u6253\u5370\u5730\u70b9": src_loc,
+                "\u5df2\u6536\u5230": False,
+                "\u6536\u5230\u65e5\u671f": "",
+                "\u6765\u6e90": "Todo\u81ea\u52a8\u635e\u53d6",
             })
-            db[sel_proj]["print_tracking"] = _normalize_print_tracking_rows(rows)
 
-            if sync_log:
-                target_comp = str(sync_comp).strip() or global_comp
-                comp_data = db[sel_proj].setdefault(comp_key, {})
-                if target_comp not in comp_data:
-                    comp_data[target_comp] = {stage_key: STAGES_UNIFIED[0], log_key: []}
-                evt = f"[PrintTracking][{str(add_round).strip()}] {add_status}" + (f" | {str(add_note).strip()}" if str(add_note).strip() else "")
-                comp_data[target_comp].setdefault(log_key, []).append({
-                    date_key: str(add_date),
-                    flow_key: "PrintTracking",
-                    process_key: "建模(含打印/签样)",
-                    event_key: evt,
+    uniq = {}
+    for row in rows:
+        uniq[row["_id"]] = row
+    return list(uniq.values())
+
+
+def _build_auto_print_rows_from_logs(visible_projects, locations, days=30):
+    rows = []
+    cutoff = datetime.date.today() - datetime.timedelta(days=max(1, int(days)))
+
+    for proj in [p for p in visible_projects if p in db and p != "\u7cfb\u7edf\u914d\u7f6e"]:
+        proj_data = db.get(proj, {})
+        for comp_name, comp_data in (proj_data.get("\u90e8\u4ef6\u5217\u8868", {}) or {}).items():
+            for lg in (comp_data or {}).get("\u65e5\u5fd7\u6d41", []):
+                if is_hidden_system_log(lg):
+                    continue
+                stage = str((lg or {}).get("\u5de5\u5e8f", "")).strip()
+                evt = str((lg or {}).get("\u4e8b\u4ef6", "")).strip()
+                if not evt and not stage:
+                    continue
+                if (stage != "\u5efa\u6a21(\u542b\u6253\u5370/\u7b7e\u6837)") and ("\u6253\u5370" not in evt):
+                    continue
+
+                d_obj = parse_date_safe((lg or {}).get("\u65e5\u671f", ""))
+                if not d_obj or d_obj < cutoff:
+                    continue
+
+                desc = evt or f"{stage}\u8bb0\u5f55"
+                rid_seed = f"{proj}|{comp_name}|{str(d_obj)}|{evt}|{stage}"
+                rid = "log_" + hashlib.md5(rid_seed.encode("utf-8", "ignore")).hexdigest()[:12]
+                rows.append({
+                    "_id": rid,
+                    "\u65e5\u671f": str(d_obj),
+                    "\u9879\u76ee": proj,
+                    "\u90e8\u4ef6": str(comp_name).strip() or "\u5168\u5c40\u8fdb\u5ea6",
+                    "\u63cf\u8ff0": desc,
+                    "\u6253\u5370\u5730\u70b9": _extract_print_location(evt, locations),
+                    "\u5df2\u6536\u5230": False,
+                    "\u6536\u5230\u65e5\u671f": "",
+                    "\u6765\u6e90": "\u65e5\u5fd7\u81ea\u52a8\u635e\u53d6",
                 })
-                comp_data[target_comp][stage_key] = "建模(含打印/签样)"
 
-            sync_save_db(sel_proj)
-            st.success("Print tracking saved.")
-            st.rerun()
+    uniq = {}
+    for row in rows:
+        uniq[row["_id"]] = row
+    return list(uniq.values())
 
-    if rows:
-        df = pd.DataFrame(rows)
-        edited_df = st.data_editor(df, num_rows="dynamic", width='stretch', hide_index=True, key=f"{ui_prefix}_editor")
-        if st.button("💾 Save Print Table", key=f"{ui_prefix}_save"):
-            db[sel_proj]["print_tracking"] = _normalize_print_tracking_rows(edited_df.to_dict("records"))
-            sync_save_db(sel_proj)
-            st.success("Print table saved.")
-            st.rerun()
+
+def _merge_print_tracking_rows(stored_rows, auto_rows):
+    stored = _normalize_print_tracking_rows(stored_rows)
+    auto_map = {str(x.get("_id", "")).strip(): x for x in _normalize_print_tracking_rows(auto_rows)}
+    stored_map = {str(x.get("_id", "")).strip(): x for x in stored}
+
+    merged = []
+    used = set()
+
+    for rid, auto_row in auto_map.items():
+        base = stored_map.get(rid, {})
+        row = dict(auto_row)
+        if base:
+            if str(base.get("\u6253\u5370\u5730\u70b9", "")).strip():
+                row["\u6253\u5370\u5730\u70b9"] = str(base.get("\u6253\u5370\u5730\u70b9", "")).strip()
+            row["\u5df2\u6536\u5230"] = bool(base.get("\u5df2\u6536\u5230", False))
+            if str(base.get("\u6536\u5230\u65e5\u671f", "")).strip():
+                row["\u6536\u5230\u65e5\u671f"] = str(base.get("\u6536\u5230\u65e5\u671f", "")).strip()
+        merged.append(row)
+        used.add(rid)
+
+    for row in stored:
+        rid = str(row.get("_id", "")).strip()
+        if rid in used:
+            continue
+        merged.append(row)
+
+    return _normalize_print_tracking_rows(merged)
+
+
+def _append_print_received_log(row_obj):
+    row = row_obj if isinstance(row_obj, dict) else {}
+    proj = str(row.get("\u9879\u76ee", "")).strip()
+    if (not proj) or proj not in db or proj == "\u7cfb\u7edf\u914d\u7f6e":
+        return False
+
+    comp_name = str(row.get("\u90e8\u4ef6", "")).strip() or "\u5168\u5c40\u8fdb\u5ea6"
+    desc = str(row.get("\u63cf\u8ff0", "")).strip() or "(\u65e0\u63cf\u8ff0)"
+    place = str(row.get("\u6253\u5370\u5730\u70b9", "")).strip() or "\u672a\u586b\u5199"
+
+    recv_date = str(row.get("\u6536\u5230\u65e5\u671f", "")).strip() or str(row.get("\u65e5\u671f", "")).strip() or str(datetime.date.today())
+    try:
+        recv_date = str(datetime.datetime.strptime(recv_date, "%Y-%m-%d").date())
+    except Exception:
+        recv_date = str(datetime.date.today())
+
+    proj_data = db.get(proj, {})
+    comp_map = proj_data.setdefault("\u90e8\u4ef6\u5217\u8868", {})
+
+    target_comp = comp_name
+    if target_comp not in comp_map:
+        target_comp_norm = norm_text(target_comp)
+        match = next((k for k in comp_map.keys() if target_comp_norm and target_comp_norm in norm_text(k)), "")
+        if match:
+            target_comp = match
+
+    if target_comp not in comp_map:
+        comp_map[target_comp] = {"\u4e3b\u6d41\u7a0b": "\u5efa\u6a21(\u542b\u6253\u5370/\u7b7e\u6837)", "\u65e5\u5fd7\u6d41": []}
+
+    log_list = comp_map[target_comp].setdefault("\u65e5\u5fd7\u6d41", [])
+    log_list.append({
+        "\u65e5\u671f": recv_date,
+        "\u6d41\u8f6c": "\u6253\u5370\u8ffd\u8e2a",
+        "\u5de5\u5e8f": "\u5efa\u6a21(\u542b\u6253\u5370/\u7b7e\u6837)",
+        "\u4e8b\u4ef6": f"[\u6253\u5370\u4ef6\u5df2\u6536\u5230] {desc} | \u6765\u81ea\uff1a{place}",
+    })
+    return True
+
+
+def render_print_tracking_board(pm_view, visible_projects, ui_prefix="print_track"):
+    st.title("\U0001f5a8\ufe0f \u6253\u5370\u8ffd\u8e2a")
+    st.caption("\u81ea\u52a8\u6c47\u805a\u5f85\u529e/\u65e5\u5fd7\u4e2d\u7684\u6253\u5370\u4fe1\u606f\uff0c\u5e76\u7edf\u4e00\u8ffd\u8e2a\uff1a\u662f\u5426\u5b89\u6392\u6253\u5370\u3001\u7ed9\u8c01\u6253\u3001\u662f\u5426\u6536\u5230\u4ef6\u3002")
+
+    cfg = db.setdefault("\u7cfb\u7edf\u914d\u7f6e", {})
+    stored_rows = cfg.get("\u6253\u5370\u8ffd\u8e2a\u5217\u8868", []) if isinstance(cfg.get("\u6253\u5370\u8ffd\u8e2a\u5217\u8868", []), list) else []
+    locations = _normalize_print_location_options(cfg.get("\u6253\u5370\u5730\u70b9\u9009\u9879", []))
+
+    auto_rows = []
+    auto_rows.extend(_build_auto_print_rows_from_todo(pm_view, visible_projects, locations))
+    auto_rows.extend(_build_auto_print_rows_from_logs(visible_projects, locations, days=30))
+    merged_rows = _merge_print_tracking_rows(stored_rows, auto_rows)
+
+    source_cnt = {
+        "Todo\u81ea\u52a8\u635e\u53d6": len([x for x in merged_rows if str(x.get("\u6765\u6e90", "")).strip() == "Todo\u81ea\u52a8\u635e\u53d6"]),
+        "\u65e5\u5fd7\u81ea\u52a8\u635e\u53d6": len([x for x in merged_rows if str(x.get("\u6765\u6e90", "")).strip() == "\u65e5\u5fd7\u81ea\u52a8\u635e\u53d6"]),
+        "\u624b\u52a8\u5f55\u5165": len([x for x in merged_rows if str(x.get("\u6765\u6e90", "")).strip() == "\u624b\u52a8\u5f55\u5165"]),
+    }
+    st.caption(f"\U0001f4cc \u5f85\u529e\u81ea\u52a8\u635e\u53d6 {source_cnt['Todo\u81ea\u52a8\u635e\u53d6']} \u6761 \uff5c \U0001f4cb \u65e5\u5fd7\u81ea\u52a8\u635e\u53d6 {source_cnt['\u65e5\u5fd7\u81ea\u52a8\u635e\u53d6']} \u6761 \uff5c \u270f\ufe0f \u624b\u52a8\u5f55\u5165 {source_cnt['\u624b\u52a8\u5f55\u5165']} \u6761")
+
+    with st.container(border=True):
+        st.markdown("**\u270f\ufe0f \u624b\u52a8\u65b0\u589e\u6253\u5370\u8ffd\u8e2a**")
+        c1, c2, c3, c4, c5 = st.columns([1.1, 1.6, 1.3, 1.3, 1.4])
+        with c1:
+            add_date = st.date_input("\u65e5\u671f", datetime.date.today(), key=f"{ui_prefix}_add_date")
+        with c2:
+            proj_opts = [p for p in visible_projects if p in db and p != "\u7cfb\u7edf\u914d\u7f6e"]
+            add_proj = st.selectbox("\u9879\u76ee", proj_opts if proj_opts else [""], key=f"{ui_prefix}_add_proj")
+        with c3:
+            comp_opts = ["\u5168\u5c40\u8fdb\u5ea6"]
+            if add_proj and add_proj in db:
+                comp_opts.extend(list((db.get(add_proj, {}).get("\u90e8\u4ef6\u5217\u8868", {}) or {}).keys()))
+            comp_opts.extend(STD_COMPONENTS)
+            comp_opts = list(dict.fromkeys([x for x in comp_opts if str(x).strip()]))
+            add_comp = st.selectbox("\u90e8\u4ef6", comp_opts, key=f"{ui_prefix}_add_comp")
+        with c4:
+            add_loc_pick = st.selectbox("\u6253\u5370\u5730\u70b9", locations + ["\u2795 \u65b0\u589e\u6253\u5370\u5730\u70b9..."], key=f"{ui_prefix}_add_loc_pick")
+        with c5:
+            add_desc = st.text_input("\u63cf\u8ff0", key=f"{ui_prefix}_add_desc", placeholder="\u4f8b\uff1a\u5934\u96d5v3")
+
+        add_loc_new = ""
+        if add_loc_pick == "\u2795 \u65b0\u589e\u6253\u5370\u5730\u70b9...":
+            add_loc_new = st.text_input("\u65b0\u589e\u6253\u5370\u5730\u70b9", key=f"{ui_prefix}_add_loc_new", placeholder="\u4f8b\uff1a\u67d0\u67d0\u5de5\u4f5c\u5ba4")
+
+        if st.button("\u2795 \u6dfb\u52a0\u6253\u5370\u8ffd\u8e2a", key=f"{ui_prefix}_add_btn", type="primary"):
+            if not str(add_proj).strip() or add_proj not in db:
+                st.warning("\u8bf7\u5148\u9009\u62e9\u9879\u76ee\u3002")
+            elif not str(add_desc).strip():
+                st.warning("\u8bf7\u586b\u5199\u63cf\u8ff0\u3002")
+            else:
+                final_loc = str(add_loc_new).strip() if add_loc_pick == "\u2795 \u65b0\u589e\u6253\u5370\u5730\u70b9..." else str(add_loc_pick).strip()
+                new_row = {
+                    "_id": uuid.uuid4().hex[:12],
+                    "\u65e5\u671f": str(add_date),
+                    "\u9879\u76ee": str(add_proj).strip(),
+                    "\u90e8\u4ef6": str(add_comp).strip() or "\u5168\u5c40\u8fdb\u5ea6",
+                    "\u63cf\u8ff0": str(add_desc).strip(),
+                    "\u6253\u5370\u5730\u70b9": final_loc,
+                    "\u5df2\u6536\u5230": False,
+                    "\u6536\u5230\u65e5\u671f": "",
+                    "\u6765\u6e90": "\u624b\u52a8\u5f55\u5165",
+                }
+                merged_rows.append(new_row)
+                if final_loc:
+                    locations = _normalize_print_location_options(locations + [final_loc])
+                cfg["\u6253\u5370\u8ffd\u8e2a\u5217\u8868"] = _normalize_print_tracking_rows(merged_rows)
+                cfg["\u6253\u5370\u5730\u70b9\u9009\u9879"] = locations
+                sync_save_db("\u7cfb\u7edf\u914d\u7f6e")
+                st.success("\u5df2\u65b0\u589e\u6253\u5370\u8ffd\u8e2a\u8bb0\u5f55\u3002")
+                st.rerun()
+
+    f1, f2, f3 = st.columns([1.1, 1.8, 1.2])
+    with f1:
+        status_filter = st.selectbox("\u72b6\u6001\u7b5b\u9009", ["\u672a\u6536\u5230", "\u5df2\u6536\u5230", "\u5168\u90e8"], index=0, key=f"{ui_prefix}_flt_status")
+    with f2:
+        proj_filter_opts = ["\u5168\u90e8"] + sorted(list(dict.fromkeys([str(x.get("\u9879\u76ee", "")).strip() for x in merged_rows if str(x.get("\u9879\u76ee", "")).strip()])))
+        proj_filter = st.selectbox("\u9879\u76ee\u7b5b\u9009", proj_filter_opts, key=f"{ui_prefix}_flt_proj")
+    with f3:
+        loc_filter = st.selectbox("\u5730\u70b9\u7b5b\u9009", ["\u5168\u90e8"] + locations, key=f"{ui_prefix}_flt_loc")
+
+    filtered = []
+    for row in merged_rows:
+        recvd = bool(row.get("\u5df2\u6536\u5230", False))
+        if status_filter == "\u672a\u6536\u5230" and recvd:
+            continue
+        if status_filter == "\u5df2\u6536\u5230" and not recvd:
+            continue
+        if proj_filter != "\u5168\u90e8" and str(row.get("\u9879\u76ee", "")).strip() != proj_filter:
+            continue
+        if loc_filter != "\u5168\u90e8" and str(row.get("\u6253\u5370\u5730\u70b9", "")).strip() != loc_filter:
+            continue
+        filtered.append(row)
+
+    if not filtered:
+        st.info("\u5f53\u524d\u7b5b\u9009\u4e0b\u6682\u65e0\u6253\u5370\u8ffd\u8e2a\u8bb0\u5f55\u3002")
+        return
+
+    show_rows = []
+    for row in filtered:
+        src = str(row.get("\u6765\u6e90", "")).strip() or "\u624b\u52a8\u5f55\u5165"
+        show_rows.append({
+            "_id": str(row.get("_id", "")).strip(),
+            "\u65e5\u671f": str(row.get("\u65e5\u671f", "")).strip(),
+            "\u9879\u76ee": str(row.get("\u9879\u76ee", "")).strip(),
+            "\u90e8\u4ef6": str(row.get("\u90e8\u4ef6", "")).strip(),
+            "\u63cf\u8ff0": str(row.get("\u63cf\u8ff0", "")).strip(),
+            "\u6253\u5370\u5730\u70b9": str(row.get("\u6253\u5370\u5730\u70b9", "")).strip(),
+            "\u5df2\u6536\u5230": bool(row.get("\u5df2\u6536\u5230", False)),
+            "\u6536\u5230\u65e5\u671f": str(row.get("\u6536\u5230\u65e5\u671f", "")).strip(),
+            "\u6765\u6e90": PRINT_TRACK_SOURCE_LABELS.get(src, src),
+        })
+
+    edited_df = st.data_editor(
+        pd.DataFrame(show_rows),
+        width='stretch',
+        hide_index=True,
+        num_rows="dynamic",
+        key=f"{ui_prefix}_editor",
+        column_config={
+            "_id": st.column_config.TextColumn("_id", disabled=True, width="small"),
+            "\u65e5\u671f": st.column_config.TextColumn("\u65e5\u671f(YYYY-MM-DD)", width="small"),
+            "\u9879\u76ee": st.column_config.TextColumn("\u9879\u76ee", width="medium"),
+            "\u90e8\u4ef6": st.column_config.TextColumn("\u90e8\u4ef6", width="small"),
+            "\u63cf\u8ff0": st.column_config.TextColumn("\u63cf\u8ff0", width="large"),
+            "\u6253\u5370\u5730\u70b9": st.column_config.TextColumn("\u6253\u5370\u5730\u70b9", width="small"),
+            "\u5df2\u6536\u5230": st.column_config.CheckboxColumn("\u5df2\u6536\u5230", width="small"),
+            "\u6536\u5230\u65e5\u671f": st.column_config.TextColumn("\u6536\u5230\u65e5\u671f", width="small", help="\u52fe\u9009\u5df2\u6536\u5230\u540e\u4f1a\u81ea\u52a8\u8865\u5f53\u5929\uff0c\u53ef\u624b\u52a8\u6539\u4e3a\u5b9e\u9645\u65e5\u671f"),
+            "\u6765\u6e90": st.column_config.TextColumn("\u6765\u6e90", disabled=True, width="small"),
+        },
+        disabled=["_id", "\u6765\u6e90"],
+    )
+
+    if st.button("\U0001f4be \u4fdd\u5b58\u6253\u5370\u8ffd\u8e2a", key=f"{ui_prefix}_save"):
+        old_map = {str(x.get("_id", "")).strip(): x for x in merged_rows}
+        new_rows = []
+        changed_projects = set()
+        for rec in edited_df.to_dict("records"):
+            rid = str(rec.get("_id", "")).strip() or uuid.uuid4().hex[:12]
+            source_show = str(rec.get("\u6765\u6e90", "")).strip()
+            source_raw = next((k for k, v in PRINT_TRACK_SOURCE_LABELS.items() if v == source_show), source_show)
+            row = {
+                "_id": rid,
+                "\u65e5\u671f": str(rec.get("\u65e5\u671f", "")).strip(),
+                "\u9879\u76ee": str(rec.get("\u9879\u76ee", "")).strip(),
+                "\u90e8\u4ef6": str(rec.get("\u90e8\u4ef6", "")).strip() or "\u5168\u5c40\u8fdb\u5ea6",
+                "\u63cf\u8ff0": str(rec.get("\u63cf\u8ff0", "")).strip(),
+                "\u6253\u5370\u5730\u70b9": str(rec.get("\u6253\u5370\u5730\u70b9", "")).strip(),
+                "\u5df2\u6536\u5230": bool(rec.get("\u5df2\u6536\u5230", False)),
+                "\u6536\u5230\u65e5\u671f": str(rec.get("\u6536\u5230\u65e5\u671f", "")).strip(),
+                "\u6765\u6e90": source_raw if source_raw in PRINT_TRACK_SOURCE_LABELS else "\u624b\u52a8\u5f55\u5165",
+            }
+            row = _normalize_print_tracking_rows([row])[0]
+
+            old_row = old_map.get(rid, {})
+            old_recv = bool(old_row.get("\u5df2\u6536\u5230", False))
+            if row.get("\u5df2\u6536\u5230") and (not old_recv):
+                if not str(row.get("\u6536\u5230\u65e5\u671f", "")).strip():
+                    row["\u6536\u5230\u65e5\u671f"] = str(datetime.date.today())
+                if _append_print_received_log(row):
+                    changed_projects.add(str(row.get("\u9879\u76ee", "")).strip())
+
+            if str(row.get("\u6253\u5370\u5730\u70b9", "")).strip():
+                locations.append(str(row.get("\u6253\u5370\u5730\u70b9", "")).strip())
+            new_rows.append(row)
+
+        cfg["\u6253\u5370\u8ffd\u8e2a\u5217\u8868"] = _normalize_print_tracking_rows(new_rows)
+        cfg["\u6253\u5370\u5730\u70b9\u9009\u9879"] = _normalize_print_location_options(locations)
+
+        for proj in sorted([p for p in changed_projects if p in db]):
+            sync_save_db(proj)
+        sync_save_db("\u7cfb\u7edf\u914d\u7f6e")
+        st.success(f"\u6253\u5370\u8ffd\u8e2a\u5df2\u4fdd\u5b58\uff0c\u5171 {len(new_rows)} \u6761\u3002")
+        st.rerun()
 
 
 def _normalize_garment_flow(raw_obj):
@@ -4405,25 +4736,31 @@ def render_garment_special_board(sel_proj, ui_prefix="garment_flow"):
     process_key = "工序"
     event_key = "事件"
 
-    st.markdown("##### 👔 Garment Flow")
-    st.caption("Dedicated garment flow, with optional sync to garment component logs.")
+    st.markdown("##### 👔 服装流程")
+    st.caption("服装流程独立跟踪；可选同步到服装部件日志。")
 
     flow = _normalize_garment_flow(db.get(sel_proj, {}).get("garment_flow", {}))
     curr_stage = flow.get("stage", "Follow Global")
 
     x1, x2 = st.columns([1.3, 2.7])
     with x1:
-        new_stage = st.selectbox("Garment Stage", GARMENT_STAGES, index=GARMENT_STAGES.index(curr_stage) if curr_stage in GARMENT_STAGES else 0, key=f"{ui_prefix}_stage")
+        new_stage = st.selectbox(
+            "服装阶段",
+            GARMENT_STAGES,
+            index=GARMENT_STAGES.index(curr_stage) if curr_stage in GARMENT_STAGES else 0,
+            key=f"{ui_prefix}_stage",
+            format_func=lambda x: GARMENT_STAGE_LABELS.get(x, x),
+        )
     with x2:
-        note = st.text_input("Stage Note", key=f"{ui_prefix}_note", placeholder="What changed in this step")
+        note = st.text_input("阶段备注", key=f"{ui_prefix}_note", placeholder="这一步发生了什么变化")
 
     y1, y2 = st.columns([1.2, 2.8])
     with y1:
-        action_date = st.date_input("Date", datetime.date.today(), key=f"{ui_prefix}_date")
+        action_date = st.date_input("日期", datetime.date.today(), key=f"{ui_prefix}_date")
     with y2:
-        sync_comp_log = st.checkbox("Sync to garment component log", value=True, key=f"{ui_prefix}_sync")
+        sync_comp_log = st.checkbox("同步到服装部件日志", value=True, key=f"{ui_prefix}_sync")
 
-    if st.button("💾 Save Garment Stage", key=f"{ui_prefix}_save", type="primary"):
+    if st.button("💾 保存服装阶段", key=f"{ui_prefix}_save", type="primary"):
         flow["stage"] = new_stage
         flow.setdefault("records", []).append({"date": str(action_date), "stage": new_stage, "note": str(note).strip()})
 
@@ -4447,10 +4784,11 @@ def render_garment_special_board(sel_proj, ui_prefix="garment_flow"):
             comp_data = db[sel_proj].setdefault(comp_key, {})
             if comp_name not in comp_data:
                 comp_data[comp_name] = {stage_key: STAGES_UNIFIED[0], log_key: []}
-            evt = f"[GarmentFlow] stage={new_stage}" + (f" | {str(note).strip()}" if str(note).strip() else "")
+            stage_cn = GARMENT_STAGE_LABELS.get(new_stage, new_stage)
+            evt = f"[服装流程] 阶段={stage_cn}" + (f" | {str(note).strip()}" if str(note).strip() else "")
             comp_data[comp_name].setdefault(log_key, []).append({
                 date_key: str(action_date),
-                flow_key: "GarmentFlow",
+                flow_key: "服装流程",
                 process_key: target_stage,
                 event_key: evt,
             })
@@ -4458,12 +4796,19 @@ def render_garment_special_board(sel_proj, ui_prefix="garment_flow"):
 
         db[sel_proj]["garment_flow"] = flow
         sync_save_db(sel_proj)
-        st.success("Garment flow saved.")
+        st.success("服装流程已保存。")
         st.rerun()
 
     rows = flow.get("records", [])
     if rows:
-        st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
+        show_rows = []
+        for row in rows:
+            show_rows.append({
+                "日期": str(row.get("date", "")).strip(),
+                "阶段": GARMENT_STAGE_LABELS.get(str(row.get("stage", "")).strip(), str(row.get("stage", "")).strip()),
+                "备注": str(row.get("note", "")).strip(),
+            })
+        st.dataframe(pd.DataFrame(show_rows), width='stretch', hide_index=True)
 
 
 def render_project_inventory_ledger(sel_proj, key_prefix="inv"):
@@ -5075,7 +5420,7 @@ render_sidebar_todo_panel(current_pm)
 
 
 menu = st.sidebar.radio("📂 功能导航", [
-    MENU_DASHBOARD, MENU_SPECIFIC, MENU_FASTLOG,
+    MENU_DASHBOARD, MENU_SPECIFIC, MENU_PRINT, MENU_FASTLOG,
     MENU_HISTORY, MENU_SETTINGS, MENU_GUIDE
 ])
 st.sidebar.caption("建议流程：先看全局，再进 PM 工作台；手机端可用 AI 速记做晚间复盘。")
@@ -5504,7 +5849,7 @@ if menu == MENU_DASHBOARD:
     render_dashboard_plan_board(valid_projs)
 
     st.divider()
-    st.subheader("Weekly Focus")
+    st.subheader("📌 本周重点")
     SYS_KEY = "系统配置"
     DONE_KEY = "完成"
     DONE_TIME_KEY = "完成时间"
@@ -5523,23 +5868,23 @@ if menu == MENU_DASHBOARD:
     week_end = week_start + datetime.timedelta(days=6)
 
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Todo Overdue", len(todo_overdue))
-    m2.metric("Todo Due <=3d", len(todo_soon))
-    m3.metric("Plan Soon", int(soon_cnt))
-    m4.metric("Plan Delay", int(delay_cnt))
+    m1.metric("待办已逾期", len(todo_overdue))
+    m2.metric("待办3天内到期", len(todo_soon))
+    m3.metric("计划临期", int(soon_cnt))
+    m4.metric("计划延误", int(delay_cnt))
 
     focus_rows = []
     for td in todo_overdue[:6]:
-        focus_rows.append({"Type": "Todo Overdue", "Project": todo_project_text(td), "Detail": str(td.get(TASK_KEY, "")).strip()})
+        focus_rows.append({"类型": "待办逾期", "项目": todo_project_text(td), "内容": str(td.get(TASK_KEY, "")).strip()})
     for row in plan_rows:
         if row.get(STATE_KEY) == "计划-Delay":
-            focus_rows.append({"Type": "Plan Delay", "Project": str(row.get(PROJECT_KEY, "")).strip(), "Detail": str(row.get(STAGE_KEY, "")).strip()})
+            focus_rows.append({"类型": "计划延误", "项目": str(row.get(PROJECT_KEY, "")).strip(), "内容": str(row.get(STAGE_KEY, "")).strip()})
     if focus_rows:
         st.dataframe(pd.DataFrame(focus_rows[:12]), width='stretch', hide_index=True)
     else:
-        st.caption("No high-priority alerts this week.")
+        st.caption("本周暂无高优先级预警。")
 
-    if st.button("Generate Weekly Notes", key="dash_weekly_digest_gen"):
+    if st.button("生成本周纪要", key="dash_weekly_digest_gen"):
         done_this_week = 0
         for td in todos_visible:
             if not bool(td.get(DONE_KEY)):
@@ -5549,26 +5894,26 @@ if menu == MENU_DASHBOARD:
                 done_this_week += 1
 
         lines = [
-            f"Weekly Notes ({week_start} ~ {week_end})",
+            f"本周纪要（{week_start} ~ {week_end}）",
             "",
-            f"- Todo overdue: {len(todo_overdue)}",
-            f"- Todo due within 3 days: {len(todo_soon)}",
-            f"- Plan soon: {soon_cnt}",
-            f"- Plan delay: {delay_cnt}",
-            f"- Todo completed this week: {done_this_week}",
+            f"- 待办逾期：{len(todo_overdue)}",
+            f"- 待办3天内到期：{len(todo_soon)}",
+            f"- 计划临期：{soon_cnt}",
+            f"- 计划延误：{delay_cnt}",
+            f"- 本周完成待办：{done_this_week}",
             "",
-            "Top focus items:",
+            "重点事项：",
         ]
         if focus_rows:
             for row in focus_rows[:10]:
-                lines.append(f"- [{row['Type']}] {row['Project']} | {row['Detail']}")
+                lines.append(f"- [{row['类型']}] {row['项目']} | {row['内容']}")
         else:
-            lines.append("- None")
+            lines.append("- 无")
         st.session_state["dash_weekly_digest_text"] = "\n".join(lines)
 
     digest_text = str(st.session_state.get("dash_weekly_digest_text", "")).strip()
     if digest_text:
-        st.text_area("Weekly Notes Draft", value=digest_text, height=240, key="dash_weekly_digest_output")
+        st.text_area("本周纪要草稿", value=digest_text, height=240, key="dash_weekly_digest_output")
 
     st.subheader("📋 全局大盘明细")
     if table_data:
@@ -5852,7 +6197,7 @@ if menu == MENU_DASHBOARD:
 
         st.markdown("##### 🧩 大盘明细可编辑表")
         st.caption("直接在表格中修改基础字段和【最新全盘动态】；默认追加为新记录，勾选【改写历史】后改写当前最新动态。")
-        st.caption("规则：日期优先。未来日期自动同步到 To do；过去日期按该日期写入历史。无日期时再按语气词判断。")
+        st.caption("规则：日期优先。未来日期自动同步到待办；过去日期按该日期写入历史。无日期时再按语气词判断。")
 
         editable_cols = ["状态", "项目", "项目当前阶段", "开定时间", "预计发货", "跟单", "最新全盘动态", "断更", "开定延迟预警", "发货延迟预警"]
         editable_df = show_df[editable_cols].copy()
@@ -6052,9 +6397,9 @@ if menu == MENU_DASHBOARD:
                     sync_save_db(proj)
                 todo_bits = []
                 if todo_created:
-                    todo_bits.append(f"To do新建 {todo_created} 条")
+                    todo_bits.append(f"待办新建 {todo_created} 条")
                 if todo_updated:
-                    todo_bits.append(f"To do更新 {todo_updated} 条")
+                    todo_bits.append(f"待办更新 {todo_updated} 条")
                 todo_suffix = ("；" + "，".join(todo_bits)) if todo_bits else ""
                 st.success(
                     f"已保存 {len(changed_projects)} 个项目：基础字段 {basic_updates} 条，"
@@ -6110,33 +6455,33 @@ elif menu == MENU_SPECIFIC:
 
             c_n1, c_n2, c_n3, c_n4, c_n5 = st.columns([2.0, 1.0, 1.0, 1.4, 1.0])
             with c_n1:
-                new_p = st.text_input("Project Name (e.g. 1/6 Batman)")
+                new_p = st.text_input("项目名称（例：1/6 Batman）")
             with c_n2:
-                new_pm = st.selectbox("Owner", [x for x in pm_list if x != "所有人"], index=0)
+                new_pm = st.selectbox("负责人", [x for x in pm_list if x != "所有人"], index=0)
             with c_n3:
-                new_ratio = st.selectbox("Scale", ratio_opts, index=ratio_opts.index(default_ratio) if default_ratio in ratio_opts else 0)
+                new_ratio = st.selectbox("比例", ratio_opts, index=ratio_opts.index(default_ratio) if default_ratio in ratio_opts else 0)
             with c_n4:
-                new_ip_owner = st.text_input("IP Owner", value=str(tpl_cfg.get("default_ip_owner", "")).strip(), placeholder="optional")
+                new_ip_owner = st.text_input("版权方", value=str(tpl_cfg.get("default_ip_owner", "")).strip(), placeholder="可选")
             with c_n5:
                 st.write("")
                 if st.button("创建", type="primary"):
                     if new_p and new_p not in db:
                         db[new_p] = build_project_shell(new_pm, new_ratio, new_ip_owner)
                         sync_save_db(new_p)
-                        st.success(f"Created and assigned to {new_pm}")
-                        st.toast(f"✅ Created: {new_p}")
+                        st.success(f"已创建并分配给 {new_pm}")
+                        st.toast(f"✅ 已创建：{new_p}")
                         st.session_state.new_proj_mode = False
                         st.rerun()
                     elif new_p in db:
-                        st.warning("Project already exists.")
+                        st.warning("项目已存在。")
                     else:
-                        st.error("Project name is required.")
+                        st.error("项目名称不能为空。")
 
     todo_list = render_pm_todo_manager(valid_projs, current_pm)
     st.divider()
 
     if not valid_projs:
-        st.warning("当前视角下暂无项目，可先维护 To do List。")
+        st.warning("当前视角下暂无项目，可先维护待办清单。")
         st.stop()
 
     st.markdown("<div class='pm-section-title'>🎯 特定项目操作</div>", unsafe_allow_html=True)
@@ -6469,7 +6814,7 @@ elif menu == MENU_SPECIFIC:
                 st.caption("开定识别：" + infer_todo_target_hint(pick_todo, valid_projs))
                 st.caption("最近落地：" + todo_link_status_text(pick_todo))
         else:
-            st.caption("当前项目暂无关联 To do；你也可以先在左侧 To do 新建后再带入。")
+            st.caption("当前项目暂无关联待办；你也可以先在左侧待办新建后再带入。")
 
     st.divider()
 
@@ -6680,7 +7025,7 @@ elif menu == MENU_SPECIFIC:
                 placeholder="例：把建模文件v2发给工程，待确认结构干涉；下午同步设计核对头雕比例",
             )
 
-        st.markdown("**关联 To do（可选）**")
+        st.markdown("**关联待办（可选）**")
         todo_link_labels = []
         todo_link_label_to_id = {}
         todo_link_id_to_label = {}
@@ -6709,15 +7054,20 @@ elif menu == MENU_SPECIFIC:
             if lb in todo_link_label_to_id
         ]
 
-        linked_todo_labels = st.multiselect(
-            "本次记录关联哪些待办",
-            options=todo_link_labels,
-            default=default_todo_labels,
-            key=f"wb_todo_link_labels_{fk}",
-        )
+        if todo_link_labels:
+            linked_todo_labels = st.multiselect(
+                "本次记录关联哪些待办",
+                options=todo_link_labels,
+                default=default_todo_labels,
+                key=f"wb_todo_link_labels_{fk}",
+                placeholder="请选择待关联的待办",
+            )
+        else:
+            st.caption("当前项目暂无可关联待办。")
+            linked_todo_labels = []
         linked_todo_ids = [todo_link_label_to_id[lb] for lb in linked_todo_labels if lb in todo_link_label_to_id]
         todo_auto_done = st.checkbox(
-            "保存后自动完成所关联 To do",
+            "保存后自动完成所关联待办",
             value=bool(st.session_state.get(f"wb_todo_auto_done_{fk}", False) or linked_todo_ids),
             key=f"wb_todo_auto_done_{fk}",
         )
@@ -6755,7 +7105,7 @@ elif menu == MENU_SPECIFIC:
             if wb_comp_raw == "➕ 新增细分配件..." and not wb_new_comp_name:
                 st.warning("你选择了新增细分配件，请先填写细分名称。")
             elif not str(wb_text).strip() and not linked_todo_ids:
-                st.warning("请至少填写一条记录内容，或关联一个 To do。")
+                st.warning("请至少填写一条记录内容，或关联一个待办。")
             else:
                 if wb_comp_raw == "🌐 全局进度 (Overall)":
                     actual_c = "全局进度"
@@ -6791,7 +7141,7 @@ elif menu == MENU_SPECIFIC:
                         if str(handoff_todo_map.get(str(tid).strip(), {}).get("任务", "")).strip()
                     ]
                     if todo_names_for_log:
-                        base_log += " [关联To do] " + "；".join(todo_names_for_log[:3])
+                        base_log += " [关联待办] " + "；".join(todo_names_for_log[:3])
                     if is_completed:
                         base_log += " [系统]彻底完成"
 
@@ -6878,24 +7228,28 @@ elif menu == MENU_SPECIFIC:
                     todo_msg = f"；联动待办 {len(linked_todo_titles)} 条" if linked_todo_titles else ""
                     st.success(f"记录已保存{todo_msg}。")
                     st.rerun()
-        with st.expander("🧪 3. Print Tracking", expanded=False):
-            render_print_tracking_board(sel_proj, ui_prefix=f"pm_print_{norm_text(sel_proj)[:24]}")
 
-        with st.expander("👔 4. Garment Flow", expanded=False):
+        with st.expander("👔 3. 服装流程", expanded=False):
             render_garment_special_board(sel_proj, ui_prefix=f"pm_garment_{norm_text(sel_proj)[:24]}")
 
-        with st.expander("🧩 5. 小比例签板", expanded=False):
+        with st.expander("🧩 4. 小比例签板", expanded=False):
             render_small_scale_signoff_board(sel_proj, ui_prefix=f"pm_small_{norm_text(sel_proj)[:24]}")
-        with st.expander("📦 6. 包装进度", expanded=False):
+        with st.expander("📦 5. 包装进度", expanded=False):
             render_pm_packing_integrated(sel_proj)
 
-        with st.expander("🧾 7. 入库台账", expanded=False):
+        with st.expander("🧾 6. 入库台账", expanded=False):
             render_pm_inventory_integrated(sel_proj)
 
-        with st.expander("💰 8. 成本台账", expanded=False):
+        with st.expander("💰 7. 成本台账", expanded=False):
             render_pm_cost_integrated(sel_proj)
 # ==========================================
-# 模块 3：AI 速记
+# 模块 3：打印追踪
+# ==========================================
+elif menu == MENU_PRINT:
+    render_print_tracking_board(current_pm, valid_projs, ui_prefix="print_track_global")
+
+# ==========================================
+# 模块 4：AI 速记
 # ==========================================
 elif menu == MENU_FASTLOG:
     st.title("📝 手机 AI 速记")
@@ -7564,7 +7918,7 @@ elif menu == MENU_HISTORY:
     ]
 
     st.divider()
-    st.subheader("✅ 已完成 To do 记录（关联此项目）")
+    st.subheader("✅ 已完成待办记录（关联此项目）")
     if done_todos:
         done_rows = []
         for td in sorted(done_todos, key=lambda x: x.get("完成时间", ""), reverse=True):
@@ -7577,7 +7931,7 @@ elif menu == MENU_HISTORY:
             })
         st.dataframe(pd.DataFrame(done_rows), width="stretch", hide_index=True)
     else:
-        st.caption("暂无已完成并关联此项目的 To do 记录。")
+        st.caption("暂无已完成并关联此项目的待办记录。")
 
     project_todos = [
         td for td in db.get("系统配置", {}).get("PM_TODO_LIST", [])
@@ -7585,7 +7939,7 @@ elif menu == MENU_HISTORY:
     ]
 
     st.divider()
-    st.subheader("🕒 To do 历史演进（关联此项目）")
+    st.subheader("🕒 待办历史演进（关联此项目）")
     if project_todos:
         for td in sorted(project_todos, key=lambda x: str(x.get("创建", "")), reverse=True):
             task_title = str(td.get("任务", "")).strip() or "(空任务)"
@@ -7621,10 +7975,10 @@ elif menu == MENU_HISTORY:
                     "所属视角": scope_txt,
                     "完成": "是" if bool(td.get("完成")) else "否",
                 })
-                st.caption(f"To do ID: {item_id}")
+                st.caption(f"待办 ID: {item_id}")
                 st.dataframe(pd.DataFrame(hist_rows), width="stretch", hide_index=True)
     else:
-        st.caption("暂无关联此项目的 To do 历史。")
+        st.caption("暂无关联此项目的待办历史。")
     if flat_data:
         df_logs = pd.DataFrame(flat_data).sort_values(by="日期", ascending=False).reset_index(drop=True)
         df_logs.insert(0, '序号', range(len(df_logs), 0, -1))
@@ -8070,7 +8424,7 @@ elif menu == MENU_SETTINGS:
                             st.success("✅ 已按历史记录恢复。")
                             st.rerun()
                 with c_h2:
-                    del_ids = st.multiselect("多选删除历史记录", id_list, key="merge_hist_delete")
+                    del_ids = st.multiselect("多选删除历史记录", id_list, key="merge_hist_delete", placeholder="请选择要删除的记录")
                     if st.button("🗑️ 删除选中历史", key="btn_del_hist") and del_ids:
                         st.session_state.db["系统配置"]["合并回滚历史"] = [x for x in hist if x.get("id") not in set(del_ids)]
                         sync_save_db()
@@ -8300,7 +8654,7 @@ elif menu == MENU_SETTINGS:
                         sync_save_db()
                         st.success(
                             f"\u5df2\u56de\u6eda\u6210\u5458\u5b57\u6bb5\uff1a\u90e8\u4ef6\u8d1f\u8d23\u4eba {comp_restored} \u5904\uff0c"
-                            f"To do \u5173\u8054\u4eba\u5458 {todo_restored} \u6761\uff0c\u6210\u5458\u6c60 {extra_restored} \u5904\u3002"
+                            f"待办\u5173\u8054\u4eba\u5458 {todo_restored} \u6761\uff0c\u6210\u5458\u6c60 {extra_restored} \u5904\u3002"
                         )
                         st.rerun()
                     else:
@@ -8548,7 +8902,7 @@ elif menu == MENU_SETTINGS:
                     sync_save_db()
                     st.success(
                         f"\u2705 \u5df2\u5b8c\u6210\u56e2\u961f\u6210\u5458\u7ef4\u62a4\uff1a\u90e8\u4ef6\u4fee\u6b63 {comp_changed} \u5904\uff0c"
-                        f"\u547d\u4e2d\u7ec4\u5408 {token_changed} \u6761\uff0cTo do \u4eba\u5458\u4fee\u6b63 {todo_people_changed} \u6761\uff0c"
+                        f"\u547d\u4e2d\u7ec4\u5408 {token_changed} \u6761\uff0c待办\u4eba\u5458\u4fee\u6b63 {todo_people_changed} \u6761\uff0c"
                         f"\u6210\u5458\u6c60\u5904\u7406 {extra_changed} \u6761\u3002"
                     )
                     st.rerun()
@@ -8683,21 +9037,21 @@ elif menu == MENU_GUIDE:
     with st.expander("🚀 5分钟上手路径", expanded=True):
         st.markdown(
             "1. 在 **【🎯 PM 工作台】** 先创建/选择项目。\n"
-            "2. 在 To do 中录入任务（任务必填，CP/DDL 合并字段可选）。\n"
+            "2. 在待办中录入任务（任务必填，CP/DDL 合并字段可选）。\n"
             "3. 在细分配件工作台更新阶段、提审类型、提审结果并保存。\n"
             "4. 去 **【📊 全局大盘与甘特图】** 检查断更、临期预警和甘特时段。"
         )
 
-    with st.expander("🎯 PM 工作台：To do + 透视矩阵", expanded=True):
+    with st.expander("🎯 PM 工作台：待办 + 透视矩阵", expanded=True):
         st.markdown(
-            "1. **To do 排序规则**：未完成在上，已完成自动下沉；CP/DDL 中识别到日期时会做临期提醒。\n"
+            "1. **待办排序规则**：未完成在上，已完成自动下沉；CP/DDL 中识别到日期时会做临期提醒。\n"
             "2. **透视矩阵颜色**：绿色=完成，蓝色=进行中/暂停点，深灰=暂停前流转，黄色=Delay，浅灰=未到阶段。\n"
             "3. **包装快捷跟踪**：可在 PM 工作台直接勾选包装状态；附件追溯在包装模块维护。"
         )
 
     with st.expander("📝 AI 速记：最低成本自动学习", expanded=False):
         st.markdown(
-            "1. **进入专属操作台**：点击左侧 **【🎯 PM 工作台】**，先维护 To do 再选择项目更新。\n"
+            "1. **进入专属操作台**：点击左侧 **【🎯 PM 工作台】**，先维护待办再选择项目更新。\n"
             "2. **填写【基础信息】与【细分角色】**：根据进度选择更新阶段并填入成员名称。\n"
             "3. **填入进展详情**与图片。\n"
             "4. 点击最下方的批量保存按钮，**系统会在保存后全自动为你清空表单！**"
@@ -8721,6 +9075,7 @@ elif menu == MENU_GUIDE:
         st.markdown(
             "每次收工建议下载全量备份（数据+图片）；换设备后通过上传备份一键恢复。"
         )
+
 
 
 
