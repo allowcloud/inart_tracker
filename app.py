@@ -1303,17 +1303,16 @@ def todo_scope_of(td):
 
 
 def todo_visible_for_view(td, pm_view):
-    scope = todo_scope_of(td)
     if pm_view == "所有人":
-        return True
+        raw_scope = str((td or {}).get("所属视角", "")).strip()
+        raw_creator = str((td or {}).get("创建者视角", "")).strip()
+        return raw_scope in ["", "所有人", "未分配"] and raw_creator in ["", "所有人", "未分配"]
+    scope = todo_scope_of(td)
     return scope == pm_view
 
 
 def todo_visible_for_sidebar(td, pm_view):
-    scope = todo_scope_of(td)
-    if pm_view == "所有人":
-        return True
-    return scope == pm_view
+    return todo_visible_for_view(td, pm_view)
 
 
 def build_todo_scope_options(current_pm):
@@ -8722,6 +8721,7 @@ elif menu == MENU_GUIDE:
         st.markdown(
             "每次收工建议下载全量备份（数据+图片）；换设备后通过上传备份一键恢复。"
         )
+
 
 
 
