@@ -3922,7 +3922,7 @@ def render_packing_lightweight_board(sel_proj, ui_prefix="pack_board"):
                 "打回原因": str(rv_reason).strip() if rv_result == "打回" else "",
             })
             board["配置"] = {"需要大物流箱": bool(need_large_box)}
-            board["阶段清单"] = checklist
+            board["阶段清单"] = new_checklist
             board["提审记录"] = review_rounds
             db[sel_proj]["包装专项"] = board
             sync_save_db(sel_proj)
@@ -3981,7 +3981,7 @@ def render_packing_lightweight_board(sel_proj, ui_prefix="pack_board"):
                 })
 
             board["配置"] = {"需要大物流箱": bool(need_large_box)}
-            board["阶段清单"] = checklist
+            board["阶段清单"] = new_checklist
             board["提审记录"] = new_reviews
             db[sel_proj]["包装专项"] = board
             sync_save_db(sel_proj)
@@ -8702,6 +8702,7 @@ elif menu == MENU_GUIDE:
         st.markdown(
             "每次收工建议下载全量备份（数据+图片）；换设备后通过上传备份一键恢复。"
         )
+
 
 
 
