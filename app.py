@@ -1457,22 +1457,22 @@ def todo_matches_project(td, proj_name):
     if not proj:
         return False
 
-    alias_map = db.get("????", {}).get("????", {})
+    alias_map = db.get("系统配置", {}).get("项目别名", {})
     proj_canon = resolve_alias_project(proj, alias_map)
 
-    ref_proj = str(td_obj.get("????", "")).strip()
+    ref_proj = str(td_obj.get("关联项目", "")).strip()
     if ref_proj:
         ref_canon = resolve_alias_project(ref_proj, alias_map)
         if ref_proj in [proj, proj_canon] or ref_canon in [proj, proj_canon]:
             return True
 
-    linked_proj = str(td_obj.get("??????", "")).strip()
+    linked_proj = str(td_obj.get("最近联动项目", "")).strip()
     if linked_proj:
         linked_canon = resolve_alias_project(linked_proj, alias_map)
         if linked_proj in [proj, proj_canon] or linked_canon in [proj, proj_canon]:
             return True
 
-    txt = f"{str(td_obj.get('??', '')).strip()} {todo_cpddl_text(td_obj)}".strip()
+    txt = f"{str(td_obj.get('任务', '')).strip()} {todo_cpddl_text(td_obj)}".strip()
     txt_norm = norm_text(txt)
 
     candidates = set()
@@ -2392,12 +2392,14 @@ def render_pm_todo_manager(valid_projs, current_pm):
                     st.text_input("新增项目负责人", value=current_pm, key="todo_new_proj_owner_ro", disabled=True)
             resolved_ref_proj = new_proj_name.strip()
 
-        p1, p2 = st.columns([2.2, 1.6])
+        st.caption("人员录入建议：优先在下拉选择；如果库里没有，点“➕ 新增关联人员...”即可。")
+        todo_people_manual = ""
+        p1, p2 = st.columns([2.4, 1.4])
         with p1:
             todo_people_sel = st.multiselect("关联人员（可多选/留空）", role_person_options_create, key="todo_people_global")
         with p2:
-            todo_people_manual = st.text_input("补充人员(可手填)", key="todo_people_manual_global", placeholder="例：设计-宇涵 / 宇涵")
-
+            with st.expander("批量粘贴（可选）", expanded=False):
+                todo_people_manual = st.text_input("补充人员（仅在下拉找不到时）", key="todo_people_manual_global", placeholder="例：设计-宇涵 / 宇涵")
         todo_people_sel_clean = [x for x in todo_people_sel if x != todo_new_person_option]
         todo_new_person_token = ""
         if todo_new_person_option in todo_people_sel:
@@ -3546,6 +3548,263 @@ def render_packing_lightweight_board(sel_proj, ui_prefix="pack_board"):
         db[sel_proj]["包装专项"] = board
         sync_save_db(sel_proj)
         st.success("包装看板已保存。")
+        st.rerun()
+
+
+def _normalize_small_scale_signoff(raw_obj):
+    obj = raw_obj if isinstance(raw_obj, dict) else {}
+    cfg_raw = obj.get("配置", {})
+    cfg = cfg_raw if isinstance(cfg_raw, dict) else {}
+    rounds_raw = obj.get("轮次记录", [])
+    if not isinstance(rounds_raw, list):
+        rounds_raw = []
+    milestones_raw = obj.get("里程碑", {})
+    milestones_raw = milestones_raw if isinstance(milestones_raw, dict) else {}
+
+    default_people = str(cfg.get("默认参会", "")).strip() or "工程 / Ven / 设计师 / 叶子 / 戈多（必要情况vi）"
+    round_rows = []
+    for rec in rounds_raw:
+        if not isinstance(rec, dict):
+            continue
+        day_txt = str(rec.get("日期", "")).strip() or str(datetime.date.today())
+        try:
+            day_txt = str(datetime.datetime.strptime(day_txt, "%Y-%m-%d").date())
+        except Exception:
+            day_txt = str(datetime.date.today())
+
+        round_name = str(rec.get("轮次", "")).strip()
+        if not round_name:
+            continue
+
+        slot = str(rec.get("反馈会时段", rec.get("会议时段", "上午"))).strip()
+        if slot not in ["上午", "下午", "未开"]:
+            slot = "上午"
+
+        round_rows.append({
+            "日期": day_txt,
+            "轮次": round_name,
+            "反馈会时段": slot,
+            "参会人员": str(rec.get("参会人员", "")).strip() or default_people,
+            "工程整理": bool(rec.get("工程整理", False)),
+            "设计复核": bool(rec.get("设计复核", False)),
+            "发工厂改模": bool(rec.get("发工厂改模", False)),
+            "设计签字留样": bool(rec.get("设计签字留样", False)),
+            "M版外观并评": bool(rec.get("M版外观并评", False)),
+            "问题反馈": str(rec.get("问题反馈", "")).strip(),
+        })
+
+    milestone_keys = ["T版签板", "M版签板1", "产前定样", "大货色板签板4套", "功能灰板签板1-3套"]
+    milestones = {k: bool(milestones_raw.get(k, False)) for k in milestone_keys}
+
+    return {
+        "配置": {
+            "启用": bool(cfg.get("启用", False)),
+            "默认参会": default_people,
+            "流程备注": str(cfg.get("流程备注", "")).strip(),
+        },
+        "轮次记录": round_rows,
+        "里程碑": milestones,
+    }
+
+
+def _small_scale_round_sort_key(row):
+    day = parse_date_safe((row or {}).get("日期", "")) or datetime.date.max
+    name = str((row or {}).get("轮次", "")).strip().upper()
+    m = re.match(r"^T\s*(\d+)$", name)
+    if m:
+        return (day, 0, int(m.group(1)), name)
+    if name.startswith("M"):
+        return (day, 1, 0, name)
+    return (day, 2, 9999, name)
+
+
+def render_small_scale_signoff_board(sel_proj, ui_prefix="small_scale"):
+    st.markdown("##### 🧪 小比例项目签板流程")
+    st.caption("用于 T1~TN / M版流转协同与历史留痕，不会强制改写当前项目全局阶段。")
+
+    board = _normalize_small_scale_signoff(db.get(sel_proj, {}).get("小比例签板流程", {}))
+    cfg = dict(board.get("配置", {}))
+    rounds = list(board.get("轮次记录", []))
+    milestones = dict(board.get("里程碑", {}))
+
+    enabled = st.checkbox("该项目启用小比例签板流程", value=bool(cfg.get("启用", False)), key=f"{ui_prefix}_enabled")
+    default_people = st.text_input(
+        "默认参会人员",
+        value=str(cfg.get("默认参会", "")).strip(),
+        key=f"{ui_prefix}_default_people",
+        placeholder="工程 / Ven / 设计师 / 叶子 / 戈多（必要情况vi）",
+    )
+    note_txt = st.text_input("流程备注（可选）", value=str(cfg.get("流程备注", "")).strip(), key=f"{ui_prefix}_note")
+
+    if st.button("💾 保存小比例流程配置", key=f"{ui_prefix}_save_cfg"):
+        board["配置"] = {
+            "启用": bool(enabled),
+            "默认参会": str(default_people).strip() or "工程 / Ven / 设计师 / 叶子 / 戈多（必要情况vi）",
+            "流程备注": str(note_txt).strip(),
+        }
+        board["轮次记录"] = rounds
+        board["里程碑"] = milestones
+        db[sel_proj]["小比例签板流程"] = board
+        sync_save_db(sel_proj)
+        st.success("小比例流程配置已保存。")
+        st.rerun()
+
+    if not enabled:
+        st.info("当前项目未启用该流程。启用后可登记 T1~TN 反馈会、改模闭环和签字留样。")
+        return
+
+    st.markdown("**标准节奏（循环）**：工厂试模提交 → 上午反馈小会 → 工程整理+设计复核 → 发工厂改模 → 设计签字留样")
+    st.caption("建议到件后优先排上午会，减少工程外出冲突。")
+
+    a1, a2, a3, a4 = st.columns([1.1, 1.0, 1.0, 2.2])
+    with a1:
+        add_date = st.date_input("轮次日期", datetime.date.today(), key=f"{ui_prefix}_add_date")
+    with a2:
+        add_round = st.text_input("轮次标记", key=f"{ui_prefix}_add_round", placeholder="例：T1 / T2 / T3 / M版")
+    with a3:
+        add_slot = st.selectbox("反馈会时段", ["上午", "下午", "未开"], key=f"{ui_prefix}_add_slot")
+    with a4:
+        add_people = st.text_input(
+            "本轮参会人员",
+            value=str(default_people).strip() or "工程 / Ven / 设计师 / 叶子 / 戈多（必要情况vi）",
+            key=f"{ui_prefix}_add_people",
+        )
+
+    b1, b2, b3, b4, b5 = st.columns(5)
+    with b1:
+        add_eng = st.checkbox("工程整理", value=True, key=f"{ui_prefix}_add_eng")
+    with b2:
+        add_design = st.checkbox("设计复核", value=True, key=f"{ui_prefix}_add_design")
+    with b3:
+        add_send_factory = st.checkbox("发工厂改模", value=True, key=f"{ui_prefix}_add_send")
+    with b4:
+        add_signed_sample = st.checkbox("设计签字留样", value=True, key=f"{ui_prefix}_add_signed")
+    with b5:
+        add_m_parallel = st.checkbox("M版外观并评", value=False, key=f"{ui_prefix}_add_m_parallel")
+    add_feedback = st.text_input("本轮反馈总结", key=f"{ui_prefix}_add_feedback", placeholder="例：关节松紧OK，头雕嘴角需修")
+
+    if st.button("➕ 添加试模轮次", key=f"{ui_prefix}_add_btn"):
+        if not str(add_round).strip():
+            st.warning("请填写轮次标记（例如 T1 / T2）。")
+        else:
+            rounds.append({
+                "日期": str(add_date),
+                "轮次": str(add_round).strip(),
+                "反馈会时段": add_slot,
+                "参会人员": str(add_people).strip() or (str(default_people).strip() or "工程 / Ven / 设计师 / 叶子 / 戈多（必要情况vi）"),
+                "工程整理": bool(add_eng),
+                "设计复核": bool(add_design),
+                "发工厂改模": bool(add_send_factory),
+                "设计签字留样": bool(add_signed_sample),
+                "M版外观并评": bool(add_m_parallel),
+                "问题反馈": str(add_feedback).strip(),
+            })
+            rounds = sorted(rounds, key=_small_scale_round_sort_key)
+            board["配置"] = {
+                "启用": bool(enabled),
+                "默认参会": str(default_people).strip() or "工程 / Ven / 设计师 / 叶子 / 戈多（必要情况vi）",
+                "流程备注": str(note_txt).strip(),
+            }
+            board["轮次记录"] = rounds
+            board["里程碑"] = milestones
+            db[sel_proj]["小比例签板流程"] = board
+            sync_save_db(sel_proj)
+            st.success("已添加轮次记录。")
+            st.rerun()
+
+    if rounds:
+        st.markdown("**试模轮次记录（可直接编辑）**")
+        round_df = pd.DataFrame(sorted(rounds, key=_small_scale_round_sort_key))
+        edited_round_df = st.data_editor(
+            round_df,
+            num_rows="dynamic",
+            width='stretch',
+            hide_index=True,
+            key=f"{ui_prefix}_editor",
+            column_config={
+                "日期": st.column_config.TextColumn("日期(YYYY-MM-DD)"),
+                "轮次": st.column_config.TextColumn("轮次(T1~TN/M版)"),
+                "反馈会时段": st.column_config.SelectboxColumn("反馈会时段", options=["上午", "下午", "未开"]),
+                "参会人员": st.column_config.TextColumn("参会人员"),
+                "工程整理": st.column_config.CheckboxColumn("工程整理"),
+                "设计复核": st.column_config.CheckboxColumn("设计复核"),
+                "发工厂改模": st.column_config.CheckboxColumn("发工厂改模"),
+                "设计签字留样": st.column_config.CheckboxColumn("设计签字留样"),
+                "M版外观并评": st.column_config.CheckboxColumn("M版外观并评"),
+                "问题反馈": st.column_config.TextColumn("问题反馈"),
+            },
+        )
+
+        afternoon_cnt = int((edited_round_df.get("反馈会时段", pd.Series(dtype=str)).astype(str) == "下午").sum()) if "反馈会时段" in edited_round_df.columns else 0
+        if afternoon_cnt > 0:
+            st.warning(f"当前有 {afternoon_cnt} 条记录为下午反馈会。建议优先上午会议。")
+
+        if st.button("💾 保存轮次记录", key=f"{ui_prefix}_save_rounds"):
+            new_rounds = []
+            for _, row in edited_round_df.iterrows():
+                day_txt = str(row.get("日期", "")).strip()
+                round_name = str(row.get("轮次", "")).strip()
+                if not round_name:
+                    continue
+                try:
+                    day_txt = str(datetime.datetime.strptime(day_txt, "%Y-%m-%d").date())
+                except Exception:
+                    day_txt = str(datetime.date.today())
+
+                slot = str(row.get("反馈会时段", "未开")).strip()
+                if slot not in ["上午", "下午", "未开"]:
+                    slot = "未开"
+
+                new_rounds.append({
+                    "日期": day_txt,
+                    "轮次": round_name,
+                    "反馈会时段": slot,
+                    "参会人员": str(row.get("参会人员", "")).strip() or (str(default_people).strip() or "工程 / Ven / 设计师 / 叶子 / 戈多（必要情况vi）"),
+                    "工程整理": bool(row.get("工程整理", False)),
+                    "设计复核": bool(row.get("设计复核", False)),
+                    "发工厂改模": bool(row.get("发工厂改模", False)),
+                    "设计签字留样": bool(row.get("设计签字留样", False)),
+                    "M版外观并评": bool(row.get("M版外观并评", False)),
+                    "问题反馈": str(row.get("问题反馈", "")).strip(),
+                })
+
+            board["配置"] = {
+                "启用": bool(enabled),
+                "默认参会": str(default_people).strip() or "工程 / Ven / 设计师 / 叶子 / 戈多（必要情况vi）",
+                "流程备注": str(note_txt).strip(),
+            }
+            board["轮次记录"] = sorted(new_rounds, key=_small_scale_round_sort_key)
+            board["里程碑"] = milestones
+            db[sel_proj]["小比例签板流程"] = board
+            sync_save_db(sel_proj)
+            st.success("轮次记录已保存。")
+            st.rerun()
+    else:
+        st.caption("暂无轮次记录。")
+
+    st.markdown("**签板里程碑**")
+    mcols = st.columns(3)
+    milestone_labels = ["T版签板", "M版签板1", "产前定样", "大货色板签板4套", "功能灰板签板1-3套"]
+    new_milestones = dict(milestones)
+    for idx, label in enumerate(milestone_labels):
+        with mcols[idx % 3]:
+            new_milestones[label] = st.checkbox(
+                label,
+                value=bool(milestones.get(label, False)),
+                key=f"{ui_prefix}_ms_{idx}",
+            )
+
+    if st.button("💾 保存签板里程碑", key=f"{ui_prefix}_save_milestones"):
+        board["配置"] = {
+            "启用": bool(enabled),
+            "默认参会": str(default_people).strip() or "工程 / Ven / 设计师 / 叶子 / 戈多（必要情况vi）",
+            "流程备注": str(note_txt).strip(),
+        }
+        board["轮次记录"] = rounds
+        board["里程碑"] = new_milestones
+        db[sel_proj]["小比例签板流程"] = board
+        sync_save_db(sel_proj)
+        st.success("签板里程碑已保存。")
         st.rerun()
 
 
@@ -5467,10 +5726,13 @@ elif menu == MENU_SPECIFIC:
                     todo_msg = f"；联动待办 {len(linked_todo_titles)} 条" if linked_todo_titles else ""
                     st.success(f"🎉 记录成功！本次写入 {saved_records} 条{todo_msg}。")
                     st.rerun()
-        with st.expander("📦 3. 包装&入库", expanded=False):
+        with st.expander("🧪 3. 小比例签板流程", expanded=False):
+            render_small_scale_signoff_board(sel_proj, ui_prefix=f"pm_small_{norm_text(sel_proj)[:24]}")
+
+        with st.expander("📦 4. 包装&入库", expanded=False):
             render_pm_packing_inventory_integrated(sel_proj)
 
-        with st.expander("💰 4. 成本面板", expanded=False):
+        with st.expander("💰 5. 成本面板", expanded=False):
             render_pm_cost_integrated(sel_proj)
 # ==========================================
 # 模块 3：AI 速记
@@ -7257,6 +7519,3 @@ elif menu == MENU_GUIDE:
         st.markdown(
             "每次收工建议下载全量备份（数据+图片）；换设备后通过上传备份一键恢复。"
         )
-
-
-
