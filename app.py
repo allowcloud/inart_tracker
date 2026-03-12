@@ -1,4 +1,4 @@
-import streamlit as st
+﻿import streamlit as st
 import json
 import os
 import datetime
@@ -567,6 +567,10 @@ def _ensure_db_shape(db_obj):
         d.setdefault("Milestone", "待立项")
         d.setdefault("Target", "TBD")
         d.setdefault("发货区间", "")
+        if not isinstance(d.get("计划排期"), list):
+            d["计划排期"] = []
+        if not isinstance(d.get("周会备注"), list):
+            d["周会备注"] = []
         if not isinstance(d.get("部件列表"), dict):
             d["部件列表"] = {}
         if not isinstance(d.get("发货数据"), dict):
@@ -1451,28 +1455,210 @@ def fmt_ym(ym):
     return f"{int(ym[0])}/{int(ym[1]):02d}"
 
 
+
+def normalize_todo_project_list(raw_value):
+    if isinstance(raw_value, list):
+        raw_tokens = [str(x).strip() for x in raw_value]
+    else:
+        txt = str(raw_value or "").strip()
+        if not txt:
+            raw_tokens = []
+        else:
+            raw_tokens = [x.strip() for x in re.split(r"[,，;；、|/\n]+", txt) if x.strip()]
+
+    out = []
+    for token in raw_tokens:
+        if token in ["(不关联项目)", "-"]:
+            continue
+        if token not in out:
+            out.append(token)
+    return out
+
+
+def todo_project_list(td_obj):
+    td = td_obj or {}
+    lst = normalize_todo_project_list(td.get("关联项目列表", []))
+    if lst:
+        return lst
+    legacy = str(td.get("关联项目", "")).strip()
+    if legacy and legacy not in ["(不关联项目)", "-"]:
+        return [legacy]
+    return []
+
+
+def todo_project_text(td_obj):
+    projs = todo_project_list(td_obj)
+    return " / ".join(projs)
+
+
+def month_week_to_monday(year, month, week_idx):
+    y = int(year)
+    m = int(month)
+    w = int(week_idx)
+    if w < 1:
+        w = 1
+    if w > 6:
+        w = 6
+    first = datetime.date(y, m, 1)
+    first_monday = first - datetime.timedelta(days=first.weekday())
+    return first_monday + datetime.timedelta(days=(w - 1) * 7)
+
+
+def parse_month_week_token(raw_text, ref_date=None):
+    s = str(raw_text or "").strip()
+    if not s:
+        return None
+    ref = ref_date or datetime.date.today()
+
+    m_full = re.match(r"^(20\d{2})[-/\.](\d{1,2})\s*W\s*([1-6])$", s, flags=re.IGNORECASE)
+    if m_full:
+        y = int(m_full.group(1))
+        mm = int(m_full.group(2))
+        ww = int(m_full.group(3))
+        if 1 <= mm <= 12:
+            return f"{y:04d}-{mm:02d}W{ww}"
+
+    m_short = re.match(r"^(\d{1,2})\s*W\s*([1-6])$", s, flags=re.IGNORECASE)
+    if m_short:
+        mm = int(m_short.group(1))
+        ww = int(m_short.group(2))
+        if 1 <= mm <= 12:
+            return f"{ref.year:04d}-{mm:02d}W{ww}"
+
+    m_cn = re.match(r"^(\d{1,2})月\s*第?\s*([1-6])\s*周$", s)
+    if m_cn:
+        mm = int(m_cn.group(1))
+        ww = int(m_cn.group(2))
+        if 1 <= mm <= 12:
+            return f"{ref.year:04d}-{mm:02d}W{ww}"
+
+    return None
+
+
+def month_week_to_date(raw_token):
+    token = parse_month_week_token(raw_token)
+    if not token:
+        return None
+    m = re.match(r"^(20\d{2})-(\d{2})W([1-6])$", token)
+    if not m:
+        return None
+    try:
+        return month_week_to_monday(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except Exception:
+        return None
+
+
+def format_month_week_short(raw_token):
+    token = parse_month_week_token(raw_token)
+    if not token:
+        return ""
+    m = re.match(r"^(20\d{2})-(\d{2})W([1-6])$", token)
+    if not m:
+        return ""
+    return f"{int(m.group(2))}W{int(m.group(3))}"
+
+
+def format_week_range_label(week_start):
+    d0 = week_start if isinstance(week_start, datetime.date) else None
+    if not d0:
+        return ""
+    d1 = d0 + datetime.timedelta(days=6)
+    return f"{d0.month}/{d0.day}-{d1.month}/{d1.day}"
+
+
+def normalize_plan_schedule_rows(raw_rows, ref_year=None):
+    rows = raw_rows if isinstance(raw_rows, list) else []
+    out = []
+    year_hint = int(ref_year or datetime.date.today().year)
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        stage = str(row.get("阶段", "")).strip()
+        if not stage:
+            continue
+        dri = str(row.get("DRI", "")).strip()
+        start_token = parse_month_week_token(row.get("开始周", ""), ref_date=datetime.date(year_hint, 1, 1))
+        end_token = parse_month_week_token(row.get("结束周", ""), ref_date=datetime.date(year_hint, 1, 1))
+        if not start_token or not end_token:
+            continue
+        start_dt = month_week_to_date(start_token)
+        end_dt = month_week_to_date(end_token)
+        if (start_dt is None) or (end_dt is None):
+            continue
+        if end_dt < start_dt:
+            start_token, end_token = end_token, start_token
+        out.append({"阶段": stage, "开始周": start_token, "结束周": end_token, "DRI": dri})
+    return out
+
+
+def normalize_weekly_notes_rows(raw_rows):
+    rows = raw_rows if isinstance(raw_rows, list) else []
+    out = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        week_token = parse_month_week_token(row.get("周", ""))
+        txt = str(row.get("内容", "")).strip()
+        if not week_token or not txt:
+            continue
+        out.append({"周": week_token, "内容": txt})
+    return out
+
+
+def is_macro_stage_done_from_logs(proj_data, macro_stage):
+    p = proj_data if isinstance(proj_data, dict) else {}
+    done_kws = ["彻底完成", "完成", "完结", "结束", "通过", "ok", "done", "已on-hand", "已 on-hand", "已 on hand"]
+    for comp in p.get("部件列表", {}).values():
+        for lg in (comp or {}).get("日志流", []):
+            if is_hidden_system_log(lg):
+                continue
+            stg = str((lg or {}).get("工序", "")).strip()
+            if get_macro_phase(stg) != str(macro_stage):
+                continue
+            evt = str((lg or {}).get("事件", "")).strip().lower()
+            if any(k.lower() in evt for k in done_kws):
+                return True
+    return False
+
+
+def todo_append_history_version(td_obj, actor="系统"):
+    td = td_obj if isinstance(td_obj, dict) else {}
+    hist = td.setdefault("历史版本", [])
+    if not isinstance(hist, list):
+        hist = []
+        td["历史版本"] = hist
+    hist.append({
+        "时间": datetime.datetime.now().isoformat(timespec="seconds"),
+        "操作者": str(actor or "系统"),
+        "任务": str(td.get("任务", "")).strip(),
+        "CPDDL": todo_cpddl_text(td),
+        "关联项目列表": todo_project_list(td),
+        "关联人员": normalize_people_text(td.get("关联人员", "")),
+        "所属视角": str(td.get("所属视角", "")).strip(),
+        "完成": bool(td.get("完成", False)),
+    })
 def todo_matches_project(td, proj_name):
     td_obj = td or {}
     proj = str(proj_name or "").strip()
     if not proj:
         return False
 
-    alias_map = db.get("????", {}).get("????", {})
+    alias_map = db.get("系统配置", {}).get("项目别名", {})
     proj_canon = resolve_alias_project(proj, alias_map)
 
-    ref_proj = str(td_obj.get("????", "")).strip()
-    if ref_proj:
+    ref_projects = todo_project_list(td_obj)
+    for ref_proj in ref_projects:
         ref_canon = resolve_alias_project(ref_proj, alias_map)
         if ref_proj in [proj, proj_canon] or ref_canon in [proj, proj_canon]:
             return True
 
-    linked_proj = str(td_obj.get("??????", "")).strip()
-    if linked_proj:
+    linked_projects = normalize_todo_project_list(td_obj.get("最近联动项目", ""))
+    for linked_proj in linked_projects:
         linked_canon = resolve_alias_project(linked_proj, alias_map)
         if linked_proj in [proj, proj_canon] or linked_canon in [proj, proj_canon]:
             return True
 
-    txt = f"{str(td_obj.get('??', '')).strip()} {todo_cpddl_text(td_obj)}".strip()
+    txt = f"{str(td_obj.get('任务', '')).strip()} {todo_cpddl_text(td_obj)}".strip()
     txt_norm = norm_text(txt)
 
     candidates = set()
@@ -1514,11 +1700,17 @@ def infer_todo_target_hint(td, valid_projs):
     cpddl = todo_cpddl_text(td_obj)
     txt = f"{title} {cpddl}".strip()
     txt_norm = norm_text(txt)
-    ref_proj = str(td_obj.get("关联项目", "")).strip()
     alias_map = db.get("系统配置", {}).get("项目别名", {})
 
-    proj = ref_proj if ref_proj else ""
-    if not proj:
+    proj_list = []
+    for p in todo_project_list(td_obj):
+        p_canon = resolve_alias_project(p, alias_map)
+        if p_canon and p_canon in valid_projs and p_canon not in proj_list:
+            proj_list.append(p_canon)
+        elif p in valid_projs and p not in proj_list:
+            proj_list.append(p)
+
+    if not proj_list:
         for p in valid_projs:
             p_full = str(p)
             p_short = re.sub(r'^(1/6|1/4|1/12|1/3|1/1)\s*', "", p_full).strip()
@@ -1527,32 +1719,35 @@ def infer_todo_target_hint(td, valid_projs):
             hit_direct = (p_full and p_full in txt) or (p_short and p_short in txt)
             hit_norm = (p_full_n and p_full_n in txt_norm) or (p_short_n and p_short_n in txt_norm)
             if hit_direct or hit_norm:
-                proj = p
-                break
+                proj_list.append(p)
+                continue
             for a in alias_map.keys():
                 if resolve_alias_project(a, alias_map) != p:
                     continue
                 a_norm = norm_text(a)
                 if a_norm and a_norm in txt_norm:
-                    proj = p
+                    proj_list.append(p)
                     break
-            if proj:
-                break
 
-    if not proj:
+    proj_list = list(dict.fromkeys([x for x in proj_list if x]))
+    if not proj_list:
         return "未识别项目"
 
-    tgt = str(db.get(proj, {}).get("Target", "")).strip()
-    tgt_ym = parse_target_year_month(tgt)
-    sch_ym = extract_schedule_year_month(txt, ref_year=(tgt_ym[0] if tgt_ym else None))
+    out = []
+    for proj in proj_list:
+        tgt = str(db.get(proj, {}).get("Target", "")).strip()
+        tgt_ym = parse_target_year_month(tgt)
+        sch_ym = extract_schedule_year_month(txt, ref_year=(tgt_ym[0] if tgt_ym else None))
 
-    if not tgt_ym:
-        return f"[{proj}] 开定:TBD"
-    if not sch_ym:
-        return f"[{proj}] 开定:{fmt_ym(tgt_ym)}"
-    if sch_ym == tgt_ym:
-        return f"✅ 档期{fmt_ym(sch_ym)}=开定{fmt_ym(tgt_ym)}"
-    return f"⚠️ 档期{fmt_ym(sch_ym)} ≠ 开定{fmt_ym(tgt_ym)}"
+        if not tgt_ym:
+            out.append(f"[{proj}] 开定:TBD")
+            continue
+        if sch_ym and sch_ym != tgt_ym:
+            out.append(f"[{proj}] 档期{fmt_ym(sch_ym)}!=开定{fmt_ym(tgt_ym)}")
+        else:
+            out.append(f"[{proj}] 开定:{fmt_ym(tgt_ym)}")
+
+    return " / ".join(out)
 
 def todo_link_status_text(td):
     td_obj = td or {}
@@ -1671,6 +1866,8 @@ def create_project_shell_if_missing(project_name, owner_name=""):
         "Milestone": "待立项",
         "Target": "TBD",
         "发货区间": "",
+        "计划排期": [],
+        "周会备注": [],
         "部件列表": {},
         "发货数据": {},
         "成本数据": {},
@@ -1776,19 +1973,20 @@ def collect_todo_loading_pairs(pm_view="所有人"):
             continue
         if not todo_visible_for_view(td, pm_view):
             continue
-        proj = str((td or {}).get("关联项目", "")).strip()
-        if not proj or proj == "系统配置" or proj not in db:
+        proj_list = [p for p in todo_project_list(td) if p and p != "系统配置" and p in db]
+        if not proj_list:
             continue
 
         people_tokens = split_people_text((td or {}).get("关联人员", ""))
         if not people_tokens:
             people_tokens = infer_todo_people_bundle(td).get("labels", [])
 
-        for token in people_tokens:
-            role, person = parse_role_person_label(token)
-            if (not person) or person == "未分配":
-                continue
-            pairs.add((proj, person, role or "综合"))
+        for proj in proj_list:
+            for token in people_tokens:
+                role, person = parse_role_person_label(token)
+                if (not person) or person == "未分配":
+                    continue
+                pairs.add((proj, person, role or "综合"))
     return pairs
 
 
@@ -1908,37 +2106,52 @@ def infer_todo_handoff_prefill(td, proj_name):
 
 def append_todo_completion_history(td, action_date=None):
     td_obj = td or {}
-    proj_name = str(td_obj.get("关联项目", "")).strip()
-    if not proj_name or proj_name not in db or proj_name == "系统配置":
+    proj_list = [p for p in todo_project_list(td_obj) if p and p in db and p != "系统配置"]
+    if not proj_list:
         return False
-    proj_data = db.get(proj_name, {})
-    comps = proj_data.setdefault("部件列表", {})
-    global_key = next((k for k in comps.keys() if "全局" in str(k)), "全局进度")
-    if global_key not in comps or not isinstance(comps.get(global_key), dict):
-        comps[global_key] = {"主流程": STAGES_UNIFIED[0], "日志流": []}
-    stage_name = str(comps[global_key].get("主流程", "")).strip() or STAGES_UNIFIED[0]
+
     action_date = action_date or datetime.date.today()
     title = str(td_obj.get("任务", "")).strip()
     if not title:
         return False
+
     cpddl = todo_cpddl_text(td_obj)
     people = str(td_obj.get("关联人员", "")).strip()
-    event_bits = [f"[To do完成] {title}"]
-    if cpddl:
-        event_bits.append(f"CP/DDL:{cpddl}")
-    if people:
-        event_bits.append(f"人员:{people}")
-    event_text = " | ".join(event_bits)
-    logs = comps[global_key].setdefault("日志流", [])
-    if any(str(log.get("日期", "")).strip() == str(action_date) and str(log.get("事件", "")).strip() == event_text for log in logs):
-        return False
-    logs.append({
-        "日期": str(action_date),
-        "流转": "To do",
-        "工序": stage_name,
-        "事件": event_text,
-    })
-    return True
+    changed_any = False
+
+    for proj_name in proj_list:
+        proj_data = db.get(proj_name, {})
+        comps = proj_data.setdefault("部件列表", {})
+        global_key = next((k for k in comps.keys() if "全局" in str(k)), "全局进度")
+        if global_key not in comps or not isinstance(comps.get(global_key), dict):
+            comps[global_key] = {"主流程": STAGES_UNIFIED[0], "日志流": []}
+        stage_name = str(comps[global_key].get("主流程", "")).strip() or STAGES_UNIFIED[0]
+
+        event_bits = [f"[To do完成] {title}", f"项目:{proj_name}"]
+        if cpddl:
+            event_bits.append(f"CP/DDL:{cpddl}")
+        if people:
+            event_bits.append(f"人员:{people}")
+        event_text = " | ".join(event_bits)
+
+        logs = comps[global_key].setdefault("日志流", [])
+        dup = any(
+            str(log.get("日期", "")).strip() == str(action_date) and
+            str(log.get("事件", "")).strip() == event_text
+            for log in logs
+        )
+        if dup:
+            continue
+
+        logs.append({
+            "日期": str(action_date),
+            "流转": "To do",
+            "工序": stage_name,
+            "事件": event_text,
+        })
+        changed_any = True
+
+    return changed_any
 
 
 def _project_is_launched(proj_data):
@@ -2281,10 +2494,11 @@ def render_pm_todo_manager(valid_projs, current_pm):
     st.caption("To do 专注任务、DDL/CP、关联项目、关联人员。图片统一在进度明细里补；人员只写姓名时，系统会优先匹配库中的完整角色-姓名。")
     cfg = db.setdefault("系统配置", {})
     todo_all = cfg.setdefault("PM_TODO_LIST", [])
-    todo_proj_options = ["(不关联项目)"] + valid_projs
+
     todo_new_proj_option = "➕ 新增项目..."
-    todo_proj_options_create = todo_proj_options + [todo_new_proj_option]
     todo_new_person_option = "➕ 新增关联人员..."
+    todo_proj_options_create = valid_projs + [todo_new_proj_option]
+
     scope_options = build_todo_scope_options(current_pm)
     role_person_options, _ = collect_role_person_options()
     role_person_options_create = role_person_options + [todo_new_person_option]
@@ -2303,8 +2517,10 @@ def render_pm_todo_manager(valid_projs, current_pm):
         if not str(td.get("_id", "")).strip():
             td["_id"] = uuid.uuid4().hex[:10]
             touched = True
+
         td.setdefault("任务", "")
         td.setdefault("关联项目", "")
+        td.setdefault("关联项目列表", [])
         td.setdefault("关联人员", "")
         td.setdefault("完成", False)
         td.setdefault("完成时间", "")
@@ -2316,6 +2532,19 @@ def render_pm_todo_manager(valid_projs, current_pm):
         td.setdefault("最近联动阶段", "")
         td.setdefault("最近联动写入时间", "")
         td.setdefault("创建者视角", "")
+        if not isinstance(td.get("历史版本"), list):
+            td["历史版本"] = []
+            touched = True
+
+        proj_list = todo_project_list(td)
+        if td.get("关联项目列表", []) != proj_list:
+            td["关联项目列表"] = proj_list
+            touched = True
+        primary_proj = proj_list[0] if proj_list else ""
+        if str(td.get("关联项目", "")).strip() != primary_proj:
+            td["关联项目"] = primary_proj
+            touched = True
+
         scope_val = str(td.get("所属视角", "")).strip()
         creator_scope = str(td.get("创建者视角", "")).strip()
         normalized_scope = scope_val
@@ -2329,6 +2558,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
         if (not creator_scope) and normalized_scope not in ["", "未分配", "所有人"]:
             td["创建者视角"] = normalized_scope
             touched = True
+
         merged = todo_cpddl_text(td)
         if str(td.get("CPDDL", "")).strip() != merged:
             td["CPDDL"] = merged
@@ -2336,15 +2566,18 @@ def render_pm_todo_manager(valid_projs, current_pm):
         if str(td.get("CP", "")).strip() != merged:
             td["CP"] = merged
             touched = True
+
         due_dt = extract_deadline_from_text(merged)
         due_txt = str(due_dt) if due_dt else ""
         if str(td.get("DDL", "")).strip() != due_txt:
             td["DDL"] = due_txt
             touched = True
+
         normalized_people = normalize_people_text(td.get("关联人员", ""))
         if str(td.get("关联人员", "")).strip() != normalized_people:
             td["关联人员"] = normalized_people
             touched = True
+
     if touched:
         sync_save_db("系统配置")
 
@@ -2352,7 +2585,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
     pending = [x for x in todo_list if not x.get("完成")]
     overdue = [x for x in pending if todo_due_date(x) and (todo_due_date(x) - today).days < 0]
     near_due = [x for x in pending if todo_due_date(x) and 0 <= (todo_due_date(x) - today).days <= 3]
-    linked_pending = [x for x in pending if str(x.get("关联项目", "")).strip()]
+    linked_pending = [x for x in pending if todo_project_list(x)]
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("未完成", len(pending))
@@ -2363,13 +2596,14 @@ def render_pm_todo_manager(valid_projs, current_pm):
     with st.container(border=True):
         st.markdown("##### 新增待办")
         st.caption("支持先选关联人员；如果你只写“宇涵”，系统会优先匹配历史库里的“设计-宇涵”等唯一人选。")
-        c1, c2, c3, c4 = st.columns([2.5, 1.6, 1.5, 1.0])
+
+        c1, c2, c3, c4 = st.columns([2.3, 1.6, 1.8, 1.0])
         with c1:
             todo_title = st.text_input("任务", key="todo_title_global", placeholder="例：3/7 金克丝 T2 结构件确认")
         with c2:
             todo_cpddl = st.text_input("CP/DDL(合并)", key="todo_cpddl_global", placeholder="例：3/7 结构件确认")
         with c3:
-            todo_ref_proj = st.selectbox("关联项目", todo_proj_options_create, key="todo_ref_global")
+            todo_ref_projs = st.multiselect("关联项目（可多选）", todo_proj_options_create, key="todo_ref_global_multi")
         with c4:
             if current_pm == "所有人":
                 todo_scope = st.selectbox("所属视角", scope_options, key="todo_scope_global")
@@ -2377,10 +2611,10 @@ def render_pm_todo_manager(valid_projs, current_pm):
                 todo_scope = current_pm
                 st.text_input("所属视角", value=current_pm, key="todo_scope_ro", disabled=True)
 
-        resolved_ref_proj = "" if todo_ref_proj == "(不关联项目)" else todo_ref_proj
+        resolved_ref_proj_list = [x for x in todo_ref_projs if x and x != todo_new_proj_option]
         new_proj_name = ""
         new_proj_owner = current_pm if current_pm != "所有人" else (owner_pool[0] if owner_pool else "Mo")
-        if todo_ref_proj == todo_new_proj_option:
+        if todo_new_proj_option in todo_ref_projs:
             np1, np2 = st.columns([2.2, 1.2])
             with np1:
                 new_proj_name = st.text_input("新增项目名称", key="todo_new_proj_name", placeholder="例：1/6 新IP")
@@ -2390,13 +2624,12 @@ def render_pm_todo_manager(valid_projs, current_pm):
                 else:
                     new_proj_owner = current_pm
                     st.text_input("新增项目负责人", value=current_pm, key="todo_new_proj_owner_ro", disabled=True)
-            resolved_ref_proj = new_proj_name.strip()
+            if str(new_proj_name).strip():
+                resolved_ref_proj_list.append(str(new_proj_name).strip())
 
-        p1, p2 = st.columns([2.2, 1.6])
-        with p1:
-            todo_people_sel = st.multiselect("关联人员（可多选/留空）", role_person_options_create, key="todo_people_global")
-        with p2:
-            todo_people_manual = st.text_input("补充人员(可手填)", key="todo_people_manual_global", placeholder="例：设计-宇涵 / 宇涵")
+        resolved_ref_proj_list = list(dict.fromkeys([p for p in resolved_ref_proj_list if p]))
+        st.caption("人员录入建议：优先在下拉选择；如果库里没有，点“➕ 新增关联人员...”即可。")
+        todo_people_sel = st.multiselect("关联人员（可多选/留空）", role_person_options_create, key="todo_people_global")
 
         todo_people_sel_clean = [x for x in todo_people_sel if x != todo_new_person_option]
         todo_new_person_token = ""
@@ -2411,14 +2644,16 @@ def render_pm_todo_manager(valid_projs, current_pm):
                 name_txt = str(todo_new_person_name).strip()
                 todo_new_person_token = f"{role_txt}-{name_txt}" if role_txt else name_txt
 
-        people_tokens = todo_people_sel_clean + split_people_text(todo_people_manual)
+        people_tokens = list(todo_people_sel_clean)
         if todo_new_person_token:
             people_tokens.append(todo_new_person_token)
         people_input = normalize_people_text(", ".join(people_tokens))
+
         tmp_td = {
             "任务": todo_title,
             "CPDDL": todo_cpddl,
-            "关联项目": resolved_ref_proj,
+            "关联项目": (resolved_ref_proj_list[0] if resolved_ref_proj_list else ""),
+            "关联项目列表": resolved_ref_proj_list,
             "关联人员": people_input,
         }
         st.caption("开定识别：" + infer_todo_target_hint(tmp_td, valid_projs))
@@ -2430,15 +2665,16 @@ def render_pm_todo_manager(valid_projs, current_pm):
         if st.button("➕ 添加", key="todo_add_global", type="primary"):
             if not todo_title.strip():
                 st.warning("请先填写任务内容。")
-            elif todo_ref_proj == todo_new_proj_option and not resolved_ref_proj:
+            elif (todo_new_proj_option in todo_ref_projs) and (not str(new_proj_name).strip()):
                 st.warning("你选择了【新增项目】，请先填写项目名称。")
             else:
                 due_dt = extract_deadline_from_text(todo_cpddl)
                 final_people = people_input or ", ".join(people_bundle["labels"])
-                linked_proj = str(resolved_ref_proj or "").strip()
-                created_project = False
-                if linked_proj:
-                    created_project = create_project_shell_if_missing(linked_proj, new_proj_owner)
+
+                created_projects = []
+                for linked_proj in resolved_ref_proj_list:
+                    if create_project_shell_if_missing(linked_proj, new_proj_owner):
+                        created_projects.append(linked_proj)
 
                 added_people = register_extra_role_people(split_people_text(final_people))
                 todo_all.append({
@@ -2447,23 +2683,25 @@ def render_pm_todo_manager(valid_projs, current_pm):
                     "CPDDL": todo_cpddl.strip(),
                     "CP": todo_cpddl.strip(),
                     "DDL": str(due_dt) if due_dt else "",
-                    "关联项目": linked_proj,
+                    "关联项目": (resolved_ref_proj_list[0] if resolved_ref_proj_list else ""),
+                    "关联项目列表": resolved_ref_proj_list,
                     "关联人员": final_people,
                     "所属视角": (str(todo_scope).strip() or "未分配"),
                     "创建者视角": (current_pm if current_pm != "所有人" else (str(todo_scope).strip() or "未分配")),
                     "完成": False,
                     "完成时间": "",
                     "创建": str(today),
+                    "历史版本": [],
                 })
                 cfg["PM_TODO_LIST"] = todo_all
-                if created_project and linked_proj:
-                    sync_save_db(linked_proj)
+                if created_projects:
+                    sync_save_db()
                 else:
                     sync_save_db("系统配置")
 
                 success_bits = ["To do 已添加。"]
-                if created_project and linked_proj:
-                    success_bits.append(f"已新建项目：{linked_proj}。")
+                if created_projects:
+                    success_bits.append("已新建项目：" + " / ".join(created_projects[:3]) + (" ..." if len(created_projects) > 3 else "") + "。")
                 if added_people:
                     preview = " / ".join(added_people[:3])
                     if len(added_people) > 3:
@@ -2477,21 +2715,65 @@ def render_pm_todo_manager(valid_projs, current_pm):
         st.info("当前视角下暂无 To do。")
         return todo_list
 
-    def _todo_alert_text(td):
-        return todo_alert_text(td, today)
+    all_proj_filter_opts = sorted(list(dict.fromkeys([p for td in todo_list for p in todo_project_list(td)])))
+    all_people_filter_opts = sorted(list(dict.fromkeys([
+        token
+        for td in todo_list
+        for token in split_people_text(str(td.get("关联人员", "")))
+    ])))
+
+    f1, f2, f3, f4, f5 = st.columns([1.2, 1.6, 1.5, 1.1, 1.1])
+    with f1:
+        status_filter = st.selectbox("状态筛选", ["全部", "未完成", "已完成"], key="todo_filter_status")
+    with f2:
+        project_filter = st.selectbox("项目筛选", ["全部"] + all_proj_filter_opts, key="todo_filter_project")
+    with f3:
+        people_filter = st.selectbox("人员筛选", ["全部"] + all_people_filter_opts, key="todo_filter_people") if all_people_filter_opts else "全部"
+    with f4:
+        due_from = st.date_input("到期起", value=None, key="todo_filter_due_from")
+    with f5:
+        due_to = st.date_input("到期止", value=None, key="todo_filter_due_to")
+
+    filtered = []
+    for td in todo_list:
+        if status_filter == "未完成" and bool(td.get("完成")):
+            continue
+        if status_filter == "已完成" and (not bool(td.get("完成"))):
+            continue
+
+        p_list = todo_project_list(td)
+        if project_filter != "全部" and project_filter not in p_list:
+            continue
+
+        if people_filter != "全部":
+            p_tokens = split_people_text(td.get("关联人员", ""))
+            if people_filter not in p_tokens:
+                continue
+
+        due_dt = todo_due_date(td)
+        if isinstance(due_from, datetime.date) and due_dt and due_dt < due_from:
+            continue
+        if isinstance(due_to, datetime.date) and due_dt and due_dt > due_to:
+            continue
+
+        filtered.append(td)
+
+    st.caption(f"当前筛选命中：{len(filtered)} 条")
 
     rows = []
-    sorted_items = sorted(todo_list, key=lambda x: todo_sort_key(x, today))
+    sorted_items = sorted(filtered, key=lambda x: todo_sort_key(x, today))
     for td in sorted_items:
         done_at = str(td.get("完成时间", "")) if td.get("完成") else ""
+        people_tokens = split_people_text(td.get("关联人员", ""))
+        people_display = " ，".join(people_tokens)
         rows.append({
             "_id": str(td.get("_id", "")),
             "完成": bool(td.get("完成", False)),
             "任务": str(td.get("任务", "")),
             "CP/DDL": todo_cpddl_text(td),
-            "关联项目": str(td.get("关联项目", "") or "(不关联项目)"),
-            "完成时间": done_at or "-",
-            "关联人员": str(td.get("关联人员", "")),
+            "关联项目": todo_project_text(td) or "(不关联项目)",
+            "完成于": done_at or "-",
+            "关联人员": people_display,
             "人员识别": format_todo_people_hint(td),
             "所属视角": todo_scope_of(td),
             "到期": str(todo_due_date(td) or "-"),
@@ -2500,7 +2782,11 @@ def render_pm_todo_manager(valid_projs, current_pm):
             "联动状态": todo_link_status_text(td),
             "删除": False,
         })
+
     editor_df = pd.DataFrame(rows)
+
+    st.caption("字段说明：✍ 用户填写（完成/任务/CPDDL）；◐ 半自动（关联项目）；⚙ 系统自动（完成于/到期/提醒/识别类列）。")
+
     edited_df = st.data_editor(
         editor_df,
         width='stretch',
@@ -2508,21 +2794,21 @@ def render_pm_todo_manager(valid_projs, current_pm):
         num_rows="fixed",
         column_config={
             "_id": st.column_config.TextColumn("_id", disabled=True, width="small"),
-            "完成": st.column_config.CheckboxColumn("完成", width="small"),
-            "完成时间": st.column_config.TextColumn("完成时间", disabled=True, width="small"),
-            "任务": st.column_config.TextColumn("任务", required=True, width="large"),
-            "CP/DDL": st.column_config.TextColumn("CP/DDL", width="medium"),
-            "关联项目": st.column_config.SelectboxColumn("关联项目", options=todo_proj_options, width="medium"),
-            "关联人员": st.column_config.TextColumn("关联人员", width="medium", help="支持逗号分隔多个角色-姓名；留空时系统会按文本尝试识别"),
-            "人员识别": st.column_config.TextColumn("人员识别", disabled=True, width="large"),
-            "所属视角": st.column_config.SelectboxColumn("所属视角", options=scope_options, width="small"),
-            "到期": st.column_config.TextColumn("到期", disabled=True, width="small"),
-            "提醒": st.column_config.TextColumn("提醒", disabled=True, width="small"),
-            "开定识别": st.column_config.TextColumn("开定识别", disabled=True, width="large"),
-            "联动状态": st.column_config.TextColumn("联动状态", disabled=True, width="medium"),
+            "完成": st.column_config.CheckboxColumn("完成 ✍", width="small"),
+            "完成于": st.column_config.TextColumn("完成于 ⚙", disabled=True, width="small", help="勾选完成后自动记录，无需手填"),
+            "任务": st.column_config.TextColumn("任务 ✍", required=True, width="large"),
+            "CP/DDL": st.column_config.TextColumn("CP/DDL ✍", width="medium"),
+            "关联项目": st.column_config.TextColumn("关联项目 ◐", width="medium", help="系统会自动识别，你也可以手动覆盖。多个项目用 / 分隔"),
+            "关联人员": st.column_config.TextColumn("关联人员 ⚙/✍", width="large", help="建议格式：Function-姓名；多人用逗号/顿号分隔"),
+            "人员识别": st.column_config.TextColumn("人员识别 ⚙", disabled=True, width="large"),
+            "所属视角": st.column_config.SelectboxColumn("所属视角 ⚙", options=scope_options, width="small"),
+            "到期": st.column_config.TextColumn("到期 ⚙", disabled=True, width="small"),
+            "提醒": st.column_config.TextColumn("提醒 ⚙", disabled=True, width="small"),
+            "开定识别": st.column_config.TextColumn("开定识别 ⚙", disabled=True, width="large"),
+            "联动状态": st.column_config.TextColumn("联动状态 ⚙", disabled=True, width="medium"),
             "删除": st.column_config.CheckboxColumn("删除", width="small"),
         },
-        disabled=["_id", "完成时间", "到期", "提醒", "开定识别", "联动状态", "人员识别"],
+        disabled=["_id", "完成于", "到期", "提醒", "开定识别", "联动状态", "人员识别"],
         key="todo_editor_df",
     )
 
@@ -2531,6 +2817,8 @@ def render_pm_todo_manager(valid_projs, current_pm):
         delete_ids = set()
         skipped = 0
         project_history_updates = set()
+        new_project_created = False
+
         for row in edited_df.to_dict("records"):
             rid = str(row.get("_id", "")).strip()
             td = id_map.get(rid)
@@ -2539,18 +2827,23 @@ def render_pm_todo_manager(valid_projs, current_pm):
             if bool(row.get("删除", False)):
                 delete_ids.add(rid)
                 continue
+
             title = str(row.get("任务", "")).strip()
             if not title:
                 skipped += 1
                 continue
+
             cpddl = str(row.get("CP/DDL", "")).strip()
-            ref_proj = str(row.get("关联项目", "")).strip()
-            ref_proj = "" if ref_proj == "(不关联项目)" else ref_proj
+            proj_text = str(row.get("关联项目", "")).strip()
+            proj_text = "" if proj_text == "(不关联项目)" else proj_text
+            proj_list = normalize_todo_project_list(proj_text)
+
             people_raw = normalize_people_text(row.get("关联人员", ""))
             people_td = {
                 "任务": title,
                 "CPDDL": cpddl,
-                "关联项目": ref_proj,
+                "关联项目": (proj_list[0] if proj_list else ""),
+                "关联项目列表": proj_list,
                 "关联人员": people_raw,
             }
             people_bundle = infer_todo_people_bundle(people_td)
@@ -2558,44 +2851,69 @@ def render_pm_todo_manager(valid_projs, current_pm):
                 people_raw = ", ".join(people_bundle["labels"])
             register_extra_role_people(split_people_text(people_raw))
 
+            for p_name in proj_list:
+                if p_name and p_name not in db:
+                    if create_project_shell_if_missing(p_name, current_pm if current_pm != "所有人" else "Mo"):
+                        new_project_created = True
+
+            old_task = str(td.get("任务", "")).strip()
+            old_cpddl = todo_cpddl_text(td)
+            old_people = normalize_people_text(td.get("关联人员", ""))
+            old_proj = todo_project_text(td)
+
+            changed_core = (
+                old_task != title or
+                old_cpddl != cpddl or
+                old_people != people_raw or
+                old_proj != " / ".join(proj_list)
+            )
+            if changed_core:
+                todo_append_history_version(td, actor=current_pm if current_pm != "所有人" else "系统")
+
             prev_done = bool(td.get("完成", False))
             new_done = bool(row.get("完成", False))
+
             td["任务"] = title
             td["CPDDL"] = cpddl
             td["CP"] = cpddl
             due_dt = extract_deadline_from_text(cpddl)
             td["DDL"] = str(due_dt) if due_dt else ""
-            td["关联项目"] = ref_proj
+            td["关联项目"] = proj_list[0] if proj_list else ""
+            td["关联项目列表"] = proj_list
             td["关联人员"] = people_raw
             td["完成"] = new_done
+
             scope_val = str(row.get("所属视角", td.get("所属视角", "未分配"))).strip()
             if current_pm != "所有人":
                 scope_val = current_pm
             if (not scope_val) or scope_val == "所有人":
                 scope_val = "未分配"
-            td["所属视角"] = scope_val if scope_val in scope_options else scope_val
+            td["所属视角"] = scope_val
             if (not str(td.get("创建者视角", "")).strip()) and scope_val not in ["", "未分配", "所有人"]:
                 td["创建者视角"] = scope_val
+
             if new_done and not prev_done:
                 done_date = due_dt or datetime.date.today()
                 td["完成时间"] = str(done_date)
                 if append_todo_completion_history(td, done_date):
-                    project_history_updates.add(ref_proj)
+                    for p in todo_project_list(td):
+                        project_history_updates.add(p)
             elif not new_done:
                 td["完成时间"] = ""
 
         todo_all[:] = [x for x in todo_all if str(x.get("_id", "")).strip() not in delete_ids and str(x.get("任务", "")).strip()]
         cfg["PM_TODO_LIST"] = todo_all
-        if project_history_updates:
+
+        if project_history_updates or new_project_created:
             sync_save_db()
         else:
             sync_save_db("系统配置")
+
         st.success(f"To do 已保存：保留 {len(todo_all)} 条，删除 {len(delete_ids)} 条，跳过 {skipped} 条空任务。")
         st.rerun()
 
     st.caption("建议：To do 先做轻量提醒；图片、附件、流转详情统一在【细分配件交接工作台】里补充。")
     return [td for td in todo_all if todo_visible_for_view(td, current_pm)]
-
 def render_sidebar_todo_panel(pm_view):
     cfg = db.setdefault("系统配置", {})
     todo_all = cfg.setdefault("PM_TODO_LIST", [])
@@ -2615,7 +2933,7 @@ def render_sidebar_todo_panel(pm_view):
         task = str(td.get("任务", "")).strip() or "(空任务)"
         due = todo_due_date(td)
         due_txt = due.strftime("%m-%d") if due else "无DDL"
-        proj = str(td.get("关联项目", "")).strip() or "(未关联项目)"
+        proj = todo_project_text(td) or "(未关联项目)"
         status_icon = todo_alert_text(td, today).split(" ")[0]
         st.sidebar.markdown(f"`{idx}` {status_icon} **{task}**")
         st.sidebar.caption(f"{due_txt} | {proj}")
@@ -3549,6 +3867,263 @@ def render_packing_lightweight_board(sel_proj, ui_prefix="pack_board"):
         st.rerun()
 
 
+def _normalize_small_scale_signoff(raw_obj):
+    obj = raw_obj if isinstance(raw_obj, dict) else {}
+    cfg_raw = obj.get("配置", {})
+    cfg = cfg_raw if isinstance(cfg_raw, dict) else {}
+    rounds_raw = obj.get("轮次记录", [])
+    if not isinstance(rounds_raw, list):
+        rounds_raw = []
+    milestones_raw = obj.get("里程碑", {})
+    milestones_raw = milestones_raw if isinstance(milestones_raw, dict) else {}
+
+    default_people = str(cfg.get("默认参会", "")).strip() or "工程 / Ven / 设计师 / 叶子 / 戈多（必要情况vi）"
+    round_rows = []
+    for rec in rounds_raw:
+        if not isinstance(rec, dict):
+            continue
+        day_txt = str(rec.get("日期", "")).strip() or str(datetime.date.today())
+        try:
+            day_txt = str(datetime.datetime.strptime(day_txt, "%Y-%m-%d").date())
+        except Exception:
+            day_txt = str(datetime.date.today())
+
+        round_name = str(rec.get("轮次", "")).strip()
+        if not round_name:
+            continue
+
+        slot = str(rec.get("反馈会时段", rec.get("会议时段", "上午"))).strip()
+        if slot not in ["上午", "下午", "未开"]:
+            slot = "上午"
+
+        round_rows.append({
+            "日期": day_txt,
+            "轮次": round_name,
+            "反馈会时段": slot,
+            "参会人员": str(rec.get("参会人员", "")).strip() or default_people,
+            "工程整理": bool(rec.get("工程整理", False)),
+            "设计复核": bool(rec.get("设计复核", False)),
+            "发工厂改模": bool(rec.get("发工厂改模", False)),
+            "设计签字留样": bool(rec.get("设计签字留样", False)),
+            "M版外观并评": bool(rec.get("M版外观并评", False)),
+            "问题反馈": str(rec.get("问题反馈", "")).strip(),
+        })
+
+    milestone_keys = ["T版签板", "M版签板1", "产前定样", "大货色板签板4套", "功能灰板签板1-3套"]
+    milestones = {k: bool(milestones_raw.get(k, False)) for k in milestone_keys}
+
+    return {
+        "配置": {
+            "启用": bool(cfg.get("启用", False)),
+            "默认参会": default_people,
+            "流程备注": str(cfg.get("流程备注", "")).strip(),
+        },
+        "轮次记录": round_rows,
+        "里程碑": milestones,
+    }
+
+
+def _small_scale_round_sort_key(row):
+    day = parse_date_safe((row or {}).get("日期", "")) or datetime.date.max
+    name = str((row or {}).get("轮次", "")).strip().upper()
+    m = re.match(r"^T\s*(\d+)$", name)
+    if m:
+        return (day, 0, int(m.group(1)), name)
+    if name.startswith("M"):
+        return (day, 1, 0, name)
+    return (day, 2, 9999, name)
+
+
+def render_small_scale_signoff_board(sel_proj, ui_prefix="small_scale"):
+    st.markdown("##### 🧪 小比例项目签板流程")
+    st.caption("用于 T1~TN / M版流转协同与历史留痕，不会强制改写当前项目全局阶段。")
+
+    board = _normalize_small_scale_signoff(db.get(sel_proj, {}).get("小比例签板流程", {}))
+    cfg = dict(board.get("配置", {}))
+    rounds = list(board.get("轮次记录", []))
+    milestones = dict(board.get("里程碑", {}))
+
+    enabled = st.checkbox("该项目启用小比例签板流程", value=bool(cfg.get("启用", False)), key=f"{ui_prefix}_enabled")
+    default_people = st.text_input(
+        "默认参会人员",
+        value=str(cfg.get("默认参会", "")).strip(),
+        key=f"{ui_prefix}_default_people",
+        placeholder="工程 / Ven / 设计师 / 叶子 / 戈多（必要情况vi）",
+    )
+    note_txt = st.text_input("流程备注（可选）", value=str(cfg.get("流程备注", "")).strip(), key=f"{ui_prefix}_note")
+
+    if st.button("💾 保存小比例流程配置", key=f"{ui_prefix}_save_cfg"):
+        board["配置"] = {
+            "启用": bool(enabled),
+            "默认参会": str(default_people).strip() or "工程 / Ven / 设计师 / 叶子 / 戈多（必要情况vi）",
+            "流程备注": str(note_txt).strip(),
+        }
+        board["轮次记录"] = rounds
+        board["里程碑"] = milestones
+        db[sel_proj]["小比例签板流程"] = board
+        sync_save_db(sel_proj)
+        st.success("小比例流程配置已保存。")
+        st.rerun()
+
+    if not enabled:
+        st.info("当前项目未启用该流程。启用后可登记 T1~TN 反馈会、改模闭环和签字留样。")
+        return
+
+    st.markdown("**标准节奏（循环）**：工厂试模提交 → 上午反馈小会 → 工程整理+设计复核 → 发工厂改模 → 设计签字留样")
+    st.caption("建议到件后优先排上午会，减少工程外出冲突。")
+
+    a1, a2, a3, a4 = st.columns([1.1, 1.0, 1.0, 2.2])
+    with a1:
+        add_date = st.date_input("轮次日期", datetime.date.today(), key=f"{ui_prefix}_add_date")
+    with a2:
+        add_round = st.text_input("轮次标记", key=f"{ui_prefix}_add_round", placeholder="例：T1 / T2 / T3 / M版")
+    with a3:
+        add_slot = st.selectbox("反馈会时段", ["上午", "下午", "未开"], key=f"{ui_prefix}_add_slot")
+    with a4:
+        add_people = st.text_input(
+            "本轮参会人员",
+            value=str(default_people).strip() or "工程 / Ven / 设计师 / 叶子 / 戈多（必要情况vi）",
+            key=f"{ui_prefix}_add_people",
+        )
+
+    b1, b2, b3, b4, b5 = st.columns(5)
+    with b1:
+        add_eng = st.checkbox("工程整理", value=True, key=f"{ui_prefix}_add_eng")
+    with b2:
+        add_design = st.checkbox("设计复核", value=True, key=f"{ui_prefix}_add_design")
+    with b3:
+        add_send_factory = st.checkbox("发工厂改模", value=True, key=f"{ui_prefix}_add_send")
+    with b4:
+        add_signed_sample = st.checkbox("设计签字留样", value=True, key=f"{ui_prefix}_add_signed")
+    with b5:
+        add_m_parallel = st.checkbox("M版外观并评", value=False, key=f"{ui_prefix}_add_m_parallel")
+    add_feedback = st.text_input("本轮反馈总结", key=f"{ui_prefix}_add_feedback", placeholder="例：关节松紧OK，头雕嘴角需修")
+
+    if st.button("➕ 添加试模轮次", key=f"{ui_prefix}_add_btn"):
+        if not str(add_round).strip():
+            st.warning("请填写轮次标记（例如 T1 / T2）。")
+        else:
+            rounds.append({
+                "日期": str(add_date),
+                "轮次": str(add_round).strip(),
+                "反馈会时段": add_slot,
+                "参会人员": str(add_people).strip() or (str(default_people).strip() or "工程 / Ven / 设计师 / 叶子 / 戈多（必要情况vi）"),
+                "工程整理": bool(add_eng),
+                "设计复核": bool(add_design),
+                "发工厂改模": bool(add_send_factory),
+                "设计签字留样": bool(add_signed_sample),
+                "M版外观并评": bool(add_m_parallel),
+                "问题反馈": str(add_feedback).strip(),
+            })
+            rounds = sorted(rounds, key=_small_scale_round_sort_key)
+            board["配置"] = {
+                "启用": bool(enabled),
+                "默认参会": str(default_people).strip() or "工程 / Ven / 设计师 / 叶子 / 戈多（必要情况vi）",
+                "流程备注": str(note_txt).strip(),
+            }
+            board["轮次记录"] = rounds
+            board["里程碑"] = milestones
+            db[sel_proj]["小比例签板流程"] = board
+            sync_save_db(sel_proj)
+            st.success("已添加轮次记录。")
+            st.rerun()
+
+    if rounds:
+        st.markdown("**试模轮次记录（可直接编辑）**")
+        round_df = pd.DataFrame(sorted(rounds, key=_small_scale_round_sort_key))
+        edited_round_df = st.data_editor(
+            round_df,
+            num_rows="dynamic",
+            width='stretch',
+            hide_index=True,
+            key=f"{ui_prefix}_editor",
+            column_config={
+                "日期": st.column_config.TextColumn("日期(YYYY-MM-DD)"),
+                "轮次": st.column_config.TextColumn("轮次(T1~TN/M版)"),
+                "反馈会时段": st.column_config.SelectboxColumn("反馈会时段", options=["上午", "下午", "未开"]),
+                "参会人员": st.column_config.TextColumn("参会人员"),
+                "工程整理": st.column_config.CheckboxColumn("工程整理"),
+                "设计复核": st.column_config.CheckboxColumn("设计复核"),
+                "发工厂改模": st.column_config.CheckboxColumn("发工厂改模"),
+                "设计签字留样": st.column_config.CheckboxColumn("设计签字留样"),
+                "M版外观并评": st.column_config.CheckboxColumn("M版外观并评"),
+                "问题反馈": st.column_config.TextColumn("问题反馈"),
+            },
+        )
+
+        afternoon_cnt = int((edited_round_df.get("反馈会时段", pd.Series(dtype=str)).astype(str) == "下午").sum()) if "反馈会时段" in edited_round_df.columns else 0
+        if afternoon_cnt > 0:
+            st.warning(f"当前有 {afternoon_cnt} 条记录为下午反馈会。建议优先上午会议。")
+
+        if st.button("💾 保存轮次记录", key=f"{ui_prefix}_save_rounds"):
+            new_rounds = []
+            for _, row in edited_round_df.iterrows():
+                day_txt = str(row.get("日期", "")).strip()
+                round_name = str(row.get("轮次", "")).strip()
+                if not round_name:
+                    continue
+                try:
+                    day_txt = str(datetime.datetime.strptime(day_txt, "%Y-%m-%d").date())
+                except Exception:
+                    day_txt = str(datetime.date.today())
+
+                slot = str(row.get("反馈会时段", "未开")).strip()
+                if slot not in ["上午", "下午", "未开"]:
+                    slot = "未开"
+
+                new_rounds.append({
+                    "日期": day_txt,
+                    "轮次": round_name,
+                    "反馈会时段": slot,
+                    "参会人员": str(row.get("参会人员", "")).strip() or (str(default_people).strip() or "工程 / Ven / 设计师 / 叶子 / 戈多（必要情况vi）"),
+                    "工程整理": bool(row.get("工程整理", False)),
+                    "设计复核": bool(row.get("设计复核", False)),
+                    "发工厂改模": bool(row.get("发工厂改模", False)),
+                    "设计签字留样": bool(row.get("设计签字留样", False)),
+                    "M版外观并评": bool(row.get("M版外观并评", False)),
+                    "问题反馈": str(row.get("问题反馈", "")).strip(),
+                })
+
+            board["配置"] = {
+                "启用": bool(enabled),
+                "默认参会": str(default_people).strip() or "工程 / Ven / 设计师 / 叶子 / 戈多（必要情况vi）",
+                "流程备注": str(note_txt).strip(),
+            }
+            board["轮次记录"] = sorted(new_rounds, key=_small_scale_round_sort_key)
+            board["里程碑"] = milestones
+            db[sel_proj]["小比例签板流程"] = board
+            sync_save_db(sel_proj)
+            st.success("轮次记录已保存。")
+            st.rerun()
+    else:
+        st.caption("暂无轮次记录。")
+
+    st.markdown("**签板里程碑**")
+    mcols = st.columns(3)
+    milestone_labels = ["T版签板", "M版签板1", "产前定样", "大货色板签板4套", "功能灰板签板1-3套"]
+    new_milestones = dict(milestones)
+    for idx, label in enumerate(milestone_labels):
+        with mcols[idx % 3]:
+            new_milestones[label] = st.checkbox(
+                label,
+                value=bool(milestones.get(label, False)),
+                key=f"{ui_prefix}_ms_{idx}",
+            )
+
+    if st.button("💾 保存签板里程碑", key=f"{ui_prefix}_save_milestones"):
+        board["配置"] = {
+            "启用": bool(enabled),
+            "默认参会": str(default_people).strip() or "工程 / Ven / 设计师 / 叶子 / 戈多（必要情况vi）",
+            "流程备注": str(note_txt).strip(),
+        }
+        board["轮次记录"] = rounds
+        board["里程碑"] = new_milestones
+        db[sel_proj]["小比例签板流程"] = board
+        sync_save_db(sel_proj)
+        st.success("签板里程碑已保存。")
+        st.rerun()
+
+
 def render_project_inventory_ledger(sel_proj, key_prefix="inv"):
     inv_data = db[sel_proj].get("发货数据", {"总单量": 0, "批次明细": []})
     c1, c2 = st.columns([1, 2])
@@ -3796,6 +4371,292 @@ def render_pm_cost_integrated(sel_proj):
         cmp_df["差异率"] = cmp_df.apply(lambda r: f"{(r['差异'] / r['预计成本'] * 100):.2f}%" if r["预计成本"] > 0 else "-", axis=1)
         st.dataframe(cmp_df.sort_values(by="差异", ascending=False), width='stretch')
 
+
+def render_project_plan_schedule_editor(sel_proj, key_prefix="pm_plan"):
+    st.markdown("##### 📅 计划排期")
+    st.caption("内部存储为 YYYY-MMW#（例如 2026-03W1），界面显示与输入支持 3W1 / 2026-03W1。")
+
+    proj_data = db.get(sel_proj, {})
+    raw_plan = proj_data.get("计划排期", [])
+    norm_plan = normalize_plan_schedule_rows(raw_plan)
+    if (not norm_plan) and raw_plan:
+        norm_plan = []
+
+    if not norm_plan:
+        norm_plan = [
+            {"阶段": "建模", "开始周": "", "结束周": "", "DRI": ""},
+            {"阶段": "设计", "开始周": "", "结束周": "", "DRI": ""},
+            {"阶段": "工程", "开始周": "", "结束周": "", "DRI": ""},
+        ]
+
+    disp_rows = []
+    for row in norm_plan:
+        disp_rows.append({
+            "阶段": str(row.get("阶段", "")).strip(),
+            "计划开始周": format_month_week_short(row.get("开始周", "")) or str(row.get("开始周", "")),
+            "计划结束周": format_month_week_short(row.get("结束周", "")) or str(row.get("结束周", "")),
+            "DRI": str(row.get("DRI", "")).strip(),
+        })
+
+    plan_df = pd.DataFrame(disp_rows)
+    stage_options = [x for x in MACRO_STAGES if x not in ["暂停", "结束"]] or ["建模", "设计", "工程"]
+    edited_df = st.data_editor(
+        plan_df,
+        num_rows="dynamic",
+        width='stretch',
+        hide_index=True,
+        key=f"{key_prefix}_editor_{norm_text(sel_proj)[:24]}",
+        column_config={
+            "阶段": st.column_config.SelectboxColumn("阶段", options=stage_options, required=True),
+            "计划开始周": st.column_config.TextColumn("计划开始周", help="支持 3W1 / 2026-03W1"),
+            "计划结束周": st.column_config.TextColumn("计划结束周", help="支持 3W3 / 2026-03W3"),
+            "DRI": st.column_config.TextColumn("DRI", help="责任人姓名，如 Ven / 小琴"),
+        },
+    )
+
+    if st.button("💾 保存计划排期", key=f"{key_prefix}_save_{norm_text(sel_proj)[:24]}"):
+        out = []
+        bad_rows = []
+        for ridx, row in edited_df.iterrows():
+            stage = str(row.get("阶段", "")).strip()
+            start_token = parse_month_week_token(row.get("计划开始周", ""))
+            end_token = parse_month_week_token(row.get("计划结束周", ""))
+            dri = str(row.get("DRI", "")).strip()
+
+            if not stage:
+                continue
+            if (not start_token) or (not end_token):
+                bad_rows.append(int(ridx) + 1)
+                continue
+
+            sdt = month_week_to_date(start_token)
+            edt = month_week_to_date(end_token)
+            if sdt and edt and edt < sdt:
+                start_token, end_token = end_token, start_token
+
+            out.append({"阶段": stage, "开始周": start_token, "结束周": end_token, "DRI": dri})
+
+        if bad_rows:
+            st.warning("以下行的周格式无效，已跳过：" + ", ".join([str(x) for x in bad_rows]))
+
+        db[sel_proj]["计划排期"] = out
+        sync_save_db(sel_proj)
+        st.success(f"计划排期已保存，共 {len(out)} 行。")
+        st.rerun()
+
+
+def _project_stage_actual_window(proj_data, macro_stage):
+    p = proj_data if isinstance(proj_data, dict) else {}
+    dts = []
+    for comp in p.get("部件列表", {}).values():
+        for lg in (comp or {}).get("日志流", []):
+            if is_hidden_system_log(lg):
+                continue
+            stg = str((lg or {}).get("工序", "")).strip()
+            if get_macro_phase(stg) != str(macro_stage):
+                continue
+            dt = parse_date_safe((lg or {}).get("日期", ""))
+            if dt:
+                dts.append(dt)
+    if not dts:
+        return None, None
+    return min(dts), max(dts)
+
+
+def build_plan_board_rows(projects):
+    rows = []
+    today = datetime.date.today()
+    soon_count = 0
+    delay_count = 0
+
+    for proj in projects:
+        p_data = db.get(proj, {}) if proj in db else {}
+        plan_rows = normalize_plan_schedule_rows(p_data.get("计划排期", []))
+        if not plan_rows:
+            continue
+
+        notes = normalize_weekly_notes_rows(p_data.get("周会备注", []))
+        note_sorted = sorted(notes, key=lambda x: month_week_to_date(x.get("周", "")) or datetime.date.min, reverse=True)
+        latest_note = note_sorted[0]["内容"] if note_sorted else ""
+
+        for row in plan_rows:
+            stage = str(row.get("阶段", "")).strip()
+            start_token = str(row.get("开始周", "")).strip()
+            end_token = str(row.get("结束周", "")).strip()
+            dri = str(row.get("DRI", "")).strip()
+            start_dt = month_week_to_date(start_token)
+            end_dt = month_week_to_date(end_token)
+            if (not start_dt) or (not end_dt):
+                continue
+            if end_dt < start_dt:
+                start_dt, end_dt = end_dt, start_dt
+
+            done = is_macro_stage_done_from_logs(p_data, stage)
+            if done:
+                status = "计划-完成"
+            else:
+                days_left = (end_dt - today).days
+                if days_left <= 0:
+                    status = "计划-Delay"
+                    delay_count += 1
+                elif days_left <= 14:
+                    status = "计划-临期"
+                    soon_count += 1
+                else:
+                    status = "计划-正常"
+
+            act_start, act_end = _project_stage_actual_window(p_data, stage)
+            rows.append({
+                "项目": proj,
+                "阶段": stage,
+                "DRI": dri,
+                "开始日期": start_dt,
+                "结束日期": end_dt + datetime.timedelta(days=7),
+                "计划结束周": end_token,
+                "计划结束短": format_month_week_short(end_token),
+                "状态": status,
+                "最新周会备注": latest_note,
+                "实际开始": act_start,
+                "实际结束": act_end,
+                "已完成": done,
+            })
+
+    return rows, soon_count, delay_count
+
+
+def render_dashboard_plan_board(valid_projects):
+    st.subheader("🗓️ 计划排期看板")
+    rows, soon_count, delay_count = build_plan_board_rows(valid_projects)
+    st.markdown(f"**本周预警：🟡 临期 {soon_count} 个阶段 ｜ 🔴 Delay {delay_count} 个阶段**")
+
+    if not rows:
+        st.caption("当前视角下暂无计划排期数据。可在 PM 工作台 > 项目基础信息里先维护计划排期。")
+        return
+
+    plan_mode = st.radio("时间轴模式", ["📅 自然周模式", "📅 月份周模式"], horizontal=True, key="plan_board_mode")
+
+    df_rows = pd.DataFrame(rows)
+    df_rows = df_rows.sort_values(by=["项目", "开始日期", "阶段"], ascending=[True, True, True]).reset_index(drop=True)
+
+    tl_rows = []
+    for _, r in df_rows.iterrows():
+        tl_rows.append({
+            "项目": r["项目"],
+            "阶段": r["阶段"],
+            "开始": r["开始日期"],
+            "结束": r["结束日期"],
+            "色块": r["状态"],
+            "标签": r["DRI"],
+            "备注": r.get("最新周会备注", ""),
+            "图层": "计划",
+        })
+        if isinstance(r.get("实际开始"), datetime.date):
+            act_end = r.get("实际结束") if isinstance(r.get("实际结束"), datetime.date) else datetime.date.today()
+            if act_end < r.get("实际开始"):
+                act_end = r.get("实际开始")
+            tl_rows.append({
+                "项目": r["项目"],
+                "阶段": r["阶段"],
+                "开始": r["实际开始"],
+                "结束": act_end + datetime.timedelta(days=1),
+                "色块": "实际",
+                "标签": "",
+                "备注": r.get("最新周会备注", ""),
+                "图层": "实际",
+            })
+
+    tl_df = pd.DataFrame(tl_rows)
+    color_map = {
+        "计划-正常": "#93c5fd",
+        "计划-完成": "#22c55e",
+        "计划-临期": "#facc15",
+        "计划-Delay": "#ef4444",
+        "实际": "#1d4ed8",
+    }
+
+    fig = px.timeline(
+        tl_df,
+        x_start="开始",
+        x_end="结束",
+        y="项目",
+        color="色块",
+        text="标签",
+        hover_data={
+            "阶段": True,
+            "图层": True,
+            "备注": True,
+            "开始": True,
+            "结束": True,
+        },
+        category_orders={"项目": sorted(df_rows["项目"].unique().tolist())},
+        color_discrete_map=color_map,
+    )
+    fig.update_yaxes(autorange="reversed")
+    fig.update_layout(height=max(320, len(df_rows["项目"].unique()) * 42), showlegend=True)
+
+    min_dt = min(tl_df["开始"].tolist())
+    max_dt = max(tl_df["结束"].tolist())
+    if plan_mode == "📅 自然周模式":
+        monday = min_dt - datetime.timedelta(days=min_dt.weekday())
+        tick_vals = []
+        tick_txt = []
+        wk_idx = 1
+        while monday <= max_dt + datetime.timedelta(days=7):
+            tick_vals.append(monday)
+            tick_txt.append(f"W{wk_idx}({format_week_range_label(monday)})")
+            monday = monday + datetime.timedelta(days=7)
+            wk_idx += 1
+        fig.update_xaxes(tickmode="array", tickvals=tick_vals, ticktext=tick_txt)
+    else:
+        first_month = datetime.date(min_dt.year, min_dt.month, 1)
+        last_month = datetime.date(max_dt.year, max_dt.month, 1)
+        tick_vals = []
+        tick_txt = []
+        cursor = first_month
+        while cursor <= last_month:
+            w1 = month_week_to_monday(cursor.year, cursor.month, 1)
+            w4 = month_week_to_monday(cursor.year, cursor.month, 4)
+            tick_vals.extend([w1, w4])
+            tick_txt.extend([f"{cursor.month}W1", f"{cursor.month}W4"])
+            cursor = add_months(cursor, 1)
+        fig.update_xaxes(tickmode="array", tickvals=tick_vals, ticktext=tick_txt)
+
+    st.plotly_chart(fig, width='stretch')
+
+    st.markdown("##### 📝 周会备注")
+    pick_options = [f"{r['项目']}｜{r['阶段']}" for _, r in df_rows.iterrows()]
+    pick_label = st.selectbox("选择阶段", pick_options, key="plan_note_pick")
+    pick_proj, pick_stage = pick_label.split("｜", 1)
+    pick_row = next((r for r in rows if r["项目"] == pick_proj and r["阶段"] == pick_stage), None)
+
+    if pick_row:
+        status_text = str(pick_row.get("状态", "计划-正常")).replace("计划-", "")
+        st.caption(f"当前状态：{status_text} ｜ DRI：{pick_row.get('DRI', '-') or '-'} ｜ 最近备注：{pick_row.get('最新周会备注', '-') or '-'}")
+
+    default_week = parse_month_week_token(f"{datetime.date.today().month}W{max(1, min(6, ((datetime.date.today().day - 1) // 7) + 1))}") or ""
+    nw1, nw2 = st.columns([1.2, 2.8])
+    with nw1:
+        note_week_input = st.text_input("周", value=format_month_week_short(default_week) if default_week else "", key="plan_note_week")
+    with nw2:
+        note_content = st.text_input("周会备注内容", key="plan_note_content", placeholder="例：工程组组装中，已安排补纹")
+
+    if st.button("💾 保存周会备注", key="plan_note_save"):
+        wk_token = parse_month_week_token(note_week_input)
+        if not wk_token:
+            st.warning("周格式无效，请输入如 3W1 或 2026-03W1。")
+        elif not str(note_content).strip():
+            st.warning("请填写备注内容。")
+        else:
+            note_payload = {
+                "周": wk_token,
+                "内容": f"[{pick_stage}] {str(note_content).strip()}",
+            }
+            old_notes = normalize_weekly_notes_rows(db[pick_proj].get("周会备注", []))
+            old_notes.append(note_payload)
+            db[pick_proj]["周会备注"] = old_notes
+            sync_save_db(pick_proj)
+            st.success("周会备注已保存。")
+            st.rerun()
 def render_pm_efficiency(sel_proj):
     st.subheader("⏱️ 团队效能与工时分析板")
     efficiency_data = []
@@ -4282,6 +5143,10 @@ if menu == MENU_DASHBOARD:
     else:
         st.warning("无足够日志数据生成甘特图。")
 
+    st.divider()
+    render_dashboard_plan_board(valid_projs)
+
+
     st.subheader("📋 大盘状态明细表")
     if table_data:
         df_table = pd.DataFrame(table_data)
@@ -4424,6 +5289,7 @@ if menu == MENU_DASHBOARD:
             md_patterns = [
                 r"(?<!\d)(\d{1,2})/(\d{1,2})(?!\d)",
                 r"(?<!\d)(\d{1,2})-(\d{1,2})(?!\d)",
+                r"(?<!\d)(\d{1,2})\.(\d{1,2})(?!\d)",
                 r"(?<!\d)(\d{1,2})月(\d{1,2})日?",
             ]
             for pat in md_patterns:
@@ -4449,10 +5315,11 @@ if menu == MENU_DASHBOARD:
             txt = str(text or "")
             txt_norm = norm_text(txt)
             todo_keys = [
-                "待", "待办", "需要", "需", "跟进", "跟催", "确认", "补", "安排", "提交", "提审", "todo", "to do", "ddl", "cp",
+                "待", "待办", "需要", "需", "跟进", "跟催", "补", "安排", "todo", "to do", "ddl", "cp", "待审", "待反馈", "待版权",
             ]
             past_keys = [
                 "已", "已经", "完成", "完毕", "通过", "收到", "确认了", "确认完成", "看过", "on-hand", "on hand", "done", "ok",
+                "提交", "已提交", "已提审", "提审通过", "已发",
             ]
             todo_score = sum(1 for k in todo_keys if (k in txt) or (norm_text(k) in txt_norm))
             past_score = sum(1 for k in past_keys if (k in txt) or (norm_text(k) in txt_norm))
@@ -4461,11 +5328,12 @@ if menu == MENU_DASHBOARD:
             if past_score > todo_score and past_score > 0:
                 return "past"
             if todo_score > 0 and past_score > 0:
-                if any(k in txt for k in ["待", "需要", "需", "跟进", "跟催"]):
+                if any(k in txt for k in ["待", "需要", "需", "跟进", "跟催", "待审", "待反馈", "待版权"]):
                     return "todo"
+                if any(k in txt for k in ["已", "已经", "完成", "通过", "提交", "收到", "看过", "on-hand", "done", "ok"]):
+                    return "past"
                 return "past"
             return "neutral"
-
 
 
         def _sync_todo_checkpoint_from_dynamic(project_name, event_text, forced_due_dt=None, forced_task_body="", skip_intent_check=False):
@@ -4509,6 +5377,22 @@ if menu == MENU_DASHBOARD:
 
             if hit:
                 changed = False
+                old_proj_list = todo_project_list(hit)
+                new_proj_list = list(dict.fromkeys(old_proj_list + [str(project_name)]))
+
+                need_history = False
+                if str(hit.get("DDL", "")).strip() != str(due_dt):
+                    need_history = True
+                if str(hit.get("CPDDL", "")).strip() != cpddl_txt:
+                    need_history = True
+                if people and not str(hit.get("关联人员", "")).strip():
+                    need_history = True
+                if new_proj_list != old_proj_list:
+                    need_history = True
+
+                if need_history:
+                    todo_append_history_version(hit, actor="系统")
+
                 if str(hit.get("DDL", "")).strip() != str(due_dt):
                     hit["DDL"] = str(due_dt)
                     changed = True
@@ -4518,6 +5402,10 @@ if menu == MENU_DASHBOARD:
                     changed = True
                 if people and not str(hit.get("关联人员", "")).strip():
                     hit["关联人员"] = people
+                    changed = True
+                if new_proj_list != old_proj_list:
+                    hit["关联项目列表"] = new_proj_list
+                    hit["关联项目"] = new_proj_list[0] if new_proj_list else ""
                     changed = True
                 return "updated" if changed else "exists"
 
@@ -4529,30 +5417,33 @@ if menu == MENU_DASHBOARD:
                 "DDL": str(due_dt),
                 "完成": False,
                 "关联项目": str(project_name),
+                "关联项目列表": [str(project_name)],
                 "关联人员": people,
                 "所属视角": scope,
                 "创建者视角": current_pm if current_pm != "所有人" else scope,
                 "创建": str(datetime.date.today()),
                 "完成时间": "",
+                "历史版本": [],
             })
             return "created"
 
         st.markdown("##### 🧩 大盘明细可编辑表")
-        st.caption("直接在表格中修改基础字段和【最新全盘动态】；保存时选择是追加为最新动态，还是改写当前最新动态。")
+        st.caption("直接在表格中修改基础字段和【最新全盘动态】；默认追加为新记录，勾选【改写历史】后改写当前最新动态。")
         st.caption("规则：日期优先。未来日期自动同步到 To do；过去日期按该日期写入历史。无日期时再按语气词判断。")
 
-        editable_cols = ["\u72b6\u6001", "\u9879\u76ee", "\u9879\u76ee\u5f53\u524d\u9636\u6bb5", "\u5f00\u5b9a\u65f6\u95f4", "\u9884\u8ba1\u53d1\u8d27", "\u8ddf\u5355", "\u6700\u65b0\u5168\u76d8\u52a8\u6001", "\u65ad\u66f4", "\u5f00\u5b9a\u5ef6\u8fdf\u9884\u8b66", "\u53d1\u8d27\u5ef6\u8fdf\u9884\u8b66"]
+        editable_cols = ["状态", "项目", "项目当前阶段", "开定时间", "预计发货", "跟单", "最新全盘动态", "断更", "开定延迟预警", "发货延迟预警"]
         editable_df = show_df[editable_cols].copy()
-        if current_pm == "\u6240\u6709\u4eba":
+        editable_df["改写历史"] = False
+        if current_pm == "所有人":
             editable_df.insert(
                 2,
-                "\u8d1f\u8d23\u4eba",
-                [str((db.get(str(p).strip(), {}) or {}).get("\u8d1f\u8d23\u4eba", "")).strip() for p in editable_df["\u9879\u76ee"].tolist()],
+                "负责人",
+                [str((db.get(str(p).strip(), {}) or {}).get("负责人", "")).strip() for p in editable_df["项目"].tolist()],
             )
 
         dashboard_edit_snapshot = {}
         for rec in editable_df.to_dict("records"):
-            proj_key = str(rec.get("\u9879\u76ee", "")).strip()
+            proj_key = str(rec.get("项目", "")).strip()
             if not proj_key:
                 continue
             dashboard_edit_snapshot[proj_key] = {k: str(rec.get(k, "")).strip() for k in editable_df.columns.tolist()}
@@ -4580,6 +5471,7 @@ if menu == MENU_DASHBOARD:
             "预计发货": st.column_config.TextColumn("预计发货", width="small", help="支持 2026 Q2 / 2026-06 / -"),
             "跟单": st.column_config.TextColumn("跟单", width="small"),
             "最新全盘动态": st.column_config.TextColumn("最新全盘动态", width="large"),
+            "改写历史": st.column_config.CheckboxColumn("改写历史", width="small", help="勾选后改写当前最新动态；不勾选则作为新记录追加"),
             "断更": st.column_config.TextColumn("断更", width="small", disabled=True),
             "开定延迟预警": st.column_config.TextColumn("开定延迟预警", width="small", disabled=True),
             "发货延迟预警": st.column_config.TextColumn("发货延迟预警", width="small", disabled=True),
@@ -4609,10 +5501,11 @@ if menu == MENU_DASHBOARD:
                 return ""
             return s
 
-        def _save_dashboard_from_table(dynamic_mode):
+        def _save_dashboard_from_table():
             changed_projects = set()
             basic_updates = 0
-            dynamic_updates = 0
+            dynamic_append_updates = 0
+            dynamic_rewrite_updates = 0
             todo_created = 0
             todo_updated = 0
             error_msgs = []
@@ -4666,7 +5559,7 @@ if menu == MENU_DASHBOARD:
                     if not latest_after:
                         error_msgs.append(f"{proj}: 最新全盘动态不能为空或无数据。")
                     else:
-
+                        row_dynamic_mode = "edit_latest" if bool(row.get("改写历史", False)) else "append_latest"
                         parsed_date, parsed_body = _extract_event_date_from_text(latest_after, prefer_past=False)
                         intent = _classify_dynamic_intent(latest_after)
                         today_ref = datetime.date.today()
@@ -4680,7 +5573,7 @@ if menu == MENU_DASHBOARD:
                                 date_bucket = "today"
 
                         event_date = None
-                        if dynamic_mode == "append_latest":
+                        if row_dynamic_mode == "append_latest":
                             if date_bucket == "past":
                                 event_date = parsed_date
                             elif (not date_bucket) and intent == "past":
@@ -4689,14 +5582,17 @@ if menu == MENU_DASHBOARD:
                         ok, msg = _apply_latest_dynamic_update(
                             proj,
                             latest_after,
-                            dynamic_mode,
+                            row_dynamic_mode,
                             auto_save=False,
                             event_date=event_date,
                         )
                         if ok:
-                            dynamic_updates += 1
+                            if row_dynamic_mode == "append_latest":
+                                dynamic_append_updates += 1
+                            else:
+                                dynamic_rewrite_updates += 1
                             changed_projects.add(proj)
-                            if dynamic_mode == "append_latest":
+                            if row_dynamic_mode == "append_latest":
                                 todo_state = ""
                                 if date_bucket == "future" and isinstance(parsed_date, datetime.date):
                                     todo_state = _sync_todo_checkpoint_from_dynamic(
@@ -4737,7 +5633,10 @@ if menu == MENU_DASHBOARD:
                 if todo_updated:
                     todo_bits.append(f"To do更新 {todo_updated} 条")
                 todo_suffix = ("；" + "，".join(todo_bits)) if todo_bits else ""
-                st.success(f"已保存 {len(changed_projects)} 个项目：基础字段 {basic_updates} 条，动态 {dynamic_updates} 条{todo_suffix}。")
+                st.success(
+                    f"已保存 {len(changed_projects)} 个项目：基础字段 {basic_updates} 条，"
+                    f"动态新增 {dynamic_append_updates} 条，动态改写 {dynamic_rewrite_updates} 条{todo_suffix}。"
+                )
                 if error_msgs:
                     st.warning("\n".join(error_msgs[:6]))
                 st.rerun()
@@ -4747,13 +5646,9 @@ if menu == MENU_DASHBOARD:
                 else:
                     st.info("未检测到可保存的变更。")
 
-        act1, act2 = st.columns(2)
-        with act1:
-            if st.button("✅ 修改最新全盘动态（作为新记录）", type="primary", key="btn_dash_save_append_latest"):
-                _save_dashboard_from_table("append_latest")
-        with act2:
-            if st.button("🛠 修改当前最新动态（改写历史）", key="btn_dash_save_edit_latest"):
-                _save_dashboard_from_table("edit_latest")
+        st.caption("提示：默认作为新记录；勾选【改写历史】后会覆盖该项目当前最新动态。")
+        if st.button("💾 修改动态并保存", type="primary", key="btn_dash_save_dynamic"):
+            _save_dashboard_from_table()
     st.divider()
     with st.expander("人员 Loading（点击展开）", expanded=False):
         if project_person_roles:
@@ -4959,7 +5854,8 @@ elif menu == MENU_SPECIFIC:
         fig_grid.update_layout(
             xaxis=dict(side='top', tickangle=-45),
             yaxis=dict(autorange='reversed', automargin=True),
-            plot_bgcolor='white',
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)',
             height=max(250, len(y_labels) * 45),
             margin=dict(t=120, b=20, r=20)
         )
@@ -5048,6 +5944,10 @@ elif menu == MENU_SPECIFIC:
                 st.success("大盘基础信息已更新。")
                 st.rerun()
     
+
+        with st.expander("📅 计划排期", expanded=False):
+            render_project_plan_schedule_editor(sel_proj, key_prefix=f"pm_plan_{norm_text(sel_proj)[:24]}")
+
         with st.expander("🧾 审核信息", expanded=False):
             review_rows = []
             for _cn, _ci in db.get(sel_proj, {}).get("部件列表", {}).items():
@@ -5467,10 +6367,13 @@ elif menu == MENU_SPECIFIC:
                     todo_msg = f"；联动待办 {len(linked_todo_titles)} 条" if linked_todo_titles else ""
                     st.success(f"🎉 记录成功！本次写入 {saved_records} 条{todo_msg}。")
                     st.rerun()
-        with st.expander("📦 3. 包装&入库", expanded=False):
+        with st.expander("🧪 3. 小比例签板流程", expanded=False):
+            render_small_scale_signoff_board(sel_proj, ui_prefix=f"pm_small_{norm_text(sel_proj)[:24]}")
+
+        with st.expander("📦 4. 包装&入库", expanded=False):
             render_pm_packing_inventory_integrated(sel_proj)
 
-        with st.expander("💰 4. 成本面板", expanded=False):
+        with st.expander("💰 5. 成本面板", expanded=False):
             render_pm_cost_integrated(sel_proj)
 # ==========================================
 # 模块 3：AI 速记
@@ -6157,10 +7060,56 @@ elif menu == MENU_HISTORY:
                 "关联人员": td.get("关联人员", ""),
                 "创建": td.get("创建", ""),
             })
-        st.dataframe(pd.DataFrame(done_rows), width='stretch', hide_index=True)
+        st.dataframe(pd.DataFrame(done_rows), width="stretch", hide_index=True)
     else:
         st.caption("暂无已完成并关联此项目的 To do 记录。")
 
+    project_todos = [
+        td for td in db.get("系统配置", {}).get("PM_TODO_LIST", [])
+        if todo_matches_project(td, sel_proj)
+    ]
+
+    st.divider()
+    st.subheader("🕒 To do 历史演进（关联此项目）")
+    if project_todos:
+        for td in sorted(project_todos, key=lambda x: str(x.get("创建", "")), reverse=True):
+            task_title = str(td.get("任务", "")).strip() or "(空任务)"
+            item_id = str(td.get("_id", "")).strip()
+            scope_txt = todo_scope_of(td)
+            proj_txt = todo_project_text(td) or "(不关联项目)"
+            done_txt = "已完成" if bool(td.get("完成")) else "未完成"
+            with st.expander(f"{task_title} ｜ {done_txt} ｜ {proj_txt}", expanded=False):
+                hist_rows = []
+                for hv in td.get("历史版本", []):
+                    if not isinstance(hv, dict):
+                        continue
+                    hv_proj = normalize_todo_project_list(hv.get("关联项目列表", []))
+                    hist_rows.append({
+                        "版本": "历史",
+                        "时间": str(hv.get("时间", "")).strip(),
+                        "操作者": str(hv.get("操作者", "")).strip() or "系统",
+                        "任务": str(hv.get("任务", "")).strip(),
+                        "CP/DDL": str(hv.get("CPDDL", "")).strip(),
+                        "关联项目": " / ".join(hv_proj) if hv_proj else "(不关联项目)",
+                        "关联人员": str(hv.get("关联人员", "")).strip(),
+                        "所属视角": str(hv.get("所属视角", "")).strip() or scope_txt,
+                        "完成": "是" if bool(hv.get("完成", False)) else "否",
+                    })
+                hist_rows.append({
+                    "版本": "当前",
+                    "时间": str(td.get("完成时间", "")).strip() if bool(td.get("完成")) else str(td.get("创建", "")).strip(),
+                    "操作者": "-",
+                    "任务": task_title,
+                    "CP/DDL": todo_cpddl_text(td),
+                    "关联项目": proj_txt,
+                    "关联人员": str(td.get("关联人员", "")).strip(),
+                    "所属视角": scope_txt,
+                    "完成": "是" if bool(td.get("完成")) else "否",
+                })
+                st.caption(f"To do ID: {item_id}")
+                st.dataframe(pd.DataFrame(hist_rows), width="stretch", hide_index=True)
+    else:
+        st.caption("暂无关联此项目的 To do 历史。")
     if flat_data:
         df_logs = pd.DataFrame(flat_data).sort_values(by="日期", ascending=False).reset_index(drop=True)
         df_logs.insert(0, '序号', range(len(df_logs), 0, -1))
