@@ -1924,7 +1924,9 @@ def todo_project_list(td_obj):
         return lst
     legacy = str(td.get("关联项目", "")).strip()
     if legacy and legacy not in ["(不关联项目)", "-"]:
-        return [legacy]
+        legacy_list = normalize_todo_project_list([legacy])
+        if legacy_list:
+            return legacy_list
     return []
 
 
@@ -2175,6 +2177,13 @@ def infer_todo_projects_from_text(td, valid_projs):
         token_hits = _match_projects_from_token(txt, valid_projs, alias_map)
         for seg in re.split(r"[&＆和|｜]+", txt):
             token_hits.extend(_match_projects_from_token(seg, valid_projs, alias_map))
+        amp_match = re.search(r"([A-Za-z][A-Za-z0-9\-]*)\s+([A-Za-z][A-Za-z0-9\-]*)\s*[&＆]\s*([A-Za-z][A-Za-z0-9\-]*)", txt)
+        if amp_match:
+            prefix = str(amp_match.group(1)).strip()
+            left = f"{prefix} {str(amp_match.group(2)).strip()}"
+            right = f"{prefix} {str(amp_match.group(3)).strip()}"
+            token_hits.extend(_match_projects_from_token(left, valid_projs, alias_map))
+            token_hits.extend(_match_projects_from_token(right, valid_projs, alias_map))
         proj_list.extend(token_hits)
 
     alias_map = db.get("系统配置", {}).get("项目别名", {}) if isinstance(db, dict) else {}
@@ -3934,6 +3943,15 @@ def render_pm_todo_manager(valid_projs, current_pm):
             proj_text = str(row.get("关联项目", "")).strip()
             proj_text = "" if proj_text == "(不关联项目)" else proj_text
             proj_list = normalize_todo_project_list(proj_text)
+            infer_probe = {
+                "任务": title,
+                "CPDDL": cpddl,
+                "关联项目": (proj_list[0] if proj_list else ""),
+                "关联项目列表": proj_list,
+            }
+            inferred_proj_list = infer_todo_projects_from_text(infer_probe, valid_projs)
+            if inferred_proj_list and ((not proj_list) or any(p not in valid_projs for p in proj_list)):
+                proj_list = inferred_proj_list
 
             people_raw = normalize_people_text(row.get("关联人员", ""))
             people_td = {
