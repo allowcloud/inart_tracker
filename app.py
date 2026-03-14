@@ -1362,6 +1362,7 @@ def _allows_design_phase(proj_label="", proj_data=None, comp_name="", event_text
 def get_macro_phase(detail_stage, event_text="", comp_name="", proj_label="", proj_data=None):
     s = str(detail_stage).strip()
     evt = str(event_text).strip()
+    lower_evt = evt.lower()
     if "完成" in s or "结束" in s or "撒花" in s:
         return "结束"
     if "暂停" in s or "搁置" in s:
@@ -1374,15 +1375,18 @@ def get_macro_phase(detail_stage, event_text="", comp_name="", proj_label="", pr
         return "暂停"
     if any(x in s for x in ["大货", "复样", "量产", "开定"]):
         return "生产"
-    if any(x in s for x in ["模具", "开模", "下模"]) or any(x in evt for x in ["开模", "下模", "试模", "T版", "M版", "签板"]):
+    print_signal = ("打印" in evt) or ("签样" in evt) or (s == "打印") or any(x in evt for x in ["效果下模", "确认效果下模", "待确认效果下模"])
+    if print_signal:
+        return "打印"
+    mold_event_signal = any(x in evt for x in ["开模", "试模", "T版", "M版", "签板"])
+    if "下模" in evt and not any(x in evt for x in ["效果下模", "确认效果下模", "待确认效果下模"]):
+        mold_event_signal = True
+    if any(x in s for x in ["模具", "开模", "下模"]) or mold_event_signal:
         return "开模"
 
     design_allowed = _allows_design_phase(proj_label, proj_data, comp_name, evt, s)
-    print_signal = ("打印" in evt) or ("签样" in evt) or (s == "打印")
-    design_signal = any(x in s for x in ["设计", "官图"]) or any(x in evt.lower() for x in ["review", "审核", "提审", "排版"])
+    design_signal = any(x in s for x in ["设计", "官图"]) or any(x in lower_evt for x in ["review", "审核", "提审", "排版"])
 
-    if print_signal:
-        return "打印"
     if design_allowed and design_signal:
         return "设计"
     if any(x in s for x in ["拆件", "手板", "结构"]):
@@ -1572,6 +1576,22 @@ def extract_deadline_from_text(text, ref_date=None):
         except:
             pass
     return None
+
+
+def clean_auto_todo_task_text(raw_text):
+    txt = str(raw_text or "").strip()
+    if not txt:
+        return ""
+    txt = re.sub(r"^(?:\[[^\]]+\]\s*){1,6}", "", txt).strip()
+    txt = re.sub(r"\s+", " ", txt).strip(" ，,;；|")
+    txt = re.sub(r"^(预计|计划|大概|约)\s*", "", txt)
+    txt = re.sub(r"\s*(左右|前后)\s*", " ", txt)
+    for noise in get_recognition_keywords("日期噪音词"):
+        if not noise:
+            continue
+        txt = re.sub(rf"(^|[\s，,;；|]){re.escape(str(noise))}(?=[\s，,;；|]|$)", " ", txt)
+    txt = re.sub(r"\s+", " ", txt).strip(" ，,;；|")
+    return txt
 
 def todo_cpddl_text(td):
     merged = str((td or {}).get("CPDDL", "")).strip()
@@ -1817,12 +1837,20 @@ def normalize_todo_project_list(raw_value):
             raw_tokens = [re.sub(r"\s*/\s*", "/", x.replace(marker, "/").strip()) for x in raw_tokens]
 
     out = []
+    alias_map = db.get("系统配置", {}).get("项目别名", {}) if isinstance(db, dict) else {}
     for token in raw_tokens:
         if token in ["(不关联项目)", "-"]:
             continue
         # Common split artifact from ratio tokens: standalone digits like "1" / "6".
         if re.fullmatch(r"\d{1,2}", token or ""):
             continue
+        resolved = resolve_alias_project(token, alias_map)
+        if resolved and resolved in db and resolved != "系统配置":
+            token = resolved
+        else:
+            inferred = infer_malformed_ratio_project_target(token)
+            if inferred and inferred in db and inferred != "系统配置":
+                token = inferred
         if token not in out:
             out.append(token)
     return out
@@ -2328,6 +2356,26 @@ def merge_project_into_target(merge_src, merge_dst, learned_aliases=None):
             dst_data.setdefault(extra_key, [])
             if isinstance(dst_data.get(extra_key), list) and isinstance(src_data.get(extra_key), list):
                 dst_data[extra_key].extend(src_data.get(extra_key, []))
+
+    cfg = db.setdefault("系统配置", {})
+    todo_all = cfg.setdefault("PM_TODO_LIST", [])
+    for td in todo_all:
+        proj_list = normalize_todo_project_list(td.get("关联项目列表", []))
+        legacy = str(td.get("关联项目", "")).strip()
+        if legacy:
+            proj_list = list(dict.fromkeys(proj_list + normalize_todo_project_list([legacy])))
+        changed = False
+        new_list = [dst if p == src else p for p in proj_list]
+        new_list = list(dict.fromkeys(normalize_todo_project_list(new_list)))
+        if new_list != proj_list:
+            td["关联项目列表"] = new_list
+            td["关联项目"] = new_list[0] if new_list else ""
+            changed = True
+        if str(td.get("最近联动项目", "")).strip() == src:
+            td["最近联动项目"] = dst
+            changed = True
+        if changed and not isinstance(td.get("历史版本"), list):
+            td["历史版本"] = []
 
     db[dst] = dst_data
     if src in db:
@@ -3348,12 +3396,21 @@ def build_project_stage_segments(proj_label, proj_data):
         if not records:
             continue
         start_dt = min(x["date"] for x in records)
-        finish_dt = max(x["date"] for x in records) + datetime.timedelta(days=1)
+        last_stage_dt = max(x["date"] for x in records)
+        finish_dt = last_stage_dt + datetime.timedelta(days=1)
         if stage == "建模" and launch_start:
             default_build_start = launch_start + datetime.timedelta(days=1)
             paused_on_default_start = default_build_start in pause_dates
             if not paused_on_default_start:
                 start_dt = min(start_dt, default_build_start)
+        next_pause_dt = next((p for p in pause_dates if p >= last_stage_dt), None)
+        if next_pause_dt:
+            has_intervening_stage = any(
+                rec["date"] > last_stage_dt and rec["date"] < next_pause_dt and rec["stage"] not in [stage, "暂停"]
+                for rec in all_records
+            )
+            if not has_intervening_stage:
+                finish_dt = max(finish_dt, next_pause_dt)
         if stage in current_macros:
             finish_dt = max(finish_dt, today + datetime.timedelta(days=1))
         if stage in ["建模", "打印", "设计", "工程"] and mold_start and start_dt < mold_start:
@@ -6564,6 +6621,12 @@ if menu == MENU_DASHBOARD:
     table_data, gantt_data, _ppr_list, timeline_marks, _meta = _build_dash(",".join(valid_projs), _db_sig)
     project_person_roles = set(map(tuple, _ppr_list))
     project_person_roles.update(collect_todo_loading_pairs(current_pm))
+    gantt_design_main_labels = set()
+    for proj in valid_projs:
+        proj_data = db.get(proj, {})
+        proj_y_label = f"{proj} 📦[{proj_data.get('发货区间','-')}]" if proj_data.get('发货区间') and proj_data.get('发货区间') != '-' else proj
+        if _is_small_scale_project(proj, proj_data):
+            gantt_design_main_labels.add(proj_y_label)
 
     st.divider()
     st.subheader("📈 全局进展甘特图")
@@ -6638,10 +6701,19 @@ if menu == MENU_DASHBOARD:
                 y_order = sorted(visible_labels)
         else:
             y_order = sorted(df_g["项目"].unique().tolist())
+        def _is_parallel_row(row):
+            stage_name = str(row.get("工序阶段", "")).strip()
+            proj_name = str(row.get("项目", "")).strip()
+            if stage_name == "打印":
+                return True
+            if stage_name == "设计" and proj_name not in gantt_design_main_labels:
+                return True
+            return False
+
         parallel_stages = ["打印", "设计"]
-        main_stage_order = [x for x in gantt_cat_orders if x not in parallel_stages]
-        df_parallel = df_g[df_g["工序阶段"].isin(parallel_stages)].copy()
-        df_main = df_g[~df_g["工序阶段"].isin(parallel_stages)].copy()
+        main_stage_order = [x for x in gantt_cat_orders if x != "打印"]
+        df_parallel = df_g[df_g.apply(_is_parallel_row, axis=1)].copy()
+        df_main = df_g[~df_g.apply(_is_parallel_row, axis=1)].copy()
         df_display = df_g if show_parallel_tracks else df_main
         display_stage_order = gantt_cat_orders if show_parallel_tracks else main_stage_order
         if df_display.empty:
@@ -6676,6 +6748,51 @@ if menu == MENU_DASHBOARD:
                     textfont=dict(size=8, color="white"),
                     name=f"{stage_name}标记",
                     customdata=part[["标记说明"]],
+                    hovertemplate="%{customdata[0]}<extra></extra>"
+                ))
+        review_marks = []
+        review_seen = set()
+        for proj in valid_projs:
+            proj_data = db.get(proj, {})
+            proj_label = f"{proj} 📦[{proj_data.get('发货区间','-')}]" if proj_data.get('发货区间') and proj_data.get('发货区间') != '-' else proj
+            for comp_name, comp_info in proj_data.get("部件列表", {}).items():
+                for lg in comp_info.get("日志流", []):
+                    if is_hidden_system_log(lg):
+                        continue
+                    dt = _parse_log_date(lg)
+                    if not dt:
+                        continue
+                    evt = str(lg.get("事件", "")).strip()
+                    review_type = str(lg.get("提审类型", "")).strip()
+                    if review_type and review_type != "(无)":
+                        pass
+                    elif not any(x in evt.lower() for x in ["review", "提审", "审核", "过审", "打回", "退回"]):
+                        continue
+                    key = (proj_label, dt, review_type, evt, comp_name)
+                    if key in review_seen:
+                        continue
+                    review_seen.add(key)
+                    review_marks.append({
+                        "日期": dt.strftime("%Y-%m-%d"),
+                        "项目": proj_label,
+                        "说明": f"[{proj}] [{comp_name}] {review_type or '提审'} {evt}".strip(),
+                    })
+        if review_marks:
+            df_review_marks = pd.DataFrame(review_marks)
+            df_review_marks["日期_dt"] = pd.to_datetime(df_review_marks["日期"], errors="coerce")
+            if not showing_full_gantt:
+                df_review_marks = df_review_marks[(df_review_marks["日期_dt"] >= selected_start) & (df_review_marks["日期_dt"] <= selected_end)].copy()
+            if not df_review_marks.empty:
+                fig.add_trace(go.Scatter(
+                    x=df_review_marks["日期"],
+                    y=df_review_marks["项目"],
+                    mode="markers+text",
+                    marker=dict(symbol="diamond", size=10, color="#EC4899", line=dict(width=1, color="white")),
+                    text=["审"] * len(df_review_marks),
+                    textposition="middle center",
+                    textfont=dict(size=8, color="white"),
+                    name="提审标记",
+                    customdata=df_review_marks[["说明"]],
                     hovertemplate="%{customdata[0]}<extra></extra>"
                 ))
         if timeline_marks:
@@ -7077,7 +7194,7 @@ if menu == MENU_DASHBOARD:
             if (not skip_intent_check) and due_dt < datetime.date.today():
                 return ""
 
-            task = str(task_body or event_text).strip(" |，,;；")
+            task = clean_auto_todo_task_text(task_body or event_text)
             if not task:
                 return ""
 
@@ -7085,7 +7202,7 @@ if menu == MENU_DASHBOARD:
             owner = str(proj_data.get("负责人", "")).strip()
             scope = owner if owner and owner != "所有人" else "未分配"
             people = str(proj_data.get("跟单", "")).strip()
-            cpddl_txt = f"{due_dt.month}/{due_dt.day} {task}"
+            cpddl_txt = f"{due_dt.month}/{due_dt.day}"
 
             cfg = db.setdefault("系统配置", {})
             todo_all = cfg.setdefault("PM_TODO_LIST", [])
@@ -9657,6 +9774,30 @@ elif menu == MENU_SETTINGS:
                 st.caption("当前未检测到可自动清理的异常比例项目。")
             if suspicious_names:
                 st.warning("检测到需要人工判断的可疑项目名：" + "；".join(sorted(list(dict.fromkeys(suspicious_names)))[:12]))
+                suspicious_pick = st.selectbox(
+                    "删除可疑孤儿项目（如 1）",
+                    [""] + sorted(list(dict.fromkeys(suspicious_names))),
+                    key="suspicious_project_delete_pick",
+                )
+                if st.button("🗑 删除该可疑项目", key="btn_delete_suspicious_proj"):
+                    pick = str(suspicious_pick).strip()
+                    if not pick:
+                        st.warning("请先选择要删除的可疑项目。")
+                    elif pick not in db or pick == "系统配置":
+                        st.warning("该项目不存在或不可删除。")
+                    else:
+                        cfg = db.setdefault("系统配置", {})
+                        todo_all = cfg.setdefault("PM_TODO_LIST", [])
+                        for td in todo_all:
+                            proj_list = [p for p in normalize_todo_project_list(td.get("关联项目列表", [])) if p != pick]
+                            td["关联项目列表"] = proj_list
+                            td["关联项目"] = proj_list[0] if proj_list else ""
+                            if str(td.get("最近联动项目", "")).strip() == pick:
+                                td["最近联动项目"] = ""
+                        db.pop(pick, None)
+                        sync_save_db()
+                        st.success(f"已删除可疑项目：{pick}")
+                        st.rerun()
 
             alias_map = st.session_state.db["系统配置"].get("项目别名", {})
             if alias_map:
