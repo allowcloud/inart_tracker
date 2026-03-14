@@ -49,6 +49,51 @@ def resolve_alias_project(name, project_alias_map):
         return name
     return project_alias_map.get(n, name)
 
+
+def canonicalize_project_name(name, valid_projs=None, alias_map=None):
+    raw = str(name or "").strip()
+    if not raw or raw == "系统配置":
+        return ""
+    if re.fullmatch(r"\d{1,2}", raw):
+        return ""
+
+    alias_map = alias_map or (db.get("系统配置", {}).get("项目别名", {}) if isinstance(db, dict) else {})
+    valid_list = list(valid_projs or [p for p in db.keys() if p != "系统配置"])
+    valid_set = set(valid_list)
+
+    direct = resolve_alias_project(raw, alias_map)
+    if direct in valid_set and direct != "系统配置":
+        return direct
+
+    inferred = infer_malformed_ratio_project_target(raw)
+    if inferred and inferred in valid_set and inferred != "系统配置":
+        return inferred
+
+    m = re.match(r"^(1|3|4|6|12)\s*(.+)$", raw)
+    if m:
+        scale = str(m.group(1)).strip()
+        rest = str(m.group(2) or "").strip()
+        if rest:
+            candidate = f"1/{scale}{rest}"
+            if candidate in valid_set:
+                return candidate
+            rest_norm = norm_text(rest)
+            for p in valid_list:
+                p_txt = str(p).strip()
+                if not p_txt.startswith(f"1/{scale}"):
+                    continue
+                p_short = re.sub(r"^(1/6|1/4|1/12|1/3|1/1)\s*", "", p_txt).strip()
+                if rest_norm and norm_text(p_short) == rest_norm:
+                    return p_txt
+
+    raw_norm = norm_text(raw)
+    for p in valid_list:
+        p_txt = str(p).strip()
+        p_short = re.sub(r"^(1/6|1/4|1/12|1/3|1/1)\s*", "", p_txt).strip()
+        if raw_norm and (raw_norm == norm_text(p_txt) or raw_norm == norm_text(p_short)):
+            return p_txt
+    return raw
+
 def get_visible_projects(db_obj, current_pm):
     """按负责人过滤 + 别名去重：若A被映射到已存在的B，则默认隐藏A。"""
     alias_map = db_obj.get("系统配置", {}).get("项目别名", {})
@@ -1857,19 +1902,16 @@ def normalize_todo_project_list(raw_value):
 
     out = []
     alias_map = db.get("系统配置", {}).get("项目别名", {}) if isinstance(db, dict) else {}
+    valid_projs = [p for p in db.keys() if p != "系统配置"] if isinstance(db, dict) else []
     for token in raw_tokens:
         if token in ["(不关联项目)", "-"]:
             continue
         # Common split artifact from ratio tokens: standalone digits like "1" / "6".
         if re.fullmatch(r"\d{1,2}", token or ""):
             continue
-        resolved = resolve_alias_project(token, alias_map)
-        if resolved and resolved in db and resolved != "系统配置":
-            token = resolved
-        else:
-            inferred = infer_malformed_ratio_project_target(token)
-            if inferred and inferred in db and inferred != "系统配置":
-                token = inferred
+        token = canonicalize_project_name(token, valid_projs=valid_projs, alias_map=alias_map)
+        if not token or token == "系统配置":
+            continue
         if token not in out:
             out.append(token)
     return out
@@ -2135,7 +2177,12 @@ def infer_todo_projects_from_text(td, valid_projs):
             token_hits.extend(_match_projects_from_token(seg, valid_projs, alias_map))
         proj_list.extend(token_hits)
 
-    proj_list = list(dict.fromkeys([x for x in proj_list if x]))
+    alias_map = db.get("系统配置", {}).get("项目别名", {}) if isinstance(db, dict) else {}
+    proj_list = [
+        canonicalize_project_name(x, valid_projs=valid_projs, alias_map=alias_map)
+        for x in proj_list
+    ]
+    proj_list = list(dict.fromkeys([x for x in proj_list if x and x in valid_projs]))
     return proj_list
 
 
@@ -3551,10 +3598,16 @@ def render_pm_todo_manager(valid_projs, current_pm):
             td["任务"] = cleaned_task
             touched = True
 
-        proj_list = todo_project_list(td)
+        proj_list = [
+            canonicalize_project_name(x, valid_projs=valid_projs)
+            for x in todo_project_list(td)
+        ]
+        proj_list = list(dict.fromkeys([x for x in proj_list if x and x in valid_projs]))
         inferred_proj_list = infer_todo_projects_from_text(td, valid_projs)
         if inferred_proj_list:
             if (not proj_list) or any(p not in valid_projs for p in proj_list):
+                proj_list = list(dict.fromkeys([p for p in (proj_list + inferred_proj_list) if p in valid_projs]))
+            elif any(re.match(r"^(1|3|4|6|12)\s*.+$", str(p)) and "/" not in str(p) for p in proj_list):
                 proj_list = list(dict.fromkeys([p for p in (proj_list + inferred_proj_list) if p in valid_projs]))
         if td.get("关联项目列表", []) != proj_list:
             td["关联项目列表"] = proj_list
