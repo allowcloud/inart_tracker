@@ -1362,6 +1362,7 @@ def _allows_design_phase(proj_label="", proj_data=None, comp_name="", event_text
 def get_macro_phase(detail_stage, event_text="", comp_name="", proj_label="", proj_data=None):
     s = str(detail_stage).strip()
     evt = str(event_text).strip()
+    lower_evt = evt.lower()
     if "完成" in s or "结束" in s or "撒花" in s:
         return "结束"
     if "暂停" in s or "搁置" in s:
@@ -1374,15 +1375,18 @@ def get_macro_phase(detail_stage, event_text="", comp_name="", proj_label="", pr
         return "暂停"
     if any(x in s for x in ["大货", "复样", "量产", "开定"]):
         return "生产"
-    if any(x in s for x in ["模具", "开模", "下模"]) or any(x in evt for x in ["开模", "下模", "试模", "T版", "M版", "签板"]):
+    print_signal = ("打印" in evt) or ("签样" in evt) or (s == "打印") or any(x in evt for x in ["效果下模", "确认效果下模", "待确认效果下模"])
+    if print_signal:
+        return "打印"
+    mold_event_signal = any(x in evt for x in ["开模", "试模", "T版", "M版", "签板"])
+    if "下模" in evt and not any(x in evt for x in ["效果下模", "确认效果下模", "待确认效果下模"]):
+        mold_event_signal = True
+    if any(x in s for x in ["模具", "开模", "下模"]) or mold_event_signal:
         return "开模"
 
     design_allowed = _allows_design_phase(proj_label, proj_data, comp_name, evt, s)
-    print_signal = ("打印" in evt) or ("签样" in evt) or (s == "打印")
-    design_signal = any(x in s for x in ["设计", "官图"]) or any(x in evt.lower() for x in ["review", "审核", "提审", "排版"])
+    design_signal = any(x in s for x in ["设计", "官图"]) or any(x in lower_evt for x in ["review", "审核", "提审", "排版"])
 
-    if print_signal:
-        return "打印"
     if design_allowed and design_signal:
         return "设计"
     if any(x in s for x in ["拆件", "手板", "结构"]):
@@ -3348,12 +3352,21 @@ def build_project_stage_segments(proj_label, proj_data):
         if not records:
             continue
         start_dt = min(x["date"] for x in records)
-        finish_dt = max(x["date"] for x in records) + datetime.timedelta(days=1)
+        last_stage_dt = max(x["date"] for x in records)
+        finish_dt = last_stage_dt + datetime.timedelta(days=1)
         if stage == "建模" and launch_start:
             default_build_start = launch_start + datetime.timedelta(days=1)
             paused_on_default_start = default_build_start in pause_dates
             if not paused_on_default_start:
                 start_dt = min(start_dt, default_build_start)
+        next_pause_dt = next((p for p in pause_dates if p >= last_stage_dt), None)
+        if next_pause_dt:
+            has_intervening_stage = any(
+                rec["date"] > last_stage_dt and rec["date"] < next_pause_dt and rec["stage"] not in [stage, "暂停"]
+                for rec in all_records
+            )
+            if not has_intervening_stage:
+                finish_dt = max(finish_dt, next_pause_dt)
         if stage in current_macros:
             finish_dt = max(finish_dt, today + datetime.timedelta(days=1))
         if stage in ["建模", "打印", "设计", "工程"] and mold_start and start_dt < mold_start:
@@ -6564,6 +6577,12 @@ if menu == MENU_DASHBOARD:
     table_data, gantt_data, _ppr_list, timeline_marks, _meta = _build_dash(",".join(valid_projs), _db_sig)
     project_person_roles = set(map(tuple, _ppr_list))
     project_person_roles.update(collect_todo_loading_pairs(current_pm))
+    gantt_design_main_labels = set()
+    for proj in valid_projs:
+        proj_data = db.get(proj, {})
+        proj_y_label = f"{proj} 📦[{proj_data.get('发货区间','-')}]" if proj_data.get('发货区间') and proj_data.get('发货区间') != '-' else proj
+        if _is_small_scale_project(proj, proj_data):
+            gantt_design_main_labels.add(proj_y_label)
 
     st.divider()
     st.subheader("📈 全局进展甘特图")
@@ -6638,10 +6657,19 @@ if menu == MENU_DASHBOARD:
                 y_order = sorted(visible_labels)
         else:
             y_order = sorted(df_g["项目"].unique().tolist())
+        def _is_parallel_row(row):
+            stage_name = str(row.get("工序阶段", "")).strip()
+            proj_name = str(row.get("项目", "")).strip()
+            if stage_name == "打印":
+                return True
+            if stage_name == "设计" and proj_name not in gantt_design_main_labels:
+                return True
+            return False
+
         parallel_stages = ["打印", "设计"]
-        main_stage_order = [x for x in gantt_cat_orders if x not in parallel_stages]
-        df_parallel = df_g[df_g["工序阶段"].isin(parallel_stages)].copy()
-        df_main = df_g[~df_g["工序阶段"].isin(parallel_stages)].copy()
+        main_stage_order = [x for x in gantt_cat_orders if x != "打印"]
+        df_parallel = df_g[df_g.apply(_is_parallel_row, axis=1)].copy()
+        df_main = df_g[~df_g.apply(_is_parallel_row, axis=1)].copy()
         df_display = df_g if show_parallel_tracks else df_main
         display_stage_order = gantt_cat_orders if show_parallel_tracks else main_stage_order
         if df_display.empty:
@@ -6676,6 +6704,51 @@ if menu == MENU_DASHBOARD:
                     textfont=dict(size=8, color="white"),
                     name=f"{stage_name}标记",
                     customdata=part[["标记说明"]],
+                    hovertemplate="%{customdata[0]}<extra></extra>"
+                ))
+        review_marks = []
+        review_seen = set()
+        for proj in valid_projs:
+            proj_data = db.get(proj, {})
+            proj_label = f"{proj} 📦[{proj_data.get('发货区间','-')}]" if proj_data.get('发货区间') and proj_data.get('发货区间') != '-' else proj
+            for comp_name, comp_info in proj_data.get("部件列表", {}).items():
+                for lg in comp_info.get("日志流", []):
+                    if is_hidden_system_log(lg):
+                        continue
+                    dt = _parse_log_date(lg)
+                    if not dt:
+                        continue
+                    evt = str(lg.get("事件", "")).strip()
+                    review_type = str(lg.get("提审类型", "")).strip()
+                    if review_type and review_type != "(无)":
+                        pass
+                    elif not any(x in evt.lower() for x in ["review", "提审", "审核", "过审", "打回", "退回"]):
+                        continue
+                    key = (proj_label, dt, review_type, evt, comp_name)
+                    if key in review_seen:
+                        continue
+                    review_seen.add(key)
+                    review_marks.append({
+                        "日期": dt.strftime("%Y-%m-%d"),
+                        "项目": proj_label,
+                        "说明": f"[{proj}] [{comp_name}] {review_type or '提审'} {evt}".strip(),
+                    })
+        if review_marks:
+            df_review_marks = pd.DataFrame(review_marks)
+            df_review_marks["日期_dt"] = pd.to_datetime(df_review_marks["日期"], errors="coerce")
+            if not showing_full_gantt:
+                df_review_marks = df_review_marks[(df_review_marks["日期_dt"] >= selected_start) & (df_review_marks["日期_dt"] <= selected_end)].copy()
+            if not df_review_marks.empty:
+                fig.add_trace(go.Scatter(
+                    x=df_review_marks["日期"],
+                    y=df_review_marks["项目"],
+                    mode="markers+text",
+                    marker=dict(symbol="diamond", size=10, color="#EC4899", line=dict(width=1, color="white")),
+                    text=["审"] * len(df_review_marks),
+                    textposition="middle center",
+                    textfont=dict(size=8, color="white"),
+                    name="提审标记",
+                    customdata=df_review_marks[["说明"]],
                     hovertemplate="%{customdata[0]}<extra></extra>"
                 ))
         if timeline_marks:
