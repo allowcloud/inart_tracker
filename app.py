@@ -2647,12 +2647,67 @@ def get_latest_standard_event_binding(project_name):
     return latest
 
 
+def _is_todo_standard_event(evt_obj):
+    evt = evt_obj if isinstance(evt_obj, dict) else {}
+    src = str(evt.get("来源", "")).strip()
+    act = str(evt.get("动作", "")).strip()
+    if src == "To-do":
+        return True
+    if act in ["待办更新", "待办完成", "待办重开", "动态联动待办"]:
+        return True
+    if str(evt.get("意图", "")).strip() == "todo":
+        return True
+    return False
+
+
+def get_latest_standard_event_pair(project_name):
+    proj = str(project_name or "").strip()
+    if not proj:
+        return {"progress": None, "todo": None}
+    alias_map = db.get("系统配置", {}).get("项目别名", {})
+    proj = resolve_alias_project(proj, alias_map)
+    if proj not in db:
+        return {"progress": None, "todo": None}
+
+    events = db.get("系统配置", {}).get("标准事件流", [])
+    source_weight = {
+        "历史溯源": 5,
+        "PM工作台": 4,
+        "全局大盘": 3,
+        "To-do": 2,
+    }
+    latest_progress = None
+    latest_todo = None
+    for evt in events:
+        if str((evt or {}).get("项目", "")).strip() != proj:
+            continue
+        evt_date_txt = str((evt or {}).get("日期", "")).strip()
+        evt_date = parse_date_safe(evt_date_txt) or datetime.date.min
+        src = str((evt or {}).get("来源", "")).strip()
+        rank = (
+            evt_date.toordinal(),
+            source_weight.get(src, 0),
+            str((evt or {}).get("写入时间", "")).strip(),
+            str((evt or {}).get("_id", "")).strip(),
+        )
+        target_key = "todo" if _is_todo_standard_event(evt) else "progress"
+        if target_key == "todo":
+            if (latest_todo is None) or (rank > latest_todo["rank"]):
+                latest_todo = {"rank": rank, "event": evt}
+        else:
+            if (latest_progress is None) or (rank > latest_progress["rank"]):
+                latest_progress = {"rank": rank, "event": evt}
+    return {"progress": latest_progress, "todo": latest_todo}
+
+
 def build_project_current_explanation(project_name):
     proj = str(project_name or "").strip()
     if (not proj) or proj not in db:
         return {}
 
-    std_binding = get_latest_standard_event_binding(proj)
+    std_pair = get_latest_standard_event_pair(proj)
+    std_binding = std_pair.get("progress")
+    todo_binding = std_pair.get("todo")
     log_binding = get_latest_project_log_binding(proj)
 
     std_date = parse_date_safe(((std_binding or {}).get("event", {}) or {}).get("日期", "")) if std_binding else None
@@ -2671,6 +2726,7 @@ def build_project_current_explanation(project_name):
         evt = std_binding["event"]
         content = str(evt.get("内容", "")).strip() or str(evt.get("原始文本", "")).strip() or "无数据"
         raw = str(evt.get("原始文本", "")).strip() or content
+        reminder_evt = (todo_binding or {}).get("event", {}) if todo_binding else {}
         return {
             "项目": proj,
             "日期": str(evt.get("日期", "")).strip(),
@@ -2683,6 +2739,9 @@ def build_project_current_explanation(project_name):
             "关联人员": str(evt.get("关联人员", "")).strip(),
             "关联待办": [str(x).strip() for x in (evt.get("关联待办", []) or []) if str(x).strip()],
             "意图": str(evt.get("意图", "")).strip(),
+            "提醒内容": str(reminder_evt.get("内容", "")).strip(),
+            "提醒日期": str(reminder_evt.get("日期", "")).strip(),
+            "提醒动作": str(reminder_evt.get("动作", "")).strip(),
             "模式": "标准事件",
         }
 
@@ -2695,6 +2754,7 @@ def build_project_current_explanation(project_name):
         if "】" in clean:
             clean = clean.split("】")[-1]
         clean = clean.split("[系统]")[0].strip() or evt
+        reminder_evt = (todo_binding or {}).get("event", {}) if todo_binding else {}
         return {
             "项目": proj,
             "日期": str(lg.get("日期", "")).strip(),
@@ -2707,7 +2767,31 @@ def build_project_current_explanation(project_name):
             "关联人员": "",
             "关联待办": [],
             "意图": "",
+            "提醒内容": str(reminder_evt.get("内容", "")).strip(),
+            "提醒日期": str(reminder_evt.get("日期", "")).strip(),
+            "提醒动作": str(reminder_evt.get("动作", "")).strip(),
             "模式": "项目日志",
+        }
+
+    if todo_binding and isinstance(todo_binding.get("event"), dict):
+        evt = todo_binding["event"]
+        content = str(evt.get("内容", "")).strip() or str(evt.get("原始文本", "")).strip() or "无数据"
+        return {
+            "项目": proj,
+            "日期": str(evt.get("日期", "")).strip(),
+            "来源": str(evt.get("来源", "")).strip() or "To-do",
+            "动作": str(evt.get("动作", "")).strip(),
+            "部件": str(evt.get("部件", "")).strip() or "全局进度",
+            "阶段": str(evt.get("阶段", "")).strip() or "-",
+            "内容": content,
+            "原始文本": str(evt.get("原始文本", "")).strip() or content,
+            "关联人员": str(evt.get("关联人员", "")).strip(),
+            "关联待办": [str(x).strip() for x in (evt.get("关联待办", []) or []) if str(x).strip()],
+            "意图": str(evt.get("意图", "")).strip(),
+            "提醒内容": content,
+            "提醒日期": str(evt.get("日期", "")).strip(),
+            "提醒动作": str(evt.get("动作", "")).strip(),
+            "模式": "待办提醒",
         }
 
     return {
@@ -2722,6 +2806,9 @@ def build_project_current_explanation(project_name):
         "关联人员": "",
         "关联待办": [],
         "意图": "",
+        "提醒内容": "",
+        "提醒日期": "",
+        "提醒动作": "",
         "模式": "空",
     }
 
@@ -7240,6 +7327,10 @@ elif menu == MENU_SPECIFIC:
             extra_bits.append(f"关联待办：{len(todo_refs)} 条")
         if extra_bits:
             st.caption(" ｜ ".join(extra_bits))
+        reminder_text = str(proj_explain.get("提醒内容", "")).strip()
+        if reminder_text:
+            reminder_date = str(proj_explain.get("提醒日期", "")).strip() or "-"
+            st.caption(f"待办提醒：{reminder_date} ｜ {reminder_text}")
     with st.expander("项目备忘录", expanded=False):
         memo_txt_pm = st.text_area("记录跨部门叮嘱等杂项", value=db[sel_proj].get("备忘录", ""), height=90, key=f"pm_memo_{sel_proj}")
         if st.button("保存项目备忘录", key=f"pm_save_memo_{sel_proj}"):
