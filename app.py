@@ -1577,6 +1577,22 @@ def extract_deadline_from_text(text, ref_date=None):
             pass
     return None
 
+
+def clean_auto_todo_task_text(raw_text):
+    txt = str(raw_text or "").strip()
+    if not txt:
+        return ""
+    txt = re.sub(r"^(?:\[[^\]]+\]\s*){1,6}", "", txt).strip()
+    txt = re.sub(r"\s+", " ", txt).strip(" ，,;；|")
+    txt = re.sub(r"^(预计|计划|大概|约)\s*", "", txt)
+    txt = re.sub(r"\s*(左右|前后)\s*", " ", txt)
+    for noise in get_recognition_keywords("日期噪音词"):
+        if not noise:
+            continue
+        txt = re.sub(rf"(^|[\s，,;；|]){re.escape(str(noise))}(?=[\s，,;；|]|$)", " ", txt)
+    txt = re.sub(r"\s+", " ", txt).strip(" ，,;；|")
+    return txt
+
 def todo_cpddl_text(td):
     merged = str((td or {}).get("CPDDL", "")).strip()
     if merged:
@@ -1821,12 +1837,20 @@ def normalize_todo_project_list(raw_value):
             raw_tokens = [re.sub(r"\s*/\s*", "/", x.replace(marker, "/").strip()) for x in raw_tokens]
 
     out = []
+    alias_map = db.get("系统配置", {}).get("项目别名", {}) if isinstance(db, dict) else {}
     for token in raw_tokens:
         if token in ["(不关联项目)", "-"]:
             continue
         # Common split artifact from ratio tokens: standalone digits like "1" / "6".
         if re.fullmatch(r"\d{1,2}", token or ""):
             continue
+        resolved = resolve_alias_project(token, alias_map)
+        if resolved and resolved in db and resolved != "系统配置":
+            token = resolved
+        else:
+            inferred = infer_malformed_ratio_project_target(token)
+            if inferred and inferred in db and inferred != "系统配置":
+                token = inferred
         if token not in out:
             out.append(token)
     return out
@@ -2332,6 +2356,26 @@ def merge_project_into_target(merge_src, merge_dst, learned_aliases=None):
             dst_data.setdefault(extra_key, [])
             if isinstance(dst_data.get(extra_key), list) and isinstance(src_data.get(extra_key), list):
                 dst_data[extra_key].extend(src_data.get(extra_key, []))
+
+    cfg = db.setdefault("系统配置", {})
+    todo_all = cfg.setdefault("PM_TODO_LIST", [])
+    for td in todo_all:
+        proj_list = normalize_todo_project_list(td.get("关联项目列表", []))
+        legacy = str(td.get("关联项目", "")).strip()
+        if legacy:
+            proj_list = list(dict.fromkeys(proj_list + normalize_todo_project_list([legacy])))
+        changed = False
+        new_list = [dst if p == src else p for p in proj_list]
+        new_list = list(dict.fromkeys(normalize_todo_project_list(new_list)))
+        if new_list != proj_list:
+            td["关联项目列表"] = new_list
+            td["关联项目"] = new_list[0] if new_list else ""
+            changed = True
+        if str(td.get("最近联动项目", "")).strip() == src:
+            td["最近联动项目"] = dst
+            changed = True
+        if changed and not isinstance(td.get("历史版本"), list):
+            td["历史版本"] = []
 
     db[dst] = dst_data
     if src in db:
@@ -7150,7 +7194,7 @@ if menu == MENU_DASHBOARD:
             if (not skip_intent_check) and due_dt < datetime.date.today():
                 return ""
 
-            task = str(task_body or event_text).strip(" |，,;；")
+            task = clean_auto_todo_task_text(task_body or event_text)
             if not task:
                 return ""
 
@@ -7158,7 +7202,7 @@ if menu == MENU_DASHBOARD:
             owner = str(proj_data.get("负责人", "")).strip()
             scope = owner if owner and owner != "所有人" else "未分配"
             people = str(proj_data.get("跟单", "")).strip()
-            cpddl_txt = f"{due_dt.month}/{due_dt.day} {task}"
+            cpddl_txt = f"{due_dt.month}/{due_dt.day}"
 
             cfg = db.setdefault("系统配置", {})
             todo_all = cfg.setdefault("PM_TODO_LIST", [])
@@ -9730,6 +9774,30 @@ elif menu == MENU_SETTINGS:
                 st.caption("当前未检测到可自动清理的异常比例项目。")
             if suspicious_names:
                 st.warning("检测到需要人工判断的可疑项目名：" + "；".join(sorted(list(dict.fromkeys(suspicious_names)))[:12]))
+                suspicious_pick = st.selectbox(
+                    "删除可疑孤儿项目（如 1）",
+                    [""] + sorted(list(dict.fromkeys(suspicious_names))),
+                    key="suspicious_project_delete_pick",
+                )
+                if st.button("🗑 删除该可疑项目", key="btn_delete_suspicious_proj"):
+                    pick = str(suspicious_pick).strip()
+                    if not pick:
+                        st.warning("请先选择要删除的可疑项目。")
+                    elif pick not in db or pick == "系统配置":
+                        st.warning("该项目不存在或不可删除。")
+                    else:
+                        cfg = db.setdefault("系统配置", {})
+                        todo_all = cfg.setdefault("PM_TODO_LIST", [])
+                        for td in todo_all:
+                            proj_list = [p for p in normalize_todo_project_list(td.get("关联项目列表", [])) if p != pick]
+                            td["关联项目列表"] = proj_list
+                            td["关联项目"] = proj_list[0] if proj_list else ""
+                            if str(td.get("最近联动项目", "")).strip() == pick:
+                                td["最近联动项目"] = ""
+                        db.pop(pick, None)
+                        sync_save_db()
+                        st.success(f"已删除可疑项目：{pick}")
+                        st.rerun()
 
             alias_map = st.session_state.db["系统配置"].get("项目别名", {})
             if alias_map:
