@@ -184,8 +184,13 @@ st.markdown("""
     --pm-sidebar-start: #f7fafc;
     --pm-sidebar-end: #edf4ff;
     --pm-card: #ffffff;
+    --pm-card-soft: rgba(255,255,255,0.78);
     --pm-text-soft: #475569;
+    --pm-text-main: #102033;
     --pm-accent: #0f766e;
+    --pm-accent-soft: rgba(15, 118, 110, 0.12);
+    --pm-shadow: 0 14px 32px rgba(15, 23, 42, 0.08);
+    --pm-radius: 18px;
 }
 @media (prefers-color-scheme: dark) {
     :root {
@@ -195,8 +200,12 @@ st.markdown("""
         --pm-sidebar-start: #0f172a;
         --pm-sidebar-end: #111827;
         --pm-card: #0f172a;
+        --pm-card-soft: rgba(15, 23, 42, 0.84);
         --pm-text-soft: #cbd5e1;
+        --pm-text-main: #f8fafc;
         --pm-accent: #22c55e;
+        --pm-accent-soft: rgba(34, 197, 94, 0.16);
+        --pm-shadow: 0 18px 38px rgba(2, 6, 23, 0.34);
     }
 }
 /* prevent blank flash while switching pages */
@@ -205,15 +214,107 @@ st.markdown("""
 [data-testid="stAppViewContainer"] {
     background: linear-gradient(180deg, var(--pm-bg-start) 0%, var(--pm-bg-end) 100%);
 }
+[data-testid="stAppViewContainer"] .main {
+    color: var(--pm-text-main);
+}
+[data-testid="stAppViewContainer"] .main h1,
+[data-testid="stAppViewContainer"] .main h2,
+[data-testid="stAppViewContainer"] .main h3 {
+    letter-spacing: 0.01em;
+}
+[data-testid="stAppViewContainer"] .main p,
+[data-testid="stAppViewContainer"] .main li,
+[data-testid="stAppViewContainer"] .main label {
+    color: var(--pm-text-main);
+}
 /* compact table cells for denser information */
 [data-testid="stDataFrame"] table td { padding: 4px 8px !important; font-size: 13px; }
 [data-testid="stDataEditor"] [role="gridcell"] { font-size: 13px; }
+[data-testid="stDataFrame"], [data-testid="stDataEditor"] {
+    border: 1px solid var(--pm-border);
+    border-radius: 16px;
+    overflow: hidden;
+    box-shadow: var(--pm-shadow);
+    background: var(--pm-card-soft);
+    backdrop-filter: blur(10px);
+}
+[data-testid="stDataFrame"] thead tr th,
+[data-testid="stDataEditor"] [role="columnheader"] {
+    background: linear-gradient(180deg, var(--pm-card) 0%, var(--pm-card-soft) 100%);
+}
+[data-testid="stDataEditor"] [role="gridcell"]:focus,
+[data-testid="stDataEditor"] [role="gridcell"]:focus-within {
+    box-shadow: inset 0 0 0 2px var(--pm-accent-soft) !important;
+}
 /* sidebar visual tuning with same theme variables */
 section[data-testid="stSidebar"] { background: linear-gradient(180deg, var(--pm-sidebar-start) 0%, var(--pm-sidebar-end) 100%); }
 section[data-testid="stSidebar"] .stButton button { width: 100%; border-radius: 8px; }
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p { color: var(--pm-text-main); }
 /* metric cards */
-[data-testid="stMetric"] { border: 1px solid var(--pm-border); border-radius: 10px; padding: 6px 10px; background: var(--pm-card); }
+[data-testid="stMetric"] { border: 1px solid var(--pm-border); border-radius: 14px; padding: 8px 12px; background: var(--pm-card-soft); box-shadow: var(--pm-shadow); backdrop-filter: blur(10px); }
 [data-testid="stMetric"] [data-testid="stMetricLabel"] { color: var(--pm-text-soft); }
+div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlockBorderWrapper"] > div {
+    border-radius: var(--pm-radius) !important;
+    border: 1px solid var(--pm-border) !important;
+    background: var(--pm-card-soft) !important;
+    box-shadow: var(--pm-shadow);
+    backdrop-filter: blur(12px);
+}
+[data-testid="stExpander"] {
+    border: 1px solid var(--pm-border);
+    border-radius: var(--pm-radius);
+    background: var(--pm-card-soft);
+    box-shadow: var(--pm-shadow);
+    overflow: hidden;
+}
+[data-testid="stExpander"] details summary {
+    background: linear-gradient(180deg, var(--pm-card-soft) 0%, transparent 100%);
+    border-radius: var(--pm-radius);
+}
+.stButton button, .stDownloadButton button {
+    border-radius: 12px !important;
+    border: 1px solid var(--pm-border) !important;
+    box-shadow: none !important;
+}
+.stButton button[kind="primary"], .stDownloadButton button[kind="primary"] {
+    background: linear-gradient(135deg, var(--pm-accent) 0%, #0ea5a4 100%) !important;
+    color: #ffffff !important;
+    border: none !important;
+}
+.stButton button:hover, .stDownloadButton button:hover {
+    transform: translateY(-1px);
+    transition: all .16s ease;
+}
+.stTextInput input, .stTextArea textarea, .stDateInput input,
+.stNumberInput input, .stSelectbox [data-baseweb="select"] > div,
+.stMultiSelect [data-baseweb="select"] > div {
+    border-radius: 12px !important;
+    border-color: var(--pm-border) !important;
+    background: var(--pm-card) !important;
+}
+.pm-section-title {
+    margin: 0.2rem 0 1rem 0;
+    padding: 0.95rem 1.15rem;
+    border-radius: 16px;
+    border: 1px solid var(--pm-border);
+    background:
+        radial-gradient(circle at top right, var(--pm-accent-soft) 0%, transparent 36%),
+        linear-gradient(135deg, var(--pm-card) 0%, var(--pm-card-soft) 100%);
+    box-shadow: var(--pm-shadow);
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: var(--pm-text-main);
+}
+.pm-kicker {
+    display: inline-block;
+    padding: 0.25rem 0.6rem;
+    border-radius: 999px;
+    background: var(--pm-accent-soft);
+    color: var(--pm-accent);
+    font-size: 0.8rem;
+    font-weight: 700;
+    margin-bottom: 0.5rem;
+}
 /* localize streamlit uploader default English copy */
 [data-testid="stFileUploaderDropzoneInstructions"] span { display: none !important; }
 [data-testid="stFileUploaderDropzoneInstructions"]::before { content: "拖拽文件到这里"; font-size: 14px; color: var(--pm-text-soft); }
@@ -221,6 +322,11 @@ section[data-testid="stSidebar"] .stButton button { width: 100%; border-radius: 
 [data-testid="stFileUploader"] small::after { content: "单文件上限 200MB（PNG/JPG/JPEG）"; font-size: 12px; color: var(--pm-text-soft); }
 [data-testid="stFileUploaderDropzone"] button { font-size: 0 !important; }
 [data-testid="stFileUploaderDropzone"] button::after { content: "选择文件"; font-size: 14px; }
+[data-testid="stFileUploaderDropzone"] {
+    border: 1px dashed var(--pm-border) !important;
+    border-radius: 16px !important;
+    background: var(--pm-card-soft) !important;
+}
 /* hide streamlit footer */
 footer { visibility: hidden; }
 </style>
@@ -261,6 +367,34 @@ PRINT_TRACK_SOURCE_LABELS = {
     "日志自动捞取": "📋 日志自动捞取",
     "手动录入": "✏️ 手动录入",
 }
+DEFAULT_COMPONENT_KEYWORDS = {
+    "头雕": "头雕(表情)", "表情": "头雕(表情)", "头": "头雕(表情)", "眼": "头雕(表情)", "脸": "头雕(表情)",
+    "植发": "植发", "头发": "植发", "发": "植发",
+    "手": "手型", "手型": "手型",
+    "衣": "服装", "服": "服装", "服装": "服装",
+    "包": "包装", "盒": "包装", "包装": "包装",
+    "地台": "地台",
+    "扣": "配件", "法杖": "配件", "杯": "配件", "剑": "配件", "配件": "配件",
+}
+DEFAULT_STAGE_KEYWORDS = {
+    "定价": "立项", "评估": "立项", "开定": "立项",
+    "打印": "建模(含打印/签样)", "模型": "建模(含打印/签样)", "缩放": "建模(含打印/签样)",
+    "修": "建模(含打印/签样)", "建模": "建模(含打印/签样)", "打样": "建模(含打印/签样)",
+    "涂": "涂装", "色": "涂装",
+    "设计": "设计", "原画": "设计",
+    "拆件": "工程拆件", "官图": "官图",
+    "开模": "开模", "模具": "开模", "试模": "开模",
+    "大货": "大货",
+    "完成": "✅ 已完成(结束)", "结束": "✅ 已完成(结束)",
+}
+DEFAULT_RECOGNITION_DICT = {
+    "未来意图词": ["待", "待办", "需要", "需", "跟进", "跟催", "补", "安排", "todo", "to do", "ddl", "cp", "待审", "待反馈", "待版权", "预计", "预计出", "预计给出", "即将"],
+    "过去意图词": ["已", "已经", "完成", "完毕", "通过", "收到", "确认了", "确认完成", "看过", "on-hand", "on hand", "done", "ok", "提交", "已提交", "已提审", "提审通过", "已发"],
+    "恢复推进词": ["resume", "恢复", "重启", "继续推进", "解除暂停", "复工"],
+    "打印正向词": ["打印", "开打", "安排打", "去打", "送打", "打件", "打印件", "打样件", "博泰", "逸博", "小样儿"],
+    "打印排除词": ["打印件已收到"],
+    "日期噪音词": ["预计", "左右", "大概", "约", "计划", "可", "能", "初版"],
+}
 
 DEFAULT_SYS_CFG = {
     "标准部件": ["头雕(表情)", "素体", "手型", "服装", "配件", "地台", "包装"],
@@ -270,6 +404,7 @@ DEFAULT_SYS_CFG = {
     "项目别名": {},
     "AI_COMP_KW":  {},
     "AI_STAGE_KW":  {},
+    "识别词典": json.loads(json.dumps(DEFAULT_RECOGNITION_DICT, ensure_ascii=False)),
     "打印追踪列表": [],
     "打印地点选项": PRINT_TRACK_LOCATION_DEFAULTS.copy()
     ,"PROJECT_TEMPLATE": {"default_ratio": "1/6", "default_ip_owner": "", "ratio_options": PROJECT_RATIO_OPTIONS.copy()}
@@ -278,6 +413,69 @@ DEFAULT_DB = {"系统配置": DEFAULT_SYS_CFG}
 
 def _deep_copy_obj(obj):
     return json.loads(json.dumps(obj, ensure_ascii=False))
+
+
+def get_recognition_dict():
+    cfg = st.session_state.db.setdefault("系统配置", {}) if "db" in st.session_state else DEFAULT_DB.setdefault("系统配置", {})
+    raw = cfg.setdefault("识别词典", _deep_copy_obj(DEFAULT_RECOGNITION_DICT))
+    out = _deep_copy_obj(DEFAULT_RECOGNITION_DICT)
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            if isinstance(v, list):
+                out[k] = [str(x).strip() for x in v if str(x).strip()]
+    return out
+
+
+def get_component_keyword_map():
+    cfg = st.session_state.db.setdefault("系统配置", {}) if "db" in st.session_state else DEFAULT_DB.setdefault("系统配置", {})
+    sys_map = cfg.get("AI_COMP_KW", {}) if isinstance(cfg.get("AI_COMP_KW", {}), dict) else {}
+    out = dict(DEFAULT_COMPONENT_KEYWORDS)
+    out.update({str(k).strip(): str(v).strip() for k, v in sys_map.items() if str(k).strip() and str(v).strip()})
+    return out
+
+
+def get_stage_keyword_map():
+    cfg = st.session_state.db.setdefault("系统配置", {}) if "db" in st.session_state else DEFAULT_DB.setdefault("系统配置", {})
+    sys_map = cfg.get("AI_STAGE_KW", {}) if isinstance(cfg.get("AI_STAGE_KW", {}), dict) else {}
+    out = dict(DEFAULT_STAGE_KEYWORDS)
+    out.update({str(k).strip(): str(v).strip() for k, v in sys_map.items() if str(k).strip() and str(v).strip()})
+    return out
+
+
+def get_recognition_keywords(list_key):
+    return get_recognition_dict().get(list_key, [])
+
+
+def _format_keyword_map_text(mapping):
+    rows = []
+    for k, v in sorted((mapping or {}).items(), key=lambda x: str(x[0])):
+        kk = str(k).strip(); vv = str(v).strip()
+        if kk and vv:
+            rows.append(f"{kk}={vv}")
+    return "\n".join(rows)
+
+
+def _parse_keyword_map_text(raw_text):
+    out = {}
+    for line in str(raw_text or "").splitlines():
+        txt = str(line).strip()
+        if (not txt) or txt.startswith("#"):
+            continue
+        if "=" not in txt:
+            continue
+        k, v = txt.split("=", 1)
+        kk = str(k).strip(); vv = str(v).strip()
+        if kk and vv:
+            out[kk] = vv
+    return out
+
+
+def _format_keyword_list_text(values):
+    return "\n".join([str(x).strip() for x in (values or []) if str(x).strip()])
+
+
+def _parse_keyword_list_text(raw_text):
+    return [str(x).strip() for x in str(raw_text or "").splitlines() if str(x).strip() and not str(x).strip().startswith("#")]
 
 
 class _LocalJsonDBManager:
@@ -3679,20 +3877,8 @@ def render_pm_batch_fastlog_integrated(visible_projects, default_proj=""):
 
     MANUAL_PICK = "⚠️请手动选择项目"
     PROJECT_ALIAS_MAP = SYS_CFG.get("项目别名", {})
-    COMP_KW = {
-        "头": "头雕(表情)", "眼": "头雕(表情)", "脸": "头雕(表情)", "手": "手型",
-        "衣": "服装", "包": "包装", "盒": "包装", "地台": "地台",
-        "扣": "配件", "法杖": "配件", "杯": "配件", "剑": "配件"
-    }
-    STAGE_KW = {
-        "定价": "立项", "评估": "立项", "打印": "建模(含打印/签样)",
-        "模型": "建模(含打印/签样)", "缩放": "建模(含打印/签样)", "建模": "建模(含打印/签样)",
-        "涂": "涂装", "色": "涂装", "设计": "设计", "原画": "设计",
-        "拆件": "工程拆件", "官图": "官图", "开模": "开模", "模具": "开模", "试模": "开模", "大货": "大货",
-        "完成": "✅ 已完成(结束)", "结束": "✅ 已完成(结束)"
-    }
-    comp_kw = {**COMP_KW, **SYS_CFG.get("AI_COMP_KW", {})}
-    stage_kw = {**STAGE_KW, **SYS_CFG.get("AI_STAGE_KW", {})}
+    comp_kw = get_component_keyword_map()
+    stage_kw = get_stage_keyword_map()
 
     k_rows = "pm_batch_rows"
     d1, d2 = st.columns([1, 3])
@@ -3982,20 +4168,8 @@ def render_pm_fastlog_integrated(sel_proj):
     st.markdown("#### 📝 速记功能（已并入 PM）")
     st.caption("当前为【单项目速记】。AI 仅猜部件/阶段/提审，不自动跳到全局进度。")
 
-    COMP_KW = {
-        "头": "头雕(表情)", "眼": "头雕(表情)", "脸": "头雕(表情)", "手": "手型",
-        "衣": "服装", "包": "包装", "盒": "包装", "地台": "地台",
-        "扣": "配件", "法杖": "配件", "杯": "配件", "剑": "配件"
-    }
-    STAGE_KW = {
-        "定价": "立项", "评估": "立项", "打印": "建模(含打印/签样)",
-        "模型": "建模(含打印/签样)", "缩放": "建模(含打印/签样)", "建模": "建模(含打印/签样)",
-        "涂": "涂装", "色": "涂装", "设计": "设计", "原画": "设计",
-        "拆件": "工程拆件", "官图": "官图", "开模": "开模", "模具": "开模", "试模": "开模", "大货": "大货",
-        "完成": "✅ 已完成(结束)", "结束": "✅ 已完成(结束)"
-    }
-    comp_kw = {**COMP_KW, **SYS_CFG.get("AI_COMP_KW", {})}
-    stage_kw = {**STAGE_KW, **SYS_CFG.get("AI_STAGE_KW", {})}
+    comp_kw = get_component_keyword_map()
+    stage_kw = get_stage_keyword_map()
 
     unresolved_comp = "(待选择部件)"
     rk = f"pm_fast_rows_{sel_proj}"
@@ -4726,13 +4900,8 @@ def _contains_print_tracking_signal(text):
     txt = str(text or "").strip()
     if not txt:
         return False
-    positive_kw = [
-        "打印", "开打", "安排打", "去打", "送打", "打件", "打印件", "打样件",
-        "博泰", "逸博", "小样儿",
-    ]
-    negative_kw = [
-        "打印件已收到",
-    ]
+    positive_kw = get_recognition_keywords("打印正向词")
+    negative_kw = get_recognition_keywords("打印排除词")
     if any(k in txt for k in negative_kw):
         return False
     return any(k in txt for k in positive_kw)
@@ -6477,7 +6646,10 @@ if menu == MENU_DASHBOARD:
                 body = str(raw or "").strip()
                 body = re.sub(r"^(?:\[[^\]]+\]\s*){1,6}", "", body).strip()
                 body = re.sub(r"\s+", " ", body).strip(" \uff0c,;\uff1b|")
-                body = re.sub(r"^(\u9884\u8ba1|\u8ba1\u5212|\u9884\u4f30|\u4e89\u53d6|\u76ee\u6807|\u9884\u8ba1\u5728|\u9884\u8ba1\u4e8e)\s*", "", body)
+                for noise in get_recognition_keywords("日期噪音词"):
+                    if not noise:
+                        continue
+                    body = re.sub(rf"(^|\\s){re.escape(str(noise))}(?=\\s|$)", " ", body)
                 body = re.sub(r"\s*(\u5de6\u53f3|\u524d\u540e)\s*", " ", body)
                 body = re.sub(r"^(\u5927\u7ea6|\u7ea6)\s*", "", body)
                 body = re.sub(r"\s+", " ", body).strip(" \uff0c,;\uff1b|")
@@ -6527,14 +6699,8 @@ if menu == MENU_DASHBOARD:
         def _classify_dynamic_intent(text):
             txt = str(text or "")
             txt_norm = norm_text(txt)
-            todo_keys = [
-                "\u5f85", "\u5f85\u529e", "\u9700\u8981", "\u9700", "\u8ddf\u8fdb", "\u8ddf\u50ac", "\u8865", "\u5b89\u6392", "todo", "to do", "ddl", "cp", "\u5f85\u5ba1", "\u5f85\u53cd\u9988", "\u5f85\u7248\u6743",
-                "\u9884\u8ba1", "\u9884\u8ba1\u51fa", "\u9884\u8ba1\u7ed9\u51fa", "\u5373\u5c06",
-            ]
-            past_keys = [
-                "\u5df2", "\u5df2\u7ecf", "\u5b8c\u6210", "\u5b8c\u6bd5", "\u901a\u8fc7", "\u6536\u5230", "\u786e\u8ba4\u4e86", "\u786e\u8ba4\u5b8c\u6210", "\u770b\u8fc7", "on-hand", "on hand", "done", "ok",
-                "\u63d0\u4ea4", "\u5df2\u63d0\u4ea4", "\u5df2\u63d0\u5ba1", "\u63d0\u5ba1\u901a\u8fc7", "\u5df2\u53d1",
-            ]
+            todo_keys = get_recognition_keywords("未来意图词")
+            past_keys = get_recognition_keywords("过去意图词")
             todo_score = sum(1 for k in todo_keys if (k in txt) or (norm_text(k) in txt_norm))
             past_score = sum(1 for k in past_keys if (k in txt) or (norm_text(k) in txt_norm))
             if todo_score > past_score and todo_score > 0:
@@ -7806,20 +7972,10 @@ elif menu == MENU_FASTLOG:
     global_ai_date = st.date_input("🕒 本次批量记录发生日期", datetime.date.today())
     raw_text       = st.text_area("✍️ 输入进展 (按模板语法输入)：", height=150)
 
-    COMP_KW  = {"头": "头雕(表情)", "眼": "头雕(表情)", "脸": "头雕(表情)", "手": "手型",
-                "衣": "服装", "包": "包装", "盒": "包装", "地台": "地台",
-                "扣": "配件", "法杖": "配件", "杯": "配件", "剑": "配件"}
-    STAGE_KW = {"定价": "立项", "评估": "立项", "打印": "建模(含打印/签样)",
-                "模型": "建模(含打印/签样)", "缩放": "建模(含打印/签样)",
-                "修": "建模(含打印/签样)", "建模": "建模(含打印/签样)",
-                "涂": "涂装", "色": "涂装", "设计": "设计", "原画": "设计",
-                "拆件": "工程拆件", "官图": "官图", "开模": "开模", "模具": "开模", "试模": "开模", "大货": "大货",
-                "完成": "✅ 已完成(结束)", "结束": "✅ 已完成(结束)"}
-    RESUME_KWS = ["resume", "恢复", "重启", "继续推进", "解除暂停", "复工"]
-
     PROJECT_ALIAS_MAP = SYS_CFG.get("项目别名", {})
-    DYNAMIC_COMP_KW  = {**COMP_KW,  **SYS_CFG.get("AI_COMP_KW",  {})}
-    DYNAMIC_STAGE_KW = {**STAGE_KW, **SYS_CFG.get("AI_STAGE_KW", {})}
+    DYNAMIC_COMP_KW  = get_component_keyword_map()
+    DYNAMIC_STAGE_KW = get_stage_keyword_map()
+    RESUME_KWS = get_recognition_keywords("恢复推进词")
 
     # 避免短词误伤（如“甘”几乎必然误判到甘道夫）
     DYNAMIC_COMP_KW = {k: v for k, v in DYNAMIC_COMP_KW.items() if len(str(k).strip()) >= 2}
@@ -9157,6 +9313,88 @@ elif menu == MENU_SETTINGS:
                         sync_save_db()
                         st.success(f"已删除 {len(del_ids)} 条历史记录。")
                         st.rerun()
+
+    with st.expander("📚 识别词典中心（规则 / 联动 / 自学习词库）", expanded=True):
+        st.caption("这里集中维护系统识别规则。项目别名仍放在上面的【项目管理】里；这里主要维护部件、阶段、日期语气、打印信号等通用词典。")
+        current_rec = get_recognition_dict()
+        current_comp_kw = get_component_keyword_map()
+        current_stage_kw = get_stage_keyword_map()
+
+        col_d1, col_d2 = st.columns(2)
+        with col_d1:
+            comp_kw_text = st.text_area(
+                "部件关键词（每行 `关键词=部件`）",
+                value=_format_keyword_map_text(current_comp_kw),
+                height=220,
+                key="dict_comp_kw_text",
+            )
+        with col_d2:
+            stage_kw_text = st.text_area(
+                "阶段关键词（每行 `关键词=阶段`）",
+                value=_format_keyword_map_text(current_stage_kw),
+                height=220,
+                key="dict_stage_kw_text",
+            )
+
+        col_d3, col_d4 = st.columns(2)
+        with col_d3:
+            future_kw_text = st.text_area(
+                "未来 / 待办意图词（每行一个）",
+                value=_format_keyword_list_text(current_rec.get("未来意图词", [])),
+                height=170,
+                key="dict_future_kw_text",
+            )
+            past_kw_text = st.text_area(
+                "过去 / 已完成意图词（每行一个）",
+                value=_format_keyword_list_text(current_rec.get("过去意图词", [])),
+                height=170,
+                key="dict_past_kw_text",
+            )
+        with col_d4:
+            date_noise_text = st.text_area(
+                "日期噪音词（每行一个）",
+                value=_format_keyword_list_text(current_rec.get("日期噪音词", [])),
+                height=170,
+                key="dict_date_noise_text",
+            )
+            resume_kw_text = st.text_area(
+                "恢复推进词（每行一个）",
+                value=_format_keyword_list_text(current_rec.get("恢复推进词", [])),
+                height=170,
+                key="dict_resume_kw_text",
+            )
+
+        col_d5, col_d6 = st.columns(2)
+        with col_d5:
+            print_pos_text = st.text_area(
+                "打印正向词（每行一个）",
+                value=_format_keyword_list_text(current_rec.get("打印正向词", [])),
+                height=160,
+                key="dict_print_pos_text",
+            )
+        with col_d6:
+            print_neg_text = st.text_area(
+                "打印排除词（每行一个）",
+                value=_format_keyword_list_text(current_rec.get("打印排除词", [])),
+                height=160,
+                key="dict_print_neg_text",
+            )
+
+        if st.button("💾 保存识别词典中心", type="primary", key="btn_save_dict_center"):
+            cfg = st.session_state.db.setdefault("系统配置", {})
+            cfg["AI_COMP_KW"] = _parse_keyword_map_text(comp_kw_text)
+            cfg["AI_STAGE_KW"] = _parse_keyword_map_text(stage_kw_text)
+            cfg["识别词典"] = {
+                "未来意图词": _parse_keyword_list_text(future_kw_text),
+                "过去意图词": _parse_keyword_list_text(past_kw_text),
+                "恢复推进词": _parse_keyword_list_text(resume_kw_text),
+                "打印正向词": _parse_keyword_list_text(print_pos_text),
+                "打印排除词": _parse_keyword_list_text(print_neg_text),
+                "日期噪音词": _parse_keyword_list_text(date_noise_text),
+            }
+            sync_save_db("系统配置")
+            st.success("识别词典中心已保存。后续 To-do / 大盘 / AI 速记 / 打印追踪 会共用这些规则。")
+            st.rerun()
 
     with st.expander("\u56e2\u961f\u6210\u5458\u7ef4\u62a4\uff08\u65b0\u589e / \u66ff\u6362 / \u5220\u9664 + \u540e\u6094\u836f\uff09", expanded=True):
         st.caption("\u7edf\u4e00\u5165\u53e3\uff1a\u652f\u6301\u65b0\u589e\u6210\u5458\u6c60\u3001\u6309\u6761\u4ef6\u66ff\u6362/\u5220\u9664\uff0c\u5e76\u53ef\u64a4\u9500\u4e0a\u4e00\u6b65\u8bef\u64cd\u4f5c\u3002")
