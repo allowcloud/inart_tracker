@@ -1356,6 +1356,24 @@ def get_stage_index(stage_name, stages):
         return stages.index(s)
     return next((i for i, std_s in enumerate(stages) if s in std_s or std_s in s), -1)
 
+
+def infer_default_stage_from_project_milestone(proj_data):
+    p = proj_data if isinstance(proj_data, dict) else {}
+    ms = str(p.get("Milestone", "")).strip()
+    if ms == "下模中":
+        for cand in ["开模", "工厂复样(含胶件/上色等)"]:
+            if cand in STAGES_UNIFIED:
+                return cand
+    if ms == "生产中":
+        for cand in ["工厂复样(含胶件/上色等)", "大货"]:
+            if cand in STAGES_UNIFIED:
+                return cand
+    if ms in ["研发中", "待开定", "已开定", "待立项"]:
+        for cand in ["建模(含打印/签样)", "设计", "工程拆件"]:
+            if cand in STAGES_UNIFIED:
+                return cand
+    return STAGES_UNIFIED[0] if STAGES_UNIFIED else "立项"
+
 def validate_review_with_stage(review_type, stage_name, comp_name, stages):
     """返回空字符串表示合法，否则返回 warning 文案。"""
     rt = str(review_type).strip()
@@ -6564,7 +6582,11 @@ if menu == MENU_DASHBOARD:
             df_meta = pd.DataFrame(_meta).drop_duplicates(subset=["项目标签"])
             df_meta["最近更新_dt"] = pd.to_datetime(df_meta["最近更新"], errors="coerce").fillna(pd.Timestamp.min)
             df_meta["有更新"] = (df_meta["最近更新"] != "0001-01-01").astype(int)
-            df_meta = df_meta.sort_values(by=["有更新", "最近更新_dt", "项目标签"], ascending=[False, False, True])
+            df_meta["排序组"] = df_meta.apply(
+                lambda r: 2 if int(r.get("是否完结", 0)) == 1 else (1 if int(r.get("是否暂停", 0)) == 1 else 0),
+                axis=1,
+            )
+            df_meta = df_meta.sort_values(by=["排序组", "有更新", "最近更新_dt", "项目标签"], ascending=[True, False, False, True])
             y_order = df_meta["项目标签"].tolist()
         else:
             y_order = sorted(df_g["项目"].unique().tolist())
@@ -6832,7 +6854,11 @@ if menu == MENU_DASHBOARD:
             comp_info = comps[target_comp]
             curr_stage = str(comp_info.get("\u4e3b\u6d41\u7a0b", "")).strip()
             if curr_stage not in STAGES_UNIFIED:
-                curr_stage = STAGES_UNIFIED[0]
+                curr_stage = infer_default_stage_from_project_milestone(db.get(proj, {}))
+            elif curr_stage == "立项":
+                inferred_stage = infer_default_stage_from_project_milestone(db.get(proj, {}))
+                if inferred_stage and inferred_stage != "立项":
+                    curr_stage = inferred_stage
             log_date = event_date if isinstance(event_date, datetime.date) else datetime.date.today()
             comp_info.setdefault("\u65e5\u5fd7\u6d41", []).append({
                 "\u65e5\u671f": str(log_date),
@@ -9503,13 +9529,31 @@ elif menu == MENU_SETTINGS:
             st.markdown("---")
             st.markdown("**C. 异常比例项目清理（如 6威龙 → 1/6威龙）**")
             malformed_pairs = []
+            suspicious_names = []
             for p_name in all_proj_names:
                 inferred_target = infer_malformed_ratio_project_target(p_name)
                 if inferred_target and inferred_target != p_name:
                     malformed_pairs.append((p_name, inferred_target))
+                if (
+                    str(p_name).strip().isdigit()
+                    or len(str(p_name).strip()) <= 2
+                    or re.fullmatch(r"[0-9,\-_/ ]+", str(p_name).strip())
+                ):
+                    suspicious_names.append(str(p_name).strip())
 
             if malformed_pairs:
                 malformed_labels = [f"{src} → {dst}" for src, dst in malformed_pairs]
+                malformed_df = pd.DataFrame([
+                    {
+                        "异常项目": src,
+                        "建议并入": dst,
+                        "来源长度": len(str(src)),
+                        "建议人工确认": "是" if (len(str(src).strip()) <= 2 or str(src).strip().isdigit()) else "",
+                    }
+                    for src, dst in malformed_pairs
+                ]).sort_values(by=["建议人工确认", "异常项目"], ascending=[False, True])
+                st.dataframe(malformed_df, width="stretch", hide_index=True)
+                st.caption("提示：像 `1`、纯数字、过短项目名，建议人工确认后再清理；`6威龙 -> 1/6威龙` 这类通常可以直接合并。")
                 picked_malformed = st.multiselect(
                     "检测到的异常比例项目",
                     malformed_labels,
@@ -9530,6 +9574,8 @@ elif menu == MENU_SETTINGS:
                         st.info("没有可执行的异常项目清理。")
             else:
                 st.caption("当前未检测到可自动清理的异常比例项目。")
+            if suspicious_names:
+                st.warning("检测到需要人工判断的可疑项目名：" + "；".join(sorted(list(dict.fromkeys(suspicious_names)))[:12]))
 
             alias_map = st.session_state.db["系统配置"].get("项目别名", {})
             if alias_map:
