@@ -2898,6 +2898,25 @@ def collect_low_confidence_standard_events(limit=120):
     return picked
 
 
+def format_event_recognition_hint(project_name="", component_name="", stage_name="", todo_state="", reminder_text=""):
+    bits = []
+    proj = str(project_name or "").strip()
+    comp = str(component_name or "").strip()
+    stage = str(stage_name or "").strip()
+    if proj:
+        bits.append(f"项目→{proj}")
+    if comp:
+        bits.append(f"部件→{comp}")
+    if stage:
+        bits.append(f"阶段→{stage}")
+    if todo_state:
+        todo_map = {"created": "新建待办", "updated": "更新待办", "exists": "命中已有待办"}
+        bits.append(f"待办→{todo_map.get(todo_state, todo_state)}")
+    if reminder_text:
+        bits.append(f"提醒→{reminder_text[:24]}")
+    return " ｜ ".join(bits)
+
+
 def append_todo_completion_history(td, action_date=None):
     td_obj = td or {}
     proj_list = [p for p in todo_project_list(td_obj) if p and p in db and p != "系统配置"]
@@ -7110,6 +7129,7 @@ if menu == MENU_DASHBOARD:
             todo_updated = 0
             standard_event_dirty = False
             error_msgs = []
+            hint_lines = []
 
             for row in edited_dashboard_df.to_dict("records"):
                 proj = str(row.get("项目", "")).strip()
@@ -7239,6 +7259,15 @@ if menu == MENU_DASHBOARD:
                                     todo_created += 1
                                 elif todo_state == "updated":
                                     todo_updated += 1
+                                hint_line = format_event_recognition_hint(
+                                    project_name=proj,
+                                    component_name=target_comp,
+                                    stage_name=str(db.get(proj, {}).get("部件列表", {}).get(target_comp, {}).get("主流程", "")).strip(),
+                                    todo_state=todo_state,
+                                    reminder_text=parsed_body or latest_after,
+                                )
+                                if hint_line:
+                                    hint_lines.append(hint_line)
 
                                 if todo_state in ["created", "updated", "exists"]:
                                     standard_event_dirty = (
@@ -7279,6 +7308,8 @@ if menu == MENU_DASHBOARD:
                     f"已保存 {len(changed_projects)} 个项目：基础字段 {basic_updates} 条，"
                     f"动态新增 {dynamic_append_updates} 条，动态改写 {dynamic_rewrite_updates} 条{todo_suffix}。"
                 )
+                if hint_lines:
+                    st.caption("识别结果：" + " ； ".join(hint_lines[:4]))
                 if error_msgs:
                     st.warning("\n".join(error_msgs[:6]))
                 st.rerun()
@@ -8147,6 +8178,12 @@ elif menu == MENU_SPECIFIC:
                         sync_save_db("系统配置")
                     todo_msg = f"；联动待办 {len(linked_todo_titles)} 条" if linked_todo_titles else ""
                     st.success(f"记录已保存{todo_msg}。")
+                    st.caption("识别结果：" + format_event_recognition_hint(
+                        project_name=sel_proj,
+                        component_name=actual_c,
+                        stage_name=wb_stage,
+                        reminder_text=str(wb_text).strip(),
+                    ))
                     st.rerun()
 
         with st.expander("👔 3. 服装流程", expanded=False):
@@ -8520,6 +8557,16 @@ elif menu == MENU_FASTLOG:
             st.session_state.ai_pasted_cache = {}
             msg = "🎉 入库成功！" if learned_count == 0 else f"🎉 入库成功！AI 已学会了 {learned_count} 个新词汇！"
             st.success(msg)
+            hint_lines = []
+            for log in edited_logs[:4]:
+                hint_lines.append(format_event_recognition_hint(
+                    project_name=resolve_alias_project(log.get("项目", ""), PROJECT_ALIAS_MAP),
+                    component_name=log.get("部件", ""),
+                    stage_name=log.get("推测阶段", ""),
+                    reminder_text=log.get("事件", ""),
+                ))
+            if hint_lines:
+                st.caption("识别结果：" + " ； ".join([x for x in hint_lines if x][:4]))
             st.rerun()
 
 # ==========================================
@@ -8760,6 +8807,23 @@ elif menu == MENU_HISTORY:
     valid_p = [p for p in db.keys() if p != "系统配置"]
     if not valid_p: st.stop()
     sel_proj = st.selectbox("📌 选择溯源项目", valid_p)
+    low_conf_events = [x for x in collect_low_confidence_standard_events(limit=80) if str(x.get("项目", "")).strip() == str(sel_proj).strip()]
+    if low_conf_events:
+        with st.expander(f"🧭 当前项目的识别待确认 ({len(low_conf_events)} 条)", expanded=False):
+            st.caption("这里直接显示当前项目的高风险识别记录，方便你在查历史时顺手确认，不用再切去系统维护。")
+            quick_rows = []
+            for evt in low_conf_events[:20]:
+                conf = evt.get("_confidence", {})
+                quick_rows.append({
+                    "日期": str(evt.get("日期", "")).strip(),
+                    "来源": str(evt.get("来源", "")).strip(),
+                    "部件": str(evt.get("部件", "")).strip() or "全局进度",
+                    "阶段": str(evt.get("阶段", "")).strip() or "-",
+                    "内容": str(evt.get("内容", "")).strip(),
+                    "置信度": conf.get("score", 0),
+                    "原因": "；".join(conf.get("reasons", [])[:2]) or "-",
+                })
+            st.dataframe(pd.DataFrame(quick_rows), width="stretch", hide_index=True)
 
     for c_name, comp in db[sel_proj].get("部件列表", {}).items():
         for log in comp.get("日志流", []):
