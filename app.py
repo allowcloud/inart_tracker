@@ -8343,6 +8343,97 @@ elif menu == MENU_HISTORY:
                     "写入时间": str(evt.get("写入时间", "")) or "-",
                 })
             st.dataframe(pd.DataFrame(event_rows), width="stretch", hide_index=True)
+
+            with st.expander("🛠️ 修正这条统一事件并让系统学习", expanded=False):
+                event_pick_options = []
+                event_pick_map = {}
+                for evt in filtered_events[:50]:
+                    evt_id = str(evt.get("_id", "")).strip()
+                    evt_label = " | ".join([
+                        str(evt.get("日期", "")).strip() or "-",
+                        str(evt.get("来源", "")).strip() or "-",
+                        str(evt.get("部件", "")).strip() or "-",
+                        (str(evt.get("内容", "")).strip() or str(evt.get("原始文本", "")).strip() or "-")[:36],
+                    ])
+                    if evt_label in event_pick_map:
+                        evt_label = f"{evt_label} [{evt_id[:4]}]"
+                    event_pick_options.append(evt_label)
+                    event_pick_map[evt_label] = evt
+
+                picked_evt_label = st.selectbox(
+                    "选择一条统一事件",
+                    event_pick_options,
+                    key=f"std_evt_pick_{norm_text(sel_proj)}",
+                )
+                picked_evt = event_pick_map.get(picked_evt_label, {})
+                picked_proj = str(picked_evt.get("项目", "")).strip() or sel_proj
+                picked_comp = str(picked_evt.get("部件", "")).strip() or "全局进度"
+                picked_raw = str(picked_evt.get("原始文本", "")).strip()
+                picked_content = str(picked_evt.get("内容", "")).strip()
+
+                corr_project_options = list(dict.fromkeys([sel_proj] + valid_p))
+                corr_component_options = list(dict.fromkeys(
+                    ["全局进度"] + STD_COMPONENTS + list(db.get(sel_proj, {}).get("部件列表", {}).keys())
+                ))
+
+                c1, c2 = st.columns([1.2, 1.2])
+                with c1:
+                    corrected_proj = st.selectbox(
+                        "修正项目",
+                        corr_project_options,
+                        index=corr_project_options.index(picked_proj) if picked_proj in corr_project_options else 0,
+                        key=f"std_evt_fix_proj_{norm_text(sel_proj)}",
+                    )
+                with c2:
+                    corrected_comp = st.selectbox(
+                        "修正部件",
+                        corr_component_options,
+                        index=corr_component_options.index(picked_comp) if picked_comp in corr_component_options else 0,
+                        key=f"std_evt_fix_comp_{norm_text(sel_proj)}",
+                    )
+
+                st.caption(f"原始文本：{picked_raw or '-'}")
+                st.caption(f"当前内容：{picked_content or '-'}")
+
+                learn_alias = st.checkbox("把这次修正记为项目别名学习", value=(corrected_proj != picked_proj), key=f"std_evt_learn_alias_{norm_text(sel_proj)}")
+                alias_phrase = st.text_input(
+                    "项目别名关键词（可选）",
+                    value="",
+                    key=f"std_evt_alias_phrase_{norm_text(sel_proj)}",
+                    placeholder="例：6威龙 / 超女 / 小比例neo",
+                )
+                learn_comp_kw = st.checkbox("把这次修正记为部件关键词学习", value=(corrected_comp != picked_comp), key=f"std_evt_learn_comp_{norm_text(sel_proj)}")
+                comp_phrase = st.text_input(
+                    "部件关键词（可选）",
+                    value="",
+                    key=f"std_evt_comp_phrase_{norm_text(sel_proj)}",
+                    placeholder="例：头发 -> 植发；脸/眼 -> 头雕(表情)",
+                )
+
+                if st.button("💾 应用修正并学习", key=f"std_evt_apply_fix_{norm_text(sel_proj)}", type="primary"):
+                    changed_any = False
+                    if picked_evt:
+                        if str(picked_evt.get("项目", "")).strip() != corrected_proj:
+                            picked_evt["项目"] = corrected_proj
+                            changed_any = True
+                        if str(picked_evt.get("部件", "")).strip() != corrected_comp:
+                            picked_evt["部件"] = corrected_comp
+                            changed_any = True
+
+                    sys_cfg = db.setdefault("系统配置", {})
+                    if learn_alias and alias_phrase.strip() and corrected_proj:
+                        sys_cfg.setdefault("项目别名", {})[norm_text(alias_phrase)] = corrected_proj
+                        changed_any = True
+                    if learn_comp_kw and comp_phrase.strip() and corrected_comp:
+                        sys_cfg.setdefault("AI_COMP_KW", {})[comp_phrase.strip()] = corrected_comp
+                        changed_any = True
+
+                    if changed_any:
+                        sync_save_db("系统配置")
+                        st.success("已应用修正，并保存学习结果。")
+                        st.rerun()
+                    else:
+                        st.info("没有检测到需要保存的修正。")
         else:
             st.caption("当前筛选条件下暂无统一事件。")
     else:
