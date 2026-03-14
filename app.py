@@ -3244,9 +3244,21 @@ def build_project_stage_segments(proj_label, proj_data):
 
     def _detail_lines(records, prefix_note=""):
         lines = []
+        seen = set()
         if prefix_note:
             lines.append(prefix_note)
         for rec in sorted(records, key=lambda x: (x["date"], x["component"], x["event"])):
+            dedupe_key = (
+                rec.get("date"),
+                rec.get("component"),
+                rec.get("event"),
+                rec.get("review_type"),
+                rec.get("review_result"),
+                rec.get("review_round"),
+            )
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
             rv_txt = ""
             if rec.get("review_type") and rec["review_type"] != "(无)":
                 rv_txt = f" | 提审:{rec['review_type']}"
@@ -3259,8 +3271,9 @@ def build_project_stage_segments(proj_label, proj_data):
         return "<br>".join(lines)
 
     launch_records = stage_records["立项"]
+    launch_start = min([x["date"] for x in launch_records], default=None)
+    pause_dates = sorted({x["date"] for x in stage_records.get("暂停", [])})
     if launch_records:
-        launch_start = min(x["date"] for x in launch_records)
         segments.append({
             "项目": proj_label,
             "工序阶段": "立项",
@@ -3275,6 +3288,11 @@ def build_project_stage_segments(proj_label, proj_data):
             continue
         start_dt = min(x["date"] for x in records)
         finish_dt = max(x["date"] for x in records) + datetime.timedelta(days=1)
+        if stage == "建模" and launch_start:
+            default_build_start = launch_start + datetime.timedelta(days=1)
+            paused_on_default_start = default_build_start in pause_dates
+            if not paused_on_default_start:
+                start_dt = min(start_dt, default_build_start)
         if stage in current_macros:
             finish_dt = max(finish_dt, today + datetime.timedelta(days=1))
         if stage in ["建模", "设计", "工程"] and mold_start and start_dt < mold_start:
@@ -3289,7 +3307,6 @@ def build_project_stage_segments(proj_label, proj_data):
             "详情": _detail_lines(records),
         })
 
-    pause_dates = sorted({x["date"] for x in stage_records.get("暂停", [])})
     for pause_dt in pause_dates:
         records = [x for x in stage_records.get("暂停", []) if x["date"] == pause_dt]
         segments.append({
@@ -6480,7 +6497,12 @@ if menu == MENU_DASHBOARD:
         default_gantt_start = add_months(month_anchor, -3)
         default_gantt_end_month = add_months(month_anchor, 2)
         default_gantt_end = default_gantt_end_month.replace(day=month_last_day(default_gantt_end_month.year, default_gantt_end_month.month))
-        if not isinstance(st.session_state.get("gantt_start"), datetime.date):
+        gantt_default_version = "20260314_m3_p2"
+        if st.session_state.get("gantt_default_version") != gantt_default_version:
+            st.session_state["gantt_start"] = default_gantt_start
+            st.session_state["gantt_end"] = default_gantt_end
+            st.session_state["gantt_default_version"] = gantt_default_version
+        elif not isinstance(st.session_state.get("gantt_start"), datetime.date):
             st.session_state["gantt_start"] = default_gantt_start
         if not isinstance(st.session_state.get("gantt_end"), datetime.date):
             st.session_state["gantt_end"] = default_gantt_end
@@ -9387,7 +9409,7 @@ elif menu == MENU_SETTINGS:
     render_rd_csv_import_panel(expanded=False)
     st.divider()
 
-    with st.expander("🧭 项目管理（重命名 / 合并同类 / 别名学习）", expanded=True):
+    with st.expander("🧭 项目管理（重命名 / 合并同类 / 别名学习）", expanded=False):
         all_proj_names = [p for p in db.keys() if p != "系统配置"]
         if not all_proj_names:
             st.info("暂无项目可管理。")
@@ -9604,7 +9626,7 @@ elif menu == MENU_SETTINGS:
                         st.success(f"已删除 {len(del_ids)} 条历史记录。")
                         st.rerun()
 
-    with st.expander("📚 识别词典中心（规则 / 联动 / 自学习词库）", expanded=True):
+    with st.expander("📚 识别词典中心（规则 / 联动 / 自学习词库）", expanded=False):
         st.caption("这里集中维护系统识别规则。项目别名仍放在上面的【项目管理】里；这里主要维护部件、阶段、日期语气、打印信号等通用词典。")
         current_rec = get_recognition_dict()
         current_comp_kw = get_component_keyword_map()
@@ -9705,7 +9727,7 @@ elif menu == MENU_SETTINGS:
             st.success("识别词典中心已保存。后续 To-do / 大盘 / AI 速记 / 打印追踪 会共用这些规则。")
             st.rerun()
 
-    with st.expander("🧭 识别待确认队列（不删功能，只帮你先捞出高风险条目）", expanded=True):
+    with st.expander("🧭 识别待确认队列（不删功能，只帮你先捞出高风险条目）", expanded=False):
         low_conf_events = collect_low_confidence_standard_events(limit=80)
         if not low_conf_events:
             st.caption("当前没有低置信度统一事件，说明近期识别结果相对稳定。")
@@ -9802,7 +9824,7 @@ elif menu == MENU_SETTINGS:
                     st.success("待确认记录已修正，并按你的选择写入词典。")
                     st.rerun()
 
-    with st.expander("\u56e2\u961f\u6210\u5458\u7ef4\u62a4\uff08\u65b0\u589e / \u66ff\u6362 / \u5220\u9664 + \u540e\u6094\u836f\uff09", expanded=True):
+    with st.expander("\u56e2\u961f\u6210\u5458\u7ef4\u62a4\uff08\u65b0\u589e / \u66ff\u6362 / \u5220\u9664 + \u540e\u6094\u836f\uff09", expanded=False):
         st.caption("\u7edf\u4e00\u5165\u53e3\uff1a\u652f\u6301\u65b0\u589e\u6210\u5458\u6c60\u3001\u6309\u6761\u4ef6\u66ff\u6362/\u5220\u9664\uff0c\u5e76\u53ef\u64a4\u9500\u4e0a\u4e00\u6b65\u8bef\u64cd\u4f5c\u3002")
 
         def _split_role_tokens(raw_text):
@@ -10299,7 +10321,7 @@ elif menu == MENU_SETTINGS:
             st.session_state.db["系统配置"]["排期基线"] = new_days
             sync_save_db()
             st.success("排期基线已更新。")
-    with st.expander("🧹 数据库瘦身 & Base64 图片迁移工具", expanded=True):
+    with st.expander("🧹 数据库瘦身 & Base64 图片迁移工具", expanded=False):
         target_label = "GridFS 持久附件" if get_storage_attachment_mode() == "gridfs" else "本地文件引用"
         st.warning(f"⚠️ 如果 JSON 文件很大，说明旧版 Base64 图片还留在数据库里。点击下方按钮可一键迁移到【{target_label}】。")
         json_str     = json.dumps(st.session_state.db, ensure_ascii=False)
