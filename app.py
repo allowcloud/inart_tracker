@@ -411,8 +411,8 @@ DEFAULT_RECOGNITION_DICT = {
 DEFAULT_SYS_CFG = {
     "标准部件": ["头雕(表情)", "素体", "手型", "服装", "配件", "地台", "包装"],
     "标准阶段": ["立项", "建模(含打印/签样)", "涂装", "设计", "工程拆件", "手板/结构板", "官图", "工厂复样(含胶件/上色等)", "大货", "⏸️ 暂停/搁置", "✅ 已完成(结束)"],
-    "宏观阶段": ["立项", "建模", "设计", "工程", "模具", "修模", "生产", "暂停", "结束"],
-    "排期基线": {"立项": 1, "建模": 42, "设计": 35, "工程": 49, "模具": 28, "修模": 14, "生产": 30},
+    "宏观阶段": ["立项", "建模", "打印", "设计", "工程", "模具", "修模", "生产", "暂停", "结束"],
+    "排期基线": {"立项": 1, "建模": 42, "打印": 14, "设计": 35, "工程": 49, "模具": 28, "修模": 14, "生产": 30},
     "项目别名": {},
     "AI_COMP_KW":  {},
     "AI_STAGE_KW":  {},
@@ -923,11 +923,13 @@ def ensure_ordered_value(seq, value, after=None, before=None):
 
 STAGES_UNIFIED = ensure_ordered_value(STAGES_UNIFIED, "开模", after="官图")
 MACRO_STAGES = ["开模" if str(x) == "模具" else str(x) for x in MACRO_STAGES]
+MACRO_STAGES = ensure_ordered_value(MACRO_STAGES, "打印", after="建模")
 MACRO_STAGES = ensure_ordered_value(list(dict.fromkeys(MACRO_STAGES)), "开模", before="修模")
 SYS_CFG.setdefault("排期基线", DEFAULT_SYS_CFG["排期基线"].copy())
 if "模具" in SYS_CFG["排期基线"] and "开模" not in SYS_CFG["排期基线"]:
     SYS_CFG["排期基线"]["开模"] = SYS_CFG["排期基线"].get("模具", 28)
 SYS_CFG["排期基线"].setdefault("开模", 28)
+SYS_CFG["排期基线"].setdefault("打印", 14)
 
 def infer_review_round_from_text(text):
     s = str(text or "")
@@ -1333,16 +1335,62 @@ def sync_save_db(changed_proj=None):
         db_manager.save_one("\u7cfb\u7edf\u914d\u7f6e", st.session_state.db["\u7cfb\u7edf\u914d\u7f6e"])
     else:
         db_manager.save(st.session_state.db)
-def get_macro_phase(detail_stage):
+def _is_small_scale_project(proj_label="", proj_data=None):
+    proj_name = str(proj_label or "").strip()
+    p = proj_data if isinstance(proj_data, dict) else {}
+    ratio = str(p.get("ratio_preset", "")).strip()
+    if ratio == "1/12":
+        return True
+    if "小比例" in proj_name or proj_name.startswith("1/12"):
+        return True
+    board = p.get("小比例签板流程", {})
+    if isinstance(board, dict) and bool(board.get("启用", False)):
+        return True
+    return False
+
+
+def _is_packaging_context(comp_name="", event_text="", detail_stage=""):
+    txt = " ".join([str(comp_name or ""), str(event_text or ""), str(detail_stage or "")])
+    packaging_kws = ["包装", "箱", "彩盒", "灰箱", "物流箱", "刀线", "说明书", "电影票", "地台贴", "合格证", "感谢信", "内托"]
+    return any(kw in txt for kw in packaging_kws)
+
+
+def _allows_design_phase(proj_label="", proj_data=None, comp_name="", event_text="", detail_stage=""):
+    return _is_packaging_context(comp_name, event_text, detail_stage) or _is_small_scale_project(proj_label, proj_data)
+
+
+def get_macro_phase(detail_stage, event_text="", comp_name="", proj_label="", proj_data=None):
     s = str(detail_stage).strip()
-    if "完成" in s or "结束" in s or "撒花" in s: return "结束"
-    if "暂停" in s or "搁置" in s: return "暂停"
-    if any(x in s for x in ["大货", "复样", "量产", "开定"]): return "生产"
-    if any(x in s for x in ["拆件", "手板", "结构", "官图"]): return "工程"
-    if "模具" in s: return "模具"
-    if "设计" in s or "官图" in s: return "设计"
-    if "建模" in s or "打印" in s or "涂装" in s: return "建模"  # 涂装属于建模阶段
-    if "立项" in s: return "立项"
+    evt = str(event_text).strip()
+    if "完成" in s or "结束" in s or "撒花" in s:
+        return "结束"
+    if "暂停" in s or "搁置" in s:
+        return "暂停"
+    if any(x in s for x in ["大货", "复样", "量产", "开定"]):
+        return "生产"
+    if "模具" in s or "开模" in s:
+        return "开模"
+
+    design_allowed = _allows_design_phase(proj_label, proj_data, comp_name, evt, s)
+    print_signal = ("打印" in evt) or ("签样" in evt) or (s == "打印")
+    design_signal = any(x in s for x in ["设计", "官图"]) or any(x in evt.lower() for x in ["review", "审核", "提审", "排版"])
+
+    if print_signal:
+        return "打印"
+    if design_allowed and design_signal:
+        return "设计"
+    if any(x in s for x in ["拆件", "手板", "结构"]):
+        return "工程"
+    if any(x in evt for x in ["拆件", "结构", "手板", "工程"]):
+        return "工程"
+    if "设计" in s or "官图" in s:
+        return "工程"
+    if "建模" in s or "涂装" in s:
+        return "建模"
+    if "立项" in s:
+        return "立项"
+    if design_allowed and design_signal:
+        return "设计"
     return "工程"
 
 def is_pause_stage(stage_name):
@@ -1368,7 +1416,7 @@ def infer_default_stage_from_project_milestone(proj_data):
             if cand in STAGES_UNIFIED:
                 return cand
     if ms in ["研发中", "待开定", "已开定", "待立项"]:
-        for cand in ["建模(含打印/签样)", "设计", "工程拆件"]:
+        for cand in ["建模(含打印/签样)", "工程拆件", "设计"]:
             if cand in STAGES_UNIFIED:
                 return cand
     return STAGES_UNIFIED[0] if STAGES_UNIFIED else "立项"
@@ -3094,8 +3142,9 @@ def _parse_log_date(log_obj):
 def infer_current_macro_stages(proj_data):
     proj_obj = proj_data or {}
     current = set()
-    for comp_info in proj_obj.get("部件列表", {}).values():
-        macro = get_macro_phase(comp_info.get("主流程", ""))
+    proj_label = str(proj_obj.get("项目名称", "")).strip()
+    for comp_name, comp_info in proj_obj.get("部件列表", {}).items():
+        macro = get_macro_phase(comp_info.get("主流程", ""), comp_name=comp_name, proj_label=proj_label, proj_data=proj_obj)
         if macro and macro not in ["立项", "暂停", "结束"]:
             current.add(macro)
     milestone = str(proj_obj.get("Milestone", "")).strip()
@@ -3112,9 +3161,10 @@ def infer_current_macro_stages(proj_data):
 
 def build_project_stage_segments(proj_label, proj_data):
     comps = (proj_data or {}).get("部件列表", {})
-    stage_records = {k: [] for k in ["立项", "建模", "设计", "工程", "开模", "修模", "生产", "暂停", "结束"]}
+    stage_records = {k: [] for k in ["立项", "建模", "打印", "设计", "工程", "开模", "修模", "生产", "暂停", "结束"]}
     all_records = []
     today = datetime.date.today()
+    proj_base_label = str((proj_data or {}).get("项目名称", "")).strip() or str(proj_label).split(" 📦[", 1)[0].strip()
 
     for comp_name, comp_info in comps.items():
         for log in comp_info.get("日志流", []):
@@ -3124,10 +3174,10 @@ def build_project_stage_segments(proj_label, proj_data):
             if not dt_obj:
                 continue
             raw_stage = str(log.get("工序", comp_info.get("主流程", ""))).strip()
-            macro = get_macro_phase(raw_stage)
+            evt = str(log.get("事件", "")).strip()
+            macro = get_macro_phase(raw_stage, evt, comp_name=comp_name, proj_label=proj_base_label, proj_data=proj_data)
             if not macro:
                 continue
-            evt = str(log.get("事件", "")).strip()
             entry = {
                 "date": dt_obj,
                 "stage": macro,
@@ -3287,7 +3337,7 @@ def build_project_stage_segments(proj_label, proj_data):
             "详情": _detail_lines(launch_records, "• 立项固定按 1 天展示；后续补充资料已归入【建模】口径"),
         })
 
-    for stage in ["建模", "设计", "工程", "开模", "修模", "生产"]:
+    for stage in ["建模", "打印", "设计", "工程", "开模", "修模", "生产"]:
         records = stage_records.get(stage, [])
         if not records:
             continue
@@ -3300,7 +3350,7 @@ def build_project_stage_segments(proj_label, proj_data):
                 start_dt = min(start_dt, default_build_start)
         if stage in current_macros:
             finish_dt = max(finish_dt, today + datetime.timedelta(days=1))
-        if stage in ["建模", "设计", "工程"] and mold_start and start_dt < mold_start:
+        if stage in ["建模", "打印", "设计", "工程"] and mold_start and start_dt < mold_start:
             finish_dt = min(finish_dt, mold_start)
         if finish_dt <= start_dt:
             finish_dt = start_dt + datetime.timedelta(days=1)
@@ -6431,7 +6481,7 @@ if menu == MENU_DASHBOARD:
     st.caption("CSV 导入入口已迁移至【系统维护】。")
     gantt_cat_orders = MACRO_STAGES.copy()
     combined_color_map = {
-        "立项": "#F2C14E", "建模": "#34C6D3", "设计": "#8B5CF6",
+        "立项": "#F2C14E", "建模": "#34C6D3", "打印": "#0EA5A4", "设计": "#8B5CF6",
         "工程": "#4F7CFF", "开模": "#FB7185", "修模": "#F97316",
         "生产": "#37B36B", "暂停": "#94A3B8", "结束": "#334155"
     }
@@ -6511,16 +6561,16 @@ if menu == MENU_DASHBOARD:
 
     st.divider()
     st.subheader("📈 全局进展甘特图")
-    st.markdown("💡 默认显示当前月份前后约半年区间；支持手动调整日期范围，并统计建模/设计/工程平均耗时（可选去极值）。")
+    st.markdown("💡 默认显示当前月份前后约半年区间；支持手动调整日期范围，并统计建模/打印/设计/工程平均耗时（可选去极值）。")
     if gantt_data:
         df_g_all = pd.DataFrame(gantt_data).sort_values(by=["项目", "Start"])
         df_g_all["Start_dt"] = pd.to_datetime(df_g_all["Start"], errors="coerce")
         df_g_all["Finish_dt"] = pd.to_datetime(df_g_all["Finish"], errors="coerce")
         month_anchor = datetime.date.today().replace(day=1)
-        default_gantt_start = add_months(month_anchor, -3)
-        default_gantt_end_month = add_months(month_anchor, 2)
+        default_gantt_start = add_months(month_anchor, -2)
+        default_gantt_end_month = add_months(month_anchor, 3)
         default_gantt_end = default_gantt_end_month.replace(day=month_last_day(default_gantt_end_month.year, default_gantt_end_month.month))
-        gantt_default_version = "20260314_m3_p2"
+        gantt_default_version = "20260314_m2_p3"
         if st.session_state.get("gantt_default_version") != gantt_default_version:
             st.session_state["gantt_start"] = default_gantt_start
             st.session_state["gantt_end"] = default_gantt_end
@@ -6637,13 +6687,13 @@ if menu == MENU_DASHBOARD:
         fig.update_layout(height=max(400, len(df_g['项目'].unique()) * 45))
         st.plotly_chart(fig, width='stretch')
 
-        st.markdown("#### ⏱️ 建模/设计/工程平均耗时（天）")
+        st.markdown("#### ⏱️ 建模/打印/设计/工程平均耗时（天）")
         trim_outlier = st.checkbox("去掉最大值和最小值（样本>=3时）", value=False, key="trim_stage_avg")
         df_dur = df_g_all.copy()
         df_dur["天数"] = (df_dur["Finish_dt"] - df_dur["Start_dt"]).dt.days.clip(lower=1)
-        focus = df_dur[df_dur["工序阶段"].isin(["建模", "设计", "工程"])]
+        focus = df_dur[df_dur["工序阶段"].isin(["建模", "打印", "设计", "工程"])]
         rows = []
-        for stg in ["建模", "设计", "工程"]:
+        for stg in ["建模", "打印", "设计", "工程"]:
             vals = focus[focus["工序阶段"] == stg]["天数"].dropna().tolist()
             vals = [int(v) for v in vals if v >= 1]
             if trim_outlier and len(vals) >= 3:
