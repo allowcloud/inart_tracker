@@ -575,19 +575,54 @@ class _LocalJsonDBManager:
         return f"FILE:{fname}"
 
 
+class _MemoryDBManager:
+    backend_name = "Memory"
+    attachment_mode = "memory-file"
+
+    def __init__(self):
+        self._data = _deep_copy_obj(DEFAULT_DB)
+        self._files = {}
+
+    def load(self):
+        return _deep_copy_obj(self._data)
+
+    def save(self, data):
+        self._data = _deep_copy_obj(data)
+
+    def save_one(self, key, value):
+        self._data[key] = _deep_copy_obj(value)
+
+    def save_file_bytes(self, file_bytes, filename="", prefix="upload"):
+        safe_name = filename or f"{prefix}.jpg"
+        ext = os.path.splitext(safe_name)[1].lower() or ".jpg"
+        fid = f"MEMORY:{prefix}_{uuid.uuid4().hex}{ext}"
+        self._files[fid] = bytes(file_bytes or b"")
+        return fid
+
+    def read_file_bytes(self, ref):
+        if not isinstance(ref, str) or not ref.startswith("MEMORY:"):
+            return None
+        return self._files.get(ref)
+
+    def import_file_bytes(self, ref, file_bytes, filename=""):
+        if isinstance(ref, str) and ref.startswith("MEMORY:"):
+            self._files[ref] = bytes(file_bytes or b"")
+            return ref
+        return self.save_file_bytes(file_bytes, filename=filename, prefix="restore")
+
+
 class _MongoDBManager:
     backend_name = "MongoDB"
     attachment_mode = "gridfs"
 
     def __init__(self, uri):
-        self.local_json_path = "tracker_data_web_v20.json"
-        self.use_local_json = False
         self.client = None
         self.col = None
         self.fs = None
         self.PyMongoError = Exception
         self.NoFile = FileNotFoundError
         self.ObjectId = lambda raw: raw
+        self.init_error = ""
 
         try:
             from pymongo import MongoClient
@@ -595,8 +630,7 @@ class _MongoDBManager:
             from gridfs import GridFS, NoFile
             from bson import ObjectId
         except Exception as e:
-            self.use_local_json = True
-            st.warning(f"Mongo 初始化失败，已回退本地 JSON：{e}")
+            self.init_error = f"Mongo 依赖初始化失败：{e}"
             return
 
         self.PyMongoError = PyMongoError
@@ -604,8 +638,7 @@ class _MongoDBManager:
         self.ObjectId = ObjectId
         uri = uri or _get_mongo_uri()
         if not uri:
-            self.use_local_json = True
-            st.info("未检测到 MONGO_URI，使用本地 JSON 存储。")
+            self.init_error = "未检测到 MONGO_URI，当前版本已改为仅支持 MongoDB 存储。"
             return
 
         try:
@@ -620,18 +653,17 @@ class _MongoDBManager:
             self.col = self.db["projects"]
             self.fs = GridFS(self.db, collection="attachments")
         except Exception as e:
-            self.use_local_json = True
             self.client = None
             self.col = None
             self.fs = None
-            st.warning(f"Mongo 连接失败，已回退本地 JSON：{e}")
+            self.init_error = f"Mongo 连接失败：{e}"
 
-    def _local_manager(self):
-        return _LocalJsonDBManager(self.local_json_path)
+    def _ensure_ready(self):
+        if self.col is None or self.fs is None:
+            raise RuntimeError(self.init_error or "MongoDB 当前不可用。")
 
     def _load_cached(self):
-        if getattr(self, "use_local_json", False) or getattr(self, "col", None) is None:
-            return None
+        self._ensure_ready()
         try:
             docs = list(self.col.find({}, {"_id": 0}))
             data = {}
@@ -641,46 +673,17 @@ class _MongoDBManager:
                     data[key] = doc.get("payload", {})
             return data if data else None
         except Exception as e:
-            st.warning(f"Mongo 读取失败，回退 JSON 缓存：{e}")
-            return None
-
-    def _migrate_from_json(self):
-        """尝试将本地 JSON 数据迁移到 MongoDB。"""
-        json_path = self.local_json_path
-        if os.path.exists(json_path):
-            for enc in ["utf-8", "utf-8-sig", "gbk"]:
-                try:
-                    with open(json_path, "r", encoding=enc) as f:
-                        data = json.load(f)
-                    if isinstance(data, dict):
-                        self.save(data)
-                        try:
-                            os.rename(json_path, json_path + ".migrated")
-                        except OSError:
-                            pass
-                        return data
-                except Exception:
-                    continue
-        return DEFAULT_DB.copy()
+            raise RuntimeError(f"Mongo 读取失败：{e}")
 
     def load(self):
-        if getattr(self, "use_local_json", False):
-            return self._local_manager().load()
-        try:
-            cached = self._load_cached()
-            if cached is not None:
-                return cached
-            return self._migrate_from_json()
-        except Exception as e:
-            st.warning(f"数据库加载失败，回退本地 JSON：{e}")
-            self.use_local_json = True
-            return self._local_manager().load()
+        cached = self._load_cached()
+        if cached is not None:
+            return cached
+        return DEFAULT_DB.copy()
 
     def save(self, data):
-        """保存全量数据（Mongo 异常时由调用方回退）。"""
-        if self.use_local_json:
-            self._local_manager().save(data)
-            return
+        """保存全量数据。"""
+        self._ensure_ready()
         try:
             from pymongo import UpdateOne
             ops = [
@@ -694,9 +697,7 @@ class _MongoDBManager:
 
     def save_one(self, key, value):
         """保存单个 key（减少并发覆盖风险）。"""
-        if self.use_local_json:
-            self._local_manager().save_one(key, value)
-            return
+        self._ensure_ready()
         try:
             self.col.replace_one(
                 {"_doc_key": key},
@@ -707,8 +708,7 @@ class _MongoDBManager:
             st.warning(f"Mongo 保存失败 [{key}]: {e}")
 
     def save_file_bytes(self, file_bytes, filename="", prefix="upload"):
-        if self.use_local_json or self.fs is None:
-            return self._local_manager().save_file_bytes(file_bytes, filename=filename, prefix=prefix)
+        self._ensure_ready()
         try:
             safe_name = filename or f"{prefix}_{uuid.uuid4().hex}.jpg"
             file_id = self.fs.put(
@@ -723,8 +723,7 @@ class _MongoDBManager:
             return ""
 
     def read_file_bytes(self, ref):
-        if self.use_local_json or self.fs is None:
-            return self._local_manager().read_file_bytes(ref)
+        self._ensure_ready()
         if not isinstance(ref, str) or not ref.startswith("GRIDFS:"):
             return None
         raw_id = ref.replace("GRIDFS:", "", 1)
@@ -741,8 +740,7 @@ class _MongoDBManager:
             return None
 
     def import_file_bytes(self, ref, file_bytes, filename=""):
-        if self.use_local_json or self.fs is None:
-            return self._local_manager().import_file_bytes(ref, file_bytes, filename=filename)
+        self._ensure_ready()
         if not isinstance(ref, str) or not ref.startswith("GRIDFS:"):
             return self.save_file_bytes(file_bytes, filename=filename, prefix="restore")
         raw_id = ref.replace("GRIDFS:", "", 1)
@@ -781,13 +779,14 @@ def _get_cached_mongo_manager(uri, cache_buster=DB_MANAGER_CACHE_BUSTER):
 
 
 def _build_db_manager(force_local=False):
-    local_path = os.environ.get("INART_DATA_FILE", "tracker_data_web_v20.json")
+    if os.environ.get("INART_ALLOW_MEMORY_DB", "").strip() == "1":
+        return _MemoryDBManager()
     if force_local:
-        return _LocalJsonDBManager(local_path)
+        raise RuntimeError("当前版本已禁用本地 JSON 存储，仅支持 MongoDB。")
 
     mongo_uri = _get_mongo_uri()
     if not mongo_uri:
-        return _LocalJsonDBManager(local_path)
+        return _MongoDBManager(mongo_uri)
 
     manager = _get_cached_mongo_manager(mongo_uri, DB_MANAGER_CACHE_BUSTER)
     required_methods = ["load", "save", "save_one", "save_file_bytes", "read_file_bytes", "import_file_bytes"]
@@ -800,13 +799,10 @@ def _build_db_manager(force_local=False):
         manager.PyMongoError = getattr(manager, "PyMongoError", Exception)
         manager.NoFile = getattr(manager, "NoFile", FileNotFoundError)
         manager.ObjectId = getattr(manager, "ObjectId", (lambda raw: raw))
-        manager.local_json_path = getattr(manager, "local_json_path", local_path)
-        manager.use_local_json = bool(getattr(manager, "use_local_json", False))
+        manager.init_error = str(getattr(manager, "init_error", "") or "")
         manager.client = getattr(manager, "client", None)
         manager.col = getattr(manager, "col", None)
         manager.fs = getattr(manager, "fs", None)
-        if not manager.use_local_json and manager.col is None:
-            manager.use_local_json = True
 
     return manager
 def _ensure_db_shape(db_obj):
@@ -862,18 +858,21 @@ def _load_db_or_fallback():
     try:
         loaded = db_manager.load()
     except Exception as e:
-        st.warning(f"数据库加载失败，回退本地 JSON：{e}")
-        db_manager = _build_db_manager(force_local=True)
-        try:
-            loaded = db_manager.load()
-        except Exception as inner:
-            st.error(f"本地 JSON 加载也失败：{inner}")
-            loaded = DEFAULT_DB.copy()
+        st.error(f"MongoDB 数据库不可用：{e}")
+        st.info("当前版本已切换为 Mongo-only，请检查 MONGO_URI / Mongo 网络连通性 / GridFS 依赖。")
+        st.stop()
     return _ensure_db_shape(loaded)
 
 
 # db_manager 全局实例（用于附件与持久化接口）
 db_manager = _build_db_manager(force_local=False)
+if (
+    getattr(db_manager, "backend_name", "") != "Memory"
+    and (getattr(db_manager, "col", None) is None or getattr(db_manager, "fs", None) is None)
+):
+    st.error(f"MongoDB 数据库不可用：{getattr(db_manager, 'init_error', '') or '未完成初始化'}")
+    st.info("当前版本已切换为 Mongo-only，请检查 MONGO_URI / Mongo 网络连通性 / GridFS 依赖。")
+    st.stop()
 
 if "db" not in st.session_state:
     st.session_state.db = _load_db_or_fallback()
@@ -6223,8 +6222,6 @@ attachment_mode = get_storage_attachment_mode()
 attachment_label = "GridFS 持久附件" if attachment_mode == "gridfs" else "本地文件引用"
 backend_icon = "🟢" if backend_name == "MongoDB" else "🟡"
 st.sidebar.caption(f"{backend_icon} 当前存储：{backend_name} | 附件：{attachment_label}")
-if backend_name != "MongoDB":
-    st.sidebar.warning("当前处于本地兜底模式。Cloud 重启或重新部署后，本地 JSON / 本地附件不保证保留。")
 
 db          = st.session_state.db
 valid_projs = get_visible_projects(db, current_pm)

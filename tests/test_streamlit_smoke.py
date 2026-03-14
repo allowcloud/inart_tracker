@@ -4,6 +4,7 @@ import subprocess
 import sys
 import textwrap
 import unittest
+import os
 from pathlib import Path
 
 
@@ -54,6 +55,7 @@ class StreamlitSmokeTest(unittest.TestCase):
         proc = subprocess.run(
             [sys.executable, "-c", script],
             cwd=REPO_ROOT,
+            env={**os.environ, "INART_ALLOW_MEMORY_DB": "1"},
             capture_output=True,
             text=True,
             encoding="utf-8",
