@@ -3270,6 +3270,11 @@ def build_project_stage_segments(proj_label, proj_data):
             lines.append(f"• [{rec['date']}] [{rec['component']}] {evt}{rv_txt}")
         return "<br>".join(lines)
 
+    def _pause_reason_score(rec):
+        txt = f"{rec.get('raw_stage', '')} {rec.get('event', '')}".strip()
+        explicit_kws = ["暂停", "搁置", "冻结", "挂起", "等版权", "待版权", "等待", "叫停", "停止"]
+        return sum(1 for kw in explicit_kws if kw in txt)
+
     launch_records = stage_records["立项"]
     launch_start = min([x["date"] for x in launch_records], default=None)
     pause_dates = sorted({x["date"] for x in stage_records.get("暂停", [])})
@@ -3307,8 +3312,26 @@ def build_project_stage_segments(proj_label, proj_data):
             "详情": _detail_lines(records),
         })
 
+    non_pause_dates = sorted({x["date"] for x in all_records if x["stage"] != "暂停"})
+    filtered_pause_dates = []
+    last_kept_pause = None
     for pause_dt in pause_dates:
+        if last_kept_pause is None:
+            filtered_pause_dates.append(pause_dt)
+            last_kept_pause = pause_dt
+            continue
+        resumed_between = any(last_kept_pause < d <= pause_dt for d in non_pause_dates)
+        if resumed_between:
+            filtered_pause_dates.append(pause_dt)
+            last_kept_pause = pause_dt
+
+    for pause_dt in filtered_pause_dates:
         records = [x for x in stage_records.get("暂停", []) if x["date"] == pause_dt]
+        explicit_records = [x for x in records if _pause_reason_score(x) > 0]
+        if explicit_records:
+            records = explicit_records
+        elif records:
+            records = [sorted(records, key=lambda x: (x["date"], -_pause_reason_score(x), x["event"]))[0]]
         segments.append({
             "项目": proj_label,
             "工序阶段": "暂停",
@@ -6564,6 +6587,7 @@ if menu == MENU_DASHBOARD:
             category_orders={"工序阶段": gantt_cat_orders, "项目": y_order},
             color_discrete_map=combined_color_map
         )
+        fig.update_xaxes(range=[selected_start.to_pydatetime(), selected_end.to_pydatetime()])
         if timeline_marks:
             df_marks = pd.DataFrame(timeline_marks)
             df_marks["日期_dt"] = pd.to_datetime(df_marks["日期"], errors="coerce")
