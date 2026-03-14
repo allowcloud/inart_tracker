@@ -1969,6 +1969,71 @@ def create_project_shell_if_missing(project_name, owner_name="", ratio_preset=""
         return False
     db[proj] = build_project_shell(owner_name=owner_name, ratio_preset=ratio_preset, ip_owner=ip_owner)
     return True
+
+
+def infer_malformed_ratio_project_target(project_name):
+    name = str(project_name or "").strip()
+    if (not name) or ("/" in name) or name == "系统配置":
+        return ""
+
+    m = re.match(r"^(1|3|4|6|12)\s*(.+)$", name)
+    if not m:
+        return ""
+    scale = str(m.group(1)).strip()
+    rest = str(m.group(2) or "").strip()
+    if (not rest) or re.fullmatch(r"\d+", rest):
+        return ""
+    if not re.search(r"[\u4e00-\u9fa5A-Za-z]", rest):
+        return ""
+
+    inferred = f"1/{scale}{rest}"
+    alias_map = db.get("系统配置", {}).get("项目别名", {}) if isinstance(db, dict) else {}
+    resolved = resolve_alias_project(inferred, alias_map)
+    if resolved in db:
+        return resolved
+    if inferred in db:
+        return inferred
+    return ""
+
+
+def merge_project_into_target(merge_src, merge_dst, learned_aliases=None):
+    src = str(merge_src or "").strip()
+    dst = str(merge_dst or "").strip()
+    if (not src) or (not dst) or src == dst or src not in db or dst not in db:
+        return False
+
+    src_data = db.get(src, {})
+    dst_data = db.get(dst, {})
+    dst_data.setdefault("部件列表", {})
+    for comp_name, comp_data in src_data.get("部件列表", {}).items():
+        if comp_name not in dst_data["部件列表"]:
+            dst_data["部件列表"][comp_name] = comp_data
+        else:
+            dst_data["部件列表"][comp_name].setdefault("日志流", [])
+            dst_data["部件列表"][comp_name]["日志流"].extend(comp_data.get("日志流", []))
+
+    for bucket in ["发货数据", "成本数据"]:
+        dst_data.setdefault(bucket, {})
+        for k, v in src_data.get(bucket, {}).items():
+            if k not in dst_data[bucket]:
+                dst_data[bucket][k] = v
+
+    for extra_key in ["计划排期", "周会备注", "print_tracking", "workbench_logs"]:
+        if extra_key in src_data:
+            dst_data.setdefault(extra_key, [])
+            if isinstance(dst_data.get(extra_key), list) and isinstance(src_data.get(extra_key), list):
+                dst_data[extra_key].extend(src_data.get(extra_key, []))
+
+    db[dst] = dst_data
+    if src in db:
+        del db[src]
+
+    alias_map = db.setdefault("系统配置", {}).setdefault("项目别名", {})
+    for a in set([src, dst] + [str(x).strip() for x in (learned_aliases or []) if str(x).strip()]):
+        alias_map[norm_text(a)] = dst
+    return True
+
+
 def split_people_text(raw_text):
     return [x.strip() for x in re.split(r'[,，;；、/|\n]+', str(raw_text or "")) if x.strip()]
 
@@ -4493,7 +4558,18 @@ def _normalize_print_tracking_rows(raw_rows):
             "\u6765\u6e90": src,
         })
 
-    out.sort(key=lambda x: (0 if not x.get("\u5df2\u6536\u5230") else 1, str(x.get("\u65e5\u671f", "")), str(x.get("\u9879\u76ee", ""))), reverse=False)
+    def _print_sort_date(row_obj):
+        dt = parse_date_safe((row_obj or {}).get("\u65e5\u671f", ""))
+        return dt.toordinal() if isinstance(dt, datetime.date) else -1
+
+    out.sort(
+        key=lambda x: (
+            0 if not x.get("\u5df2\u6536\u5230") else 1,
+            -_print_sort_date(x),
+            str(x.get("\u9879\u76ee", "")),
+        ),
+        reverse=False,
+    )
     return out
 
 
@@ -4515,6 +4591,22 @@ def _extract_print_location(text, locations):
         if str(loc).strip() and str(loc) in txt:
             return str(loc)
     return ""
+
+
+def _contains_print_tracking_signal(text):
+    txt = str(text or "").strip()
+    if not txt:
+        return False
+    positive_kw = [
+        "打印", "开打", "安排打", "去打", "送打", "打件", "打印件", "打样件",
+        "博泰", "逸博", "小样儿",
+    ]
+    negative_kw = [
+        "打印件已收到",
+    ]
+    if any(k in txt for k in negative_kw):
+        return False
+    return any(k in txt for k in positive_kw)
 
 
 def _infer_print_component(project_name, free_text):
@@ -4553,7 +4645,7 @@ def _build_auto_print_rows_from_todo(pm_view, visible_projects, locations):
         task = str((td or {}).get("\u4efb\u52a1", "")).strip()
         cpddl = todo_cpddl_text(td)
         combined = f"{task} {cpddl}".strip()
-        if "\u6253\u5370" not in combined:
+        if not _contains_print_tracking_signal(combined):
             continue
 
         proj_list = [p for p in todo_project_list(td) if p in visible_set]
@@ -4599,7 +4691,7 @@ def _build_auto_print_rows_from_logs(visible_projects, locations, days=30):
                 evt = str((lg or {}).get("\u4e8b\u4ef6", "")).strip()
                 if not evt and not stage:
                     continue
-                if (stage != "\u5efa\u6a21(\u542b\u6253\u5370/\u7b7e\u6837)") and ("\u6253\u5370" not in evt):
+                if not _contains_print_tracking_signal(evt):
                     continue
 
                 d_obj = parse_date_safe((lg or {}).get("\u65e5\u671f", ""))
@@ -4650,6 +4742,9 @@ def _merge_print_tracking_rows(stored_rows, auto_rows):
     for row in stored:
         rid = str(row.get("_id", "")).strip()
         if rid in used:
+            continue
+        src = str(row.get("来源", "")).strip()
+        if src in ["Todo自动捞取", "日志自动捞取"]:
             continue
         merged.append(row)
 
@@ -5876,8 +5971,8 @@ if menu == MENU_DASHBOARD:
                         if nxt["工序"] == "暂停" or not in_pause_period(nxt["日期_obj"]):
                             ns = nxt["工序"]; break
                     if is_last or ns != cs:
-                        # 暂停在甘特图里只占 1 天体量：暂停当天有色块，后续保持留白直到恢复
-                        if cs == "暂停":
+                        # 暂停和立项都只占 1 天体量，避免把阶段误拉成长条。
+                        if cs in ["暂停", "立项"]:
                             ed = sd + datetime.timedelta(days=1)
                         else:
                             ed = log["日期_obj"]
@@ -8809,6 +8904,37 @@ elif menu == MENU_SETTINGS:
                     sync_save_db()
                     st.success(f"✅ 合并完成：{merge_src} → {merge_dst}，并已学习 {len(learned_aliases)} 个别名。")
                     st.rerun()
+
+            st.markdown("---")
+            st.markdown("**C. 异常比例项目清理（如 6威龙 → 1/6威龙）**")
+            malformed_pairs = []
+            for p_name in all_proj_names:
+                inferred_target = infer_malformed_ratio_project_target(p_name)
+                if inferred_target and inferred_target != p_name:
+                    malformed_pairs.append((p_name, inferred_target))
+
+            if malformed_pairs:
+                malformed_labels = [f"{src} → {dst}" for src, dst in malformed_pairs]
+                picked_malformed = st.multiselect(
+                    "检测到的异常比例项目",
+                    malformed_labels,
+                    default=malformed_labels,
+                    key="malformed_ratio_cleanup_pick",
+                )
+                if st.button("🧹 执行异常比例项目清理", type="primary", key="btn_cleanup_ratio"):
+                    cleaned = []
+                    for label in picked_malformed:
+                        src, dst = label.split(" → ", 1)
+                        if merge_project_into_target(src, dst, learned_aliases=[src]):
+                            cleaned.append(label)
+                    if cleaned:
+                        sync_save_db()
+                        st.success(f"已清理 {len(cleaned)} 个异常项目：{'；'.join(cleaned[:6])}")
+                        st.rerun()
+                    else:
+                        st.info("没有可执行的异常项目清理。")
+            else:
+                st.caption("当前未检测到可自动清理的异常比例项目。")
 
             alias_map = st.session_state.db["系统配置"].get("项目别名", {})
             if alias_map:
