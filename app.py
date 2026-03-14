@@ -1374,7 +1374,7 @@ def get_macro_phase(detail_stage, event_text="", comp_name="", proj_label="", pr
         return "暂停"
     if any(x in s for x in ["大货", "复样", "量产", "开定"]):
         return "生产"
-    if "模具" in s or "开模" in s:
+    if any(x in s for x in ["模具", "开模", "下模"]) or any(x in evt for x in ["开模", "下模", "试模", "T版", "M版", "签板"]):
         return "开模"
 
     design_allowed = _allows_design_phase(proj_label, proj_data, comp_name, evt, s)
@@ -6590,6 +6590,7 @@ if menu == MENU_DASHBOARD:
             gantt_start = st.date_input("甘特开始日期", key="gantt_start")
         with d2:
             gantt_end = st.date_input("甘特结束日期", key="gantt_end")
+        show_parallel_tracks = st.checkbox("显示并行动作（打印/设计）", value=False, key="gantt_show_parallel_tracks")
         selected_start = pd.to_datetime(gantt_start)
         selected_end = pd.to_datetime(gantt_end)
         m = (df_g_all["Finish_dt"] >= selected_start) & (df_g_all["Start_dt"] <= selected_end)
@@ -6637,13 +6638,46 @@ if menu == MENU_DASHBOARD:
                 y_order = sorted(visible_labels)
         else:
             y_order = sorted(df_g["项目"].unique().tolist())
+        parallel_stages = ["打印", "设计"]
+        main_stage_order = [x for x in gantt_cat_orders if x not in parallel_stages]
+        df_parallel = df_g[df_g["工序阶段"].isin(parallel_stages)].copy()
+        df_main = df_g[~df_g["工序阶段"].isin(parallel_stages)].copy()
+        df_display = df_g if show_parallel_tracks else df_main
+        display_stage_order = gantt_cat_orders if show_parallel_tracks else main_stage_order
+        if df_display.empty:
+            df_display = df_g.copy()
+            display_stage_order = gantt_cat_orders
         fig = px.timeline(
-            df_g, x_start="Start", x_end="Finish", y="项目",
+            df_display, x_start="Start", x_end="Finish", y="项目",
             color="工序阶段", hover_name="详情",
-            category_orders={"工序阶段": gantt_cat_orders, "项目": y_order},
+            category_orders={"工序阶段": display_stage_order, "项目": y_order},
             color_discrete_map=combined_color_map
         )
         fig.update_xaxes(range=[selected_start.to_pydatetime(), selected_end.to_pydatetime()])
+        if (not show_parallel_tracks) and (not df_parallel.empty):
+            df_parallel_marks = df_parallel.copy()
+            df_parallel_marks["标记文案"] = df_parallel_marks["工序阶段"].map({"打印": "打", "设计": "设"}).fillna("并")
+            df_parallel_marks["标记颜色"] = df_parallel_marks["工序阶段"].map({"打印": "#0EA5A4", "设计": "#8B5CF6"}).fillna("#64748B")
+            df_parallel_marks["标记说明"] = df_parallel_marks.apply(
+                lambda r: f"[{r['工序阶段']}] {r['详情']}",
+                axis=1
+            )
+            for stage_name, symbol in [("打印", "circle"), ("设计", "diamond")]:
+                part = df_parallel_marks[df_parallel_marks["工序阶段"] == stage_name]
+                if part.empty:
+                    continue
+                fig.add_trace(go.Scatter(
+                    x=part["Start"],
+                    y=part["项目"],
+                    mode="markers+text",
+                    marker=dict(symbol=symbol, size=10, color=part["标记颜色"], line=dict(width=1, color="white")),
+                    text=part["标记文案"],
+                    textposition="middle center",
+                    textfont=dict(size=8, color="white"),
+                    name=f"{stage_name}标记",
+                    customdata=part[["标记说明"]],
+                    hovertemplate="%{customdata[0]}<extra></extra>"
+                ))
         if timeline_marks:
             df_marks = pd.DataFrame(timeline_marks)
             df_marks["日期_dt"] = pd.to_datetime(df_marks["日期"], errors="coerce")
