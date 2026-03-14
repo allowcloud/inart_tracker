@@ -575,19 +575,54 @@ class _LocalJsonDBManager:
         return f"FILE:{fname}"
 
 
+class _MemoryDBManager:
+    backend_name = "Memory"
+    attachment_mode = "memory-file"
+
+    def __init__(self):
+        self._data = _deep_copy_obj(DEFAULT_DB)
+        self._files = {}
+
+    def load(self):
+        return _deep_copy_obj(self._data)
+
+    def save(self, data):
+        self._data = _deep_copy_obj(data)
+
+    def save_one(self, key, value):
+        self._data[key] = _deep_copy_obj(value)
+
+    def save_file_bytes(self, file_bytes, filename="", prefix="upload"):
+        safe_name = filename or f"{prefix}.jpg"
+        ext = os.path.splitext(safe_name)[1].lower() or ".jpg"
+        fid = f"MEMORY:{prefix}_{uuid.uuid4().hex}{ext}"
+        self._files[fid] = bytes(file_bytes or b"")
+        return fid
+
+    def read_file_bytes(self, ref):
+        if not isinstance(ref, str) or not ref.startswith("MEMORY:"):
+            return None
+        return self._files.get(ref)
+
+    def import_file_bytes(self, ref, file_bytes, filename=""):
+        if isinstance(ref, str) and ref.startswith("MEMORY:"):
+            self._files[ref] = bytes(file_bytes or b"")
+            return ref
+        return self.save_file_bytes(file_bytes, filename=filename, prefix="restore")
+
+
 class _MongoDBManager:
     backend_name = "MongoDB"
     attachment_mode = "gridfs"
 
     def __init__(self, uri):
-        self.local_json_path = "tracker_data_web_v20.json"
-        self.use_local_json = False
         self.client = None
         self.col = None
         self.fs = None
         self.PyMongoError = Exception
         self.NoFile = FileNotFoundError
         self.ObjectId = lambda raw: raw
+        self.init_error = ""
 
         try:
             from pymongo import MongoClient
@@ -595,8 +630,7 @@ class _MongoDBManager:
             from gridfs import GridFS, NoFile
             from bson import ObjectId
         except Exception as e:
-            self.use_local_json = True
-            st.warning(f"Mongo 初始化失败，已回退本地 JSON：{e}")
+            self.init_error = f"Mongo 依赖初始化失败：{e}"
             return
 
         self.PyMongoError = PyMongoError
@@ -604,8 +638,7 @@ class _MongoDBManager:
         self.ObjectId = ObjectId
         uri = uri or _get_mongo_uri()
         if not uri:
-            self.use_local_json = True
-            st.info("未检测到 MONGO_URI，使用本地 JSON 存储。")
+            self.init_error = "未检测到 MONGO_URI，当前版本已改为仅支持 MongoDB 存储。"
             return
 
         try:
@@ -620,18 +653,17 @@ class _MongoDBManager:
             self.col = self.db["projects"]
             self.fs = GridFS(self.db, collection="attachments")
         except Exception as e:
-            self.use_local_json = True
             self.client = None
             self.col = None
             self.fs = None
-            st.warning(f"Mongo 连接失败，已回退本地 JSON：{e}")
+            self.init_error = f"Mongo 连接失败：{e}"
 
-    def _local_manager(self):
-        return _LocalJsonDBManager(self.local_json_path)
+    def _ensure_ready(self):
+        if self.col is None or self.fs is None:
+            raise RuntimeError(self.init_error or "MongoDB 当前不可用。")
 
     def _load_cached(self):
-        if getattr(self, "use_local_json", False) or getattr(self, "col", None) is None:
-            return None
+        self._ensure_ready()
         try:
             docs = list(self.col.find({}, {"_id": 0}))
             data = {}
@@ -641,46 +673,17 @@ class _MongoDBManager:
                     data[key] = doc.get("payload", {})
             return data if data else None
         except Exception as e:
-            st.warning(f"Mongo 读取失败，回退 JSON 缓存：{e}")
-            return None
-
-    def _migrate_from_json(self):
-        """尝试将本地 JSON 数据迁移到 MongoDB。"""
-        json_path = self.local_json_path
-        if os.path.exists(json_path):
-            for enc in ["utf-8", "utf-8-sig", "gbk"]:
-                try:
-                    with open(json_path, "r", encoding=enc) as f:
-                        data = json.load(f)
-                    if isinstance(data, dict):
-                        self.save(data)
-                        try:
-                            os.rename(json_path, json_path + ".migrated")
-                        except OSError:
-                            pass
-                        return data
-                except Exception:
-                    continue
-        return DEFAULT_DB.copy()
+            raise RuntimeError(f"Mongo 读取失败：{e}")
 
     def load(self):
-        if getattr(self, "use_local_json", False):
-            return self._local_manager().load()
-        try:
-            cached = self._load_cached()
-            if cached is not None:
-                return cached
-            return self._migrate_from_json()
-        except Exception as e:
-            st.warning(f"数据库加载失败，回退本地 JSON：{e}")
-            self.use_local_json = True
-            return self._local_manager().load()
+        cached = self._load_cached()
+        if cached is not None:
+            return cached
+        return DEFAULT_DB.copy()
 
     def save(self, data):
-        """保存全量数据（Mongo 异常时由调用方回退）。"""
-        if self.use_local_json:
-            self._local_manager().save(data)
-            return
+        """保存全量数据。"""
+        self._ensure_ready()
         try:
             from pymongo import UpdateOne
             ops = [
@@ -694,9 +697,7 @@ class _MongoDBManager:
 
     def save_one(self, key, value):
         """保存单个 key（减少并发覆盖风险）。"""
-        if self.use_local_json:
-            self._local_manager().save_one(key, value)
-            return
+        self._ensure_ready()
         try:
             self.col.replace_one(
                 {"_doc_key": key},
@@ -707,8 +708,7 @@ class _MongoDBManager:
             st.warning(f"Mongo 保存失败 [{key}]: {e}")
 
     def save_file_bytes(self, file_bytes, filename="", prefix="upload"):
-        if self.use_local_json or self.fs is None:
-            return self._local_manager().save_file_bytes(file_bytes, filename=filename, prefix=prefix)
+        self._ensure_ready()
         try:
             safe_name = filename or f"{prefix}_{uuid.uuid4().hex}.jpg"
             file_id = self.fs.put(
@@ -723,8 +723,7 @@ class _MongoDBManager:
             return ""
 
     def read_file_bytes(self, ref):
-        if self.use_local_json or self.fs is None:
-            return self._local_manager().read_file_bytes(ref)
+        self._ensure_ready()
         if not isinstance(ref, str) or not ref.startswith("GRIDFS:"):
             return None
         raw_id = ref.replace("GRIDFS:", "", 1)
@@ -741,8 +740,7 @@ class _MongoDBManager:
             return None
 
     def import_file_bytes(self, ref, file_bytes, filename=""):
-        if self.use_local_json or self.fs is None:
-            return self._local_manager().import_file_bytes(ref, file_bytes, filename=filename)
+        self._ensure_ready()
         if not isinstance(ref, str) or not ref.startswith("GRIDFS:"):
             return self.save_file_bytes(file_bytes, filename=filename, prefix="restore")
         raw_id = ref.replace("GRIDFS:", "", 1)
@@ -781,13 +779,14 @@ def _get_cached_mongo_manager(uri, cache_buster=DB_MANAGER_CACHE_BUSTER):
 
 
 def _build_db_manager(force_local=False):
-    local_path = os.environ.get("INART_DATA_FILE", "tracker_data_web_v20.json")
+    if os.environ.get("INART_ALLOW_MEMORY_DB", "").strip() == "1":
+        return _MemoryDBManager()
     if force_local:
-        return _LocalJsonDBManager(local_path)
+        raise RuntimeError("当前版本已禁用本地 JSON 存储，仅支持 MongoDB。")
 
     mongo_uri = _get_mongo_uri()
     if not mongo_uri:
-        return _LocalJsonDBManager(local_path)
+        return _MongoDBManager(mongo_uri)
 
     manager = _get_cached_mongo_manager(mongo_uri, DB_MANAGER_CACHE_BUSTER)
     required_methods = ["load", "save", "save_one", "save_file_bytes", "read_file_bytes", "import_file_bytes"]
@@ -800,13 +799,10 @@ def _build_db_manager(force_local=False):
         manager.PyMongoError = getattr(manager, "PyMongoError", Exception)
         manager.NoFile = getattr(manager, "NoFile", FileNotFoundError)
         manager.ObjectId = getattr(manager, "ObjectId", (lambda raw: raw))
-        manager.local_json_path = getattr(manager, "local_json_path", local_path)
-        manager.use_local_json = bool(getattr(manager, "use_local_json", False))
+        manager.init_error = str(getattr(manager, "init_error", "") or "")
         manager.client = getattr(manager, "client", None)
         manager.col = getattr(manager, "col", None)
         manager.fs = getattr(manager, "fs", None)
-        if not manager.use_local_json and manager.col is None:
-            manager.use_local_json = True
 
     return manager
 def _ensure_db_shape(db_obj):
@@ -862,18 +858,21 @@ def _load_db_or_fallback():
     try:
         loaded = db_manager.load()
     except Exception as e:
-        st.warning(f"数据库加载失败，回退本地 JSON：{e}")
-        db_manager = _build_db_manager(force_local=True)
-        try:
-            loaded = db_manager.load()
-        except Exception as inner:
-            st.error(f"本地 JSON 加载也失败：{inner}")
-            loaded = DEFAULT_DB.copy()
+        st.error(f"MongoDB 数据库不可用：{e}")
+        st.info("当前版本已切换为 Mongo-only，请检查 MONGO_URI / Mongo 网络连通性 / GridFS 依赖。")
+        st.stop()
     return _ensure_db_shape(loaded)
 
 
 # db_manager 全局实例（用于附件与持久化接口）
 db_manager = _build_db_manager(force_local=False)
+if (
+    getattr(db_manager, "backend_name", "") != "Memory"
+    and (getattr(db_manager, "col", None) is None or getattr(db_manager, "fs", None) is None)
+):
+    st.error(f"MongoDB 数据库不可用：{getattr(db_manager, 'init_error', '') or '未完成初始化'}")
+    st.info("当前版本已切换为 Mongo-only，请检查 MONGO_URI / Mongo 网络连通性 / GridFS 依赖。")
+    st.stop()
 
 if "db" not in st.session_state:
     st.session_state.db = _load_db_or_fallback()
@@ -6223,8 +6222,6 @@ attachment_mode = get_storage_attachment_mode()
 attachment_label = "GridFS 持久附件" if attachment_mode == "gridfs" else "本地文件引用"
 backend_icon = "🟢" if backend_name == "MongoDB" else "🟡"
 st.sidebar.caption(f"{backend_icon} 当前存储：{backend_name} | 附件：{attachment_label}")
-if backend_name != "MongoDB":
-    st.sidebar.warning("当前处于本地兜底模式。Cloud 重启或重新部署后，本地 JSON / 本地附件不保证保留。")
 
 db          = st.session_state.db
 valid_projs = get_visible_projects(db, current_pm)
@@ -6419,7 +6416,7 @@ if menu == MENU_DASHBOARD:
             if not comps:
                 _table.append({"状态":r_txt,"项目":proj,"跟单":gd,"项目当前阶段":ms,
                     "开定时间":tgt,"预计发货":ship_itv,"断更":"-","最新全盘动态":"无数据"}); continue
-            latest_date_obj=None; latest_event_str="无数据"; latest_comp_name="-"; grouped={}
+            latest_date_obj=None; latest_event_str="无数据"; latest_comp_name="-"
             for c_name,info in comps.items():
                 for pair in re.split(r'[,，|]',str(info.get('负责人','')).strip()):
                     pair=pair.strip()
@@ -6433,21 +6430,6 @@ if menu == MENU_DASHBOARD:
                         l_dt=datetime.datetime.strptime(logs[-1]['日期'],"%Y-%m-%d").date()
                         if latest_date_obj is None or l_dt>latest_date_obj:
                             latest_date_obj=l_dt; latest_event_str=logs[-1]['事件']; latest_comp_name=c_name
-                    except: pass
-                for log in logs:
-                    log_stage = log.get('工序', info.get('主流程', '未知'))
-                    macro_stage = get_macro_phase(log_stage)
-                    try:
-                        dt_obj = datetime.datetime.strptime(log['日期'], "%Y-%m-%d")
-                        evt    = log['事件']
-                        k = (dt_obj, macro_stage, evt)
-                        if k not in grouped:
-                            grouped[k] = {"日期_obj": dt_obj, "日期_str": log['日期'],
-                                          "工序": macro_stage, "事件": evt,
-                                          "部件": [c_name], "is_pause": is_pause_stage(macro_stage),
-                                          "提审类型": log.get("提审类型", ""), "提审结果": log.get("提审结果", "")}
-                        elif c_name not in grouped[k]["部件"]:
-                            grouped[k]["部件"].append(c_name)
                     except: pass
             explanation = build_project_current_explanation(proj)
             latest_dt_for_gap = parse_date_safe(explanation.get("日期", "")) or latest_date_obj
@@ -6479,63 +6461,7 @@ if menu == MENU_DASHBOARD:
                     "类型": "发货",
                     "说明": f"[{proj}] 预计发货 {ship_itv}",
                 })
-            all_logs = sorted(grouped.values(), key=lambda x: x["日期_obj"])
-            if all_logs:
-                # 找出暂停时间段：[pause_start, resume_start) 之间的普通日志不产生甘特色块
-                # 暂停节点：工序=="暂停" 的日志日期
-                # 恢复节点：暂停之后第一条非暂停日志日期
-                pause_intervals = []  # list of (pause_dt, resume_dt or None)
-                in_pause = False; pause_start = None
-                for lg in all_logs:
-                    if lg["is_pause"] and not in_pause:
-                        in_pause = True; pause_start = lg["日期_obj"]
-                    elif not lg["is_pause"] and in_pause:
-                        pause_intervals.append((pause_start, lg["日期_obj"]))
-                        in_pause = False; pause_start = None
-                if in_pause and pause_start:
-                    pause_intervals.append((pause_start, None))  # 还未恢复
-
-                def in_pause_period(dt):
-                    """日志日期是否落在某个暂停区间内（暂停后、恢复前）"""
-                    for ps, pe in pause_intervals:
-                        if dt > ps and (pe is None or dt < pe):
-                            return True
-                    return False
-
-                cs = all_logs[0]["工序"]; sd = all_logs[0]["日期_obj"]; buf = []
-                for i, log in enumerate(all_logs):
-                    # 暂停区间内的非暂停日志（系统自动追踪等）跳过，不产生甘特色块
-                    if log["工序"] != "暂停" and in_pause_period(log["日期_obj"]):
-                        continue
-                    rv_type = str(log.get("提审类型", "")).strip()
-                    rv_res = str(log.get("提审结果", "")).strip()
-                    rv_txt = ""
-                    if rv_type and rv_type != "(无)":
-                        rv_txt = f" | 提审:{rv_type}"
-                        if rv_res and rv_res != "(无)":
-                            rv_txt += f"/{rv_res}"
-                    buf.append(f"[{log['日期_str']}] [{', '.join(log['部件'])}] {log['事件']}{rv_txt}")
-                    is_last  = (i == len(all_logs) - 1)
-                    # 看下一条有效日志（同样跳过暂停区间内的）
-                    ns = None
-                    for j in range(i + 1, len(all_logs)):
-                        nxt = all_logs[j]
-                        if nxt["工序"] == "暂停" or not in_pause_period(nxt["日期_obj"]):
-                            ns = nxt["工序"]; break
-                    if is_last or ns != cs:
-                        # 暂停和立项都只占 1 天体量，避免把阶段误拉成长条。
-                        if cs in ["暂停", "立项"]:
-                            ed = sd + datetime.timedelta(days=1)
-                        else:
-                            ed = log["日期_obj"]
-                            if sd == ed: ed += datetime.timedelta(days=1)
-                        _gantt.append({"项目": proj_y_label, "工序阶段": cs,
-                                       "Start": sd.strftime("%Y-%m-%d"),
-                                       "Finish": ed.strftime("%Y-%m-%d"),
-                                       "详情": "<br>".join([f"• {e}" for e in buf])})
-                        if not is_last:
-                            cs = ns if ns else log["工序"]
-                            sd = log["日期_obj"]; buf = []
+            _gantt.extend(build_project_stage_segments(proj_y_label, data))
         return _table, _gantt, _ppr, _marks, _meta
 
     # cache key：项目列表 + 数据指纹（只用非图片字段的哈希）
@@ -6582,12 +6508,37 @@ if menu == MENU_DASHBOARD:
             df_meta = pd.DataFrame(_meta).drop_duplicates(subset=["项目标签"])
             df_meta["最近更新_dt"] = pd.to_datetime(df_meta["最近更新"], errors="coerce").fillna(pd.Timestamp.min)
             df_meta["有更新"] = (df_meta["最近更新"] != "0001-01-01").astype(int)
-            df_meta["排序组"] = df_meta.apply(
-                lambda r: 2 if int(r.get("是否完结", 0)) == 1 else (1 if int(r.get("是否暂停", 0)) == 1 else 0),
-                axis=1,
-            )
-            df_meta = df_meta.sort_values(by=["排序组", "有更新", "最近更新_dt", "项目标签"], ascending=[True, False, False, True])
-            y_order = df_meta["项目标签"].tolist()
+            label_map = dict(zip(df_meta["项目"], df_meta["项目标签"]))
+            if table_data:
+                df_order = pd.DataFrame(table_data)
+                df_order["状态组"] = 2
+                df_order.loc[df_order["状态"].str.contains("研发|生产", na=False), "状态组"] = 0
+                df_order.loc[df_order["状态"].str.contains("暂停", na=False), "状态组"] = 1
+                df_order.loc[df_order["状态"].str.contains("未知", na=False), "状态组"] = 2
+                df_order.loc[df_order["状态"].str.contains("结案", na=False), "状态组"] = 3
+                df_order["开定排序"] = df_order["开定时间"].apply(
+                    lambda x: parse_period_marker_date(x, end_of_period=False) or datetime.date.max
+                )
+                df_order["发货排序"] = df_order["预计发货"].apply(
+                    lambda x: parse_period_marker_date(x, end_of_period=True) or datetime.date.max
+                )
+                df_order["断更天"] = df_order["断更"].str.extract(r'(\d+)').fillna('99999').astype(int)
+                df_order = df_order.sort_values(
+                    by=["状态组", "开定排序", "发货排序", "断更天", "项目"],
+                    ascending=[True, True, True, True, True]
+                )
+                y_order = [label_map.get(str(p), str(p)) for p in df_order["项目"].tolist()]
+            else:
+                df_meta["排序组"] = df_meta.apply(
+                    lambda r: 2 if int(r.get("是否完结", 0)) == 1 else (1 if int(r.get("是否暂停", 0)) == 1 else 0),
+                    axis=1,
+                )
+                df_meta = df_meta.sort_values(by=["排序组", "有更新", "最近更新_dt", "项目标签"], ascending=[True, False, False, True])
+                y_order = df_meta["项目标签"].tolist()
+            visible_labels = set(df_g["项目"].unique().tolist())
+            y_order = [p for p in y_order if p in visible_labels]
+            if not y_order:
+                y_order = sorted(visible_labels)
         else:
             y_order = sorted(df_g["项目"].unique().tolist())
         fig = px.timeline(
