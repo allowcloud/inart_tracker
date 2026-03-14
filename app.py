@@ -2198,6 +2198,98 @@ def infer_todo_handoff_prefill(td, proj_name):
 
 
 
+def _normalize_standard_event_component(component_name):
+    comp = str(component_name or "").strip()
+    if not comp:
+        return ""
+    if "全局" in comp or "Overall" in comp:
+        return "全局进度"
+    return comp
+
+
+def append_standard_event_entry(
+    source_module,
+    action_type,
+    project_name,
+    event_date=None,
+    component_name="",
+    stage_name="",
+    content_text="",
+    raw_text="",
+    people_text="",
+    todo_ids=None,
+    intent="",
+    actor="系统",
+    extra_payload=None,
+):
+    proj = str(project_name or "").strip()
+    if (not proj) or proj == "系统配置":
+        return False
+
+    alias_map = db.get("系统配置", {}).get("项目别名", {})
+    proj = resolve_alias_project(proj, alias_map)
+
+    cfg = db.setdefault("系统配置", {})
+    event_stream = cfg.setdefault("标准事件流", [])
+    action_dt = event_date if isinstance(event_date, datetime.date) else datetime.date.today()
+    content = str(content_text or "").strip()
+    raw = str(raw_text or "").strip()
+    comp = _normalize_standard_event_component(component_name)
+    stage = str(stage_name or "").strip()
+    src = str(source_module or "").strip() or "未知入口"
+    act = str(action_type or "").strip() or "普通写入"
+    people = normalize_people_text(people_text)
+    todo_list = [str(x).strip() for x in (todo_ids or []) if str(x).strip()]
+
+    event_entry = {
+        "_id": uuid.uuid4().hex[:12],
+        "日期": str(action_dt),
+        "项目": proj,
+        "部件": comp,
+        "阶段": stage,
+        "动作": act,
+        "来源": src,
+        "内容": content,
+        "原始文本": raw or content,
+        "关联人员": people,
+        "关联待办": todo_list,
+        "意图": str(intent or "").strip(),
+        "操作者": str(actor or "系统").strip() or "系统",
+        "写入时间": datetime.datetime.now().isoformat(timespec="seconds"),
+        "附加信息": extra_payload if isinstance(extra_payload, dict) else {},
+    }
+
+    dedup_key = (
+        event_entry["日期"],
+        event_entry["项目"],
+        event_entry["部件"],
+        event_entry["阶段"],
+        event_entry["动作"],
+        event_entry["来源"],
+        event_entry["内容"],
+        ",".join(event_entry["关联待办"]),
+    )
+    for old in reversed(event_stream[-80:]):
+        old_key = (
+            str(old.get("日期", "")),
+            str(old.get("项目", "")),
+            str(old.get("部件", "")),
+            str(old.get("阶段", "")),
+            str(old.get("动作", "")),
+            str(old.get("来源", "")),
+            str(old.get("内容", "")),
+            ",".join([str(x).strip() for x in (old.get("关联待办", []) or []) if str(x).strip()]),
+        )
+        if old_key == dedup_key:
+            return False
+
+    event_stream.append(event_entry)
+    # Keep the stream bounded so the config document does not grow forever.
+    if len(event_stream) > 3000:
+        cfg["标准事件流"] = event_stream[-2500:]
+    return True
+
+
 def append_todo_completion_history(td, action_date=None):
     td_obj = td or {}
     proj_list = [p for p in todo_project_list(td_obj) if p and p in db and p != "系统配置"]
@@ -3014,6 +3106,40 @@ def render_pm_todo_manager(valid_projs, current_pm):
                         project_history_updates.add(p)
             elif not new_done:
                 td["完成时间"] = ""
+
+            if changed_core or (new_done != prev_done):
+                todo_action = "待办更新"
+                event_day = datetime.date.today()
+                if new_done and not prev_done:
+                    todo_action = "待办完成"
+                    event_day = due_dt or datetime.date.today()
+                elif prev_done and not new_done:
+                    todo_action = "待办重开"
+
+                for proj_name in [p for p in todo_project_list(td) if p and p in db and p != "系统配置"]:
+                    prefill = infer_todo_handoff_prefill(td, proj_name)
+                    event_comp = ""
+                    if prefill.get("部件"):
+                        event_comp = _normalize_standard_event_component(prefill["部件"][0])
+                    append_standard_event_entry(
+                        source_module="To-do",
+                        action_type=todo_action,
+                        project_name=proj_name,
+                        event_date=event_day,
+                        component_name=event_comp,
+                        stage_name=str(prefill.get("阶段", "")).strip(),
+                        content_text=title,
+                        raw_text=cpddl,
+                        people_text=people_raw,
+                        todo_ids=[rid] if rid else [],
+                        intent="todo" if not new_done else "past",
+                        actor=current_pm if current_pm != "所有人" else "系统",
+                        extra_payload={
+                            "所属视角": scope_val,
+                            "完成": bool(new_done),
+                            "关联项目列表": todo_project_list(td),
+                        },
+                    )
 
         todo_all[:] = [x for x in todo_all if str(x.get("_id", "")).strip() not in delete_ids and str(x.get("任务", "")).strip()]
         cfg["PM_TODO_LIST"] = todo_all
@@ -6380,6 +6506,7 @@ if menu == MENU_DASHBOARD:
             dynamic_rewrite_updates = 0
             todo_created = 0
             todo_updated = 0
+            standard_event_dirty = False
             error_msgs = []
 
             for row in edited_dashboard_df.to_dict("records"):
@@ -6460,6 +6587,26 @@ if menu == MENU_DASHBOARD:
                             raw_text_for_target=latest_raw_after,
                         )
                         if ok:
+                            target_comp = _infer_component_for_dynamic(proj, latest_raw_after)
+                            standard_event_dirty = (
+                                append_standard_event_entry(
+                                    source_module="全局大盘",
+                                    action_type="改写最新动态" if row_dynamic_mode == "edit_latest" else "追加最新动态",
+                                    project_name=proj,
+                                    event_date=event_date or datetime.date.today(),
+                                    component_name=target_comp,
+                                    stage_name=str(db.get(proj, {}).get("部件列表", {}).get(target_comp, {}).get("主流程", "")).strip(),
+                                    content_text=latest_after,
+                                    raw_text=latest_raw_after,
+                                    people_text=str(db.get(proj, {}).get("跟单", "")).strip(),
+                                    intent=intent,
+                                    actor=current_pm if current_pm != "所有人" else "系统",
+                                    extra_payload={
+                                        "日期桶": date_bucket,
+                                        "待办联动": "",
+                                    },
+                                ) or standard_event_dirty
+                            )
                             if row_dynamic_mode == "append_latest":
                                 dynamic_append_updates += 1
                             else:
@@ -6490,6 +6637,24 @@ if menu == MENU_DASHBOARD:
                                     todo_created += 1
                                 elif todo_state == "updated":
                                     todo_updated += 1
+
+                                if todo_state in ["created", "updated", "exists"]:
+                                    standard_event_dirty = (
+                                        append_standard_event_entry(
+                                            source_module="全局大盘",
+                                            action_type="动态联动待办",
+                                            project_name=proj,
+                                            event_date=parsed_date if isinstance(parsed_date, datetime.date) else datetime.date.today(),
+                                            component_name=target_comp,
+                                            stage_name=str(db.get(proj, {}).get("部件列表", {}).get(target_comp, {}).get("主流程", "")).strip(),
+                                            content_text=parsed_body or latest_after,
+                                            raw_text=latest_raw_after,
+                                            people_text=str(db.get(proj, {}).get("跟单", "")).strip(),
+                                            intent="todo",
+                                            actor="系统",
+                                            extra_payload={"联动结果": todo_state},
+                                        ) or standard_event_dirty
+                                    )
                         else:
                             error_msgs.append(f"{proj}: {msg}")
 
@@ -6500,6 +6665,8 @@ if menu == MENU_DASHBOARD:
             if changed_projects:
                 for proj in sorted(changed_projects, key=lambda p: project_rank_map.get(str(p), 999999)):
                     sync_save_db(proj)
+                if standard_event_dirty:
+                    sync_save_db("系统配置")
                 todo_bits = []
                 if todo_created:
                     todo_bits.append(f"待办新建 {todo_created} 条")
@@ -7326,9 +7493,30 @@ elif menu == MENU_SPECIFIC:
                                     append_todo_completion_history(td_obj, wb_date)
                             linked_todo_titles.append(str(td_obj.get("任务", "")).strip())
 
+                    standard_event_dirty = append_standard_event_entry(
+                        source_module="PM工作台",
+                        action_type="工作台记录",
+                        project_name=sel_proj,
+                        event_date=wb_date,
+                        component_name=actual_c,
+                        stage_name=wb_stage,
+                        content_text=base_log,
+                        raw_text=str(wb_text).strip(),
+                        todo_ids=linked_todo_ids,
+                        actor=current_pm if current_pm != "所有人" else "系统",
+                        extra_payload={
+                            "记录类型": wb_evt_type,
+                            "关联媒介": wb_handoff,
+                            "提审类型": review_type,
+                            "提审结果": review_result,
+                            "提审轮次": int(review_round) if review_type != "(无)" else "",
+                            "自动完成待办": bool(todo_auto_done),
+                        },
+                    )
+
                     st.session_state.form_key += 1
                     sync_save_db(sel_proj)
-                    if linked_todo_ids:
+                    if linked_todo_ids or standard_event_dirty:
                         sync_save_db("系统配置")
                     todo_msg = f"；联动待办 {len(linked_todo_titles)} 条" if linked_todo_titles else ""
                     st.success(f"记录已保存{todo_msg}。")
