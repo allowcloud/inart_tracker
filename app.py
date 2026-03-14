@@ -2355,6 +2355,135 @@ def append_standard_event_entry(
     return True
 
 
+def get_latest_project_log_binding(project_name):
+    proj = str(project_name or "").strip()
+    if (not proj) or proj not in db:
+        return None
+    latest = None
+    for comp_name, comp_info in db.get(proj, {}).get("部件列表", {}).items():
+        for lg in comp_info.get("日志流", []):
+            if is_hidden_system_log(lg):
+                continue
+            d_txt = str((lg or {}).get("日期", "")).strip()
+            d_obj = parse_date_safe(d_txt) or datetime.date.min
+            rank = (d_obj.toordinal(), d_txt, str((lg or {}).get("_id", "")), str(comp_name))
+            if (latest is None) or (rank > latest["rank"]):
+                latest = {"rank": rank, "component": str(comp_name), "log": lg}
+    return latest
+
+
+def get_latest_standard_event_binding(project_name):
+    proj = str(project_name or "").strip()
+    if not proj:
+        return None
+    alias_map = db.get("系统配置", {}).get("项目别名", {})
+    proj = resolve_alias_project(proj, alias_map)
+    if proj not in db:
+        return None
+
+    events = db.get("系统配置", {}).get("标准事件流", [])
+    source_weight = {
+        "PM工作台": 4,
+        "全局大盘": 3,
+        "To-do": 2,
+    }
+    latest = None
+    for evt in events:
+        if str((evt or {}).get("项目", "")).strip() != proj:
+            continue
+        evt_date_txt = str((evt or {}).get("日期", "")).strip()
+        evt_date = parse_date_safe(evt_date_txt) or datetime.date.min
+        src = str((evt or {}).get("来源", "")).strip()
+        rank = (
+            evt_date.toordinal(),
+            source_weight.get(src, 0),
+            str((evt or {}).get("写入时间", "")).strip(),
+            str((evt or {}).get("_id", "")).strip(),
+        )
+        if (latest is None) or (rank > latest["rank"]):
+            latest = {"rank": rank, "event": evt}
+    return latest
+
+
+def build_project_current_explanation(project_name):
+    proj = str(project_name or "").strip()
+    if (not proj) or proj not in db:
+        return {}
+
+    std_binding = get_latest_standard_event_binding(proj)
+    log_binding = get_latest_project_log_binding(proj)
+
+    std_date = parse_date_safe(((std_binding or {}).get("event", {}) or {}).get("日期", "")) if std_binding else None
+    log_date = parse_date_safe(((log_binding or {}).get("log", {}) or {}).get("日期", "")) if log_binding else None
+
+    use_std = False
+    if std_binding and not log_binding:
+        use_std = True
+    elif std_binding and log_binding:
+        std_ord = std_date.toordinal() if isinstance(std_date, datetime.date) else -1
+        log_ord = log_date.toordinal() if isinstance(log_date, datetime.date) else -1
+        if std_ord >= log_ord:
+            use_std = True
+
+    if use_std:
+        evt = std_binding["event"]
+        content = str(evt.get("内容", "")).strip() or str(evt.get("原始文本", "")).strip() or "无数据"
+        raw = str(evt.get("原始文本", "")).strip() or content
+        return {
+            "项目": proj,
+            "日期": str(evt.get("日期", "")).strip(),
+            "来源": str(evt.get("来源", "")).strip() or "标准事件",
+            "动作": str(evt.get("动作", "")).strip(),
+            "部件": str(evt.get("部件", "")).strip() or "全局进度",
+            "阶段": str(evt.get("阶段", "")).strip() or "-",
+            "内容": content,
+            "原始文本": raw,
+            "关联人员": str(evt.get("关联人员", "")).strip(),
+            "关联待办": [str(x).strip() for x in (evt.get("关联待办", []) or []) if str(x).strip()],
+            "意图": str(evt.get("意图", "")).strip(),
+            "模式": "标准事件",
+        }
+
+    if log_binding and isinstance(log_binding.get("log"), dict):
+        lg = log_binding["log"]
+        evt = str(lg.get("事件", "")).strip() or "无数据"
+        clean = evt
+        if "补充:" in clean:
+            clean = clean.split("补充:")[-1]
+        if "】" in clean:
+            clean = clean.split("】")[-1]
+        clean = clean.split("[系统]")[0].strip() or evt
+        return {
+            "项目": proj,
+            "日期": str(lg.get("日期", "")).strip(),
+            "来源": "项目日志",
+            "动作": str(lg.get("流转", "")).strip() or "日志记录",
+            "部件": str(log_binding.get("component", "")).strip() or "全局进度",
+            "阶段": str(lg.get("工序", "")).strip() or "-",
+            "内容": clean,
+            "原始文本": evt,
+            "关联人员": "",
+            "关联待办": [],
+            "意图": "",
+            "模式": "项目日志",
+        }
+
+    return {
+        "项目": proj,
+        "日期": "",
+        "来源": "",
+        "动作": "",
+        "部件": "全局进度",
+        "阶段": "-",
+        "内容": "无数据",
+        "原始文本": "",
+        "关联人员": "",
+        "关联待办": [],
+        "意图": "",
+        "模式": "空",
+    }
+
+
 def append_todo_completion_history(td, action_date=None):
     td_obj = td or {}
     proj_list = [p for p in todo_project_list(td_obj) if p and p in db and p != "系统配置"]
@@ -5898,16 +6027,17 @@ if menu == MENU_DASHBOARD:
                         elif c_name not in grouped[k]["部件"]:
                             grouped[k]["部件"].append(c_name)
                     except: pass
-            dt_txt=f"{(datetime.date.today()-latest_date_obj).days} 天" if latest_date_obj else "-"
-            ce=latest_event_str
-            if "补充:" in ce: ce=ce.split("补充:")[-1].split("[系统]")[0].strip()
-            elif "】" in ce: ce=ce.split("】")[-1].split("[系统]")[0].strip()
+            explanation = build_project_current_explanation(proj)
+            latest_dt_for_gap = parse_date_safe(explanation.get("日期", "")) or latest_date_obj
+            dt_txt=f"{(datetime.date.today()-latest_dt_for_gap).days} 天" if latest_dt_for_gap else "-"
+            ce = str(explanation.get("内容", "")).strip() or latest_event_str
+            latest_comp_name = str(explanation.get("部件", "")).strip() or latest_comp_name or "-"
             _table.append({"状态":r_txt,"项目":proj,"跟单":gd,"项目当前阶段":ms,
                 "开定时间":tgt,"预计发货":ship_itv,"断更":dt_txt,"最新全盘动态":f"[{latest_comp_name}] {ce}"})
             _meta.append({
                 "项目": proj,
                 "项目标签": proj_y_label,
-                "最近更新": latest_date_obj.strftime("%Y-%m-%d") if latest_date_obj else "0001-01-01",
+                "最近更新": latest_dt_for_gap.strftime("%Y-%m-%d") if latest_dt_for_gap else "0001-01-01",
                 "是否暂停": 1 if str(ms).strip() == "暂停研发" else 0,
                 "是否完结": 1 if str(ms).strip() in ["生产结束", "项目结束撒花🎉", "✅ 已完成(结束)"] else 0
             })
@@ -6214,17 +6344,7 @@ if menu == MENU_DASHBOARD:
             return txt.split("[\u7cfb\u7edf]")[0].strip() or str(event_text or "").strip()
 
         def _latest_event_binding(proj_name):
-            latest = None
-            for comp_name, comp_info in db.get(proj_name, {}).get("部件列表", {}).items():
-                for lg in comp_info.get("日志流", []):
-                    if is_hidden_system_log(lg):
-                        continue
-                    d_txt = str((lg or {}).get("日期", "")).strip()
-                    d_obj = parse_date_safe(d_txt) or datetime.date.min
-                    rank = (d_obj.toordinal(), d_txt, str((lg or {}).get("_id", "")), str(comp_name))
-                    if (latest is None) or (rank > latest["rank"]):
-                        latest = {"rank": rank, "component": str(comp_name), "log": lg}
-            return latest
+            return get_latest_project_log_binding(proj_name)
 
         def _infer_component_for_dynamic(project_name, raw_text, fallback_component=""):
             proj = str(project_name or "").strip()
@@ -6861,6 +6981,27 @@ elif menu == MENU_SPECIFIC:
         st.session_state.exclude_imgs        = set()
         st.session_state.config_consumed_hashes = set()
         st.session_state.current_proj_context   = sel_proj
+    proj_explain = build_project_current_explanation(sel_proj)
+    with st.container(border=True):
+        st.markdown("**当前项目统一状态解释**")
+        explain_bits = [
+            f"来源：{str(proj_explain.get('来源', '')).strip() or '-'}",
+            f"日期：{str(proj_explain.get('日期', '')).strip() or '-'}",
+            f"部件：{str(proj_explain.get('部件', '')).strip() or '全局进度'}",
+            f"阶段：{str(proj_explain.get('阶段', '')).strip() or '-'}",
+        ]
+        st.caption(" ｜ ".join(explain_bits))
+        st.markdown(str(proj_explain.get("内容", "")).strip() or "无数据")
+        extra_bits = []
+        if str(proj_explain.get("动作", "")).strip():
+            extra_bits.append(f"动作：{str(proj_explain.get('动作', '')).strip()}")
+        if str(proj_explain.get("关联人员", "")).strip():
+            extra_bits.append(f"关联人员：{str(proj_explain.get('关联人员', '')).strip()}")
+        todo_refs = [x for x in (proj_explain.get("关联待办", []) or []) if str(x).strip()]
+        if todo_refs:
+            extra_bits.append(f"关联待办：{len(todo_refs)} 条")
+        if extra_bits:
+            st.caption(" ｜ ".join(extra_bits))
     with st.expander("项目备忘录", expanded=False):
         memo_txt_pm = st.text_area("记录跨部门叮嘱等杂项", value=db[sel_proj].get("备忘录", ""), height=90, key=f"pm_memo_{sel_proj}")
         if st.button("保存项目备忘录", key=f"pm_save_memo_{sel_proj}"):
