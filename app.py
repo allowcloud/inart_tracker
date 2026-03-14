@@ -1593,6 +1593,25 @@ def clean_auto_todo_task_text(raw_text):
     txt = re.sub(r"\s+", " ", txt).strip(" ，,;；|")
     return txt
 
+
+def normalize_todo_cpddl_for_storage(cpddl_text, task_text="", due_dt=None):
+    raw = str(cpddl_text or "").strip()
+    task = clean_auto_todo_task_text(task_text)
+    if not raw:
+        return f"{due_dt.month}/{due_dt.day}" if isinstance(due_dt, datetime.date) else ""
+    due = due_dt if isinstance(due_dt, datetime.date) else extract_deadline_from_text(raw)
+    if not due:
+        return clean_auto_todo_task_text(raw)
+    body = re.sub(r"(20\d{2})[-/](\d{1,2})[-/](\d{1,2})", " ", raw)
+    body = re.sub(r"(?<!\d)(\d{1,2})[\/\-\.](\d{1,2})(?!\d)", " ", body)
+    body = re.sub(r"(?<!\d)(\d{1,2})月(\d{1,2})日?", " ", body)
+    body = clean_auto_todo_task_text(body)
+    if not body:
+        return f"{due.month}/{due.day}"
+    if task and (body == task or body in task or task in body):
+        return f"{due.month}/{due.day}"
+    return f"{due.month}/{due.day} {body}".strip()
+
 def todo_cpddl_text(td):
     merged = str((td or {}).get("CPDDL", "")).strip()
     if merged:
@@ -2075,7 +2094,7 @@ def todo_matches_project(td, proj_name):
     return False
 
 
-def infer_todo_target_hint(td, valid_projs):
+def infer_todo_projects_from_text(td, valid_projs):
     td_obj = td or {}
     title = str(td_obj.get("任务", "")).strip()
     cpddl = todo_cpddl_text(td_obj)
@@ -2110,7 +2129,20 @@ def infer_todo_target_hint(td, valid_projs):
                     proj_list.append(p)
                     break
 
+    if not proj_list and txt:
+        token_hits = _match_projects_from_token(txt, valid_projs, alias_map)
+        for seg in re.split(r"[&＆和|｜]+", txt):
+            token_hits.extend(_match_projects_from_token(seg, valid_projs, alias_map))
+        proj_list.extend(token_hits)
+
     proj_list = list(dict.fromkeys([x for x in proj_list if x]))
+    return proj_list
+
+
+def infer_todo_target_hint(td, valid_projs):
+    td_obj = td or {}
+    txt = f"{str(td_obj.get('任务', '')).strip()} {todo_cpddl_text(td_obj)}".strip()
+    proj_list = infer_todo_projects_from_text(td_obj, valid_projs)
     if not proj_list:
         return "未识别项目"
 
@@ -3514,7 +3546,16 @@ def render_pm_todo_manager(valid_projs, current_pm):
             td["历史版本"] = []
             touched = True
 
+        cleaned_task = clean_auto_todo_task_text(td.get("任务", ""))
+        if cleaned_task and str(td.get("任务", "")).strip() != cleaned_task:
+            td["任务"] = cleaned_task
+            touched = True
+
         proj_list = todo_project_list(td)
+        inferred_proj_list = infer_todo_projects_from_text(td, valid_projs)
+        if inferred_proj_list:
+            if (not proj_list) or any(p not in valid_projs for p in proj_list):
+                proj_list = list(dict.fromkeys([p for p in (proj_list + inferred_proj_list) if p in valid_projs]))
         if td.get("关联项目列表", []) != proj_list:
             td["关联项目列表"] = proj_list
             touched = True
@@ -3538,6 +3579,12 @@ def render_pm_todo_manager(valid_projs, current_pm):
             touched = True
 
         merged = todo_cpddl_text(td)
+        due_dt = extract_deadline_from_text(merged)
+        normalized_merged = normalize_todo_cpddl_for_storage(merged, td.get("任务", ""), due_dt=due_dt)
+        if str(merged).strip() != normalized_merged:
+            merged = normalized_merged
+            td["CPDDL"] = merged
+            touched = True
         if str(td.get("CPDDL", "")).strip() != merged:
             td["CPDDL"] = merged
             touched = True
@@ -3545,7 +3592,6 @@ def render_pm_todo_manager(valid_projs, current_pm):
             td["CP"] = merged
             touched = True
 
-        due_dt = extract_deadline_from_text(merged)
         due_txt = str(due_dt) if due_dt else ""
         if str(td.get("DDL", "")).strip() != due_txt:
             td["DDL"] = due_txt
@@ -7202,7 +7248,7 @@ if menu == MENU_DASHBOARD:
             owner = str(proj_data.get("负责人", "")).strip()
             scope = owner if owner and owner != "所有人" else "未分配"
             people = str(proj_data.get("跟单", "")).strip()
-            cpddl_txt = f"{due_dt.month}/{due_dt.day}"
+            cpddl_txt = normalize_todo_cpddl_for_storage(f"{due_dt.month}/{due_dt.day} {task}", task, due_dt=due_dt)
 
             cfg = db.setdefault("系统配置", {})
             todo_all = cfg.setdefault("PM_TODO_LIST", [])
