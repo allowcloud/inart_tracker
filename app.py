@@ -1501,11 +1501,22 @@ def normalize_todo_project_list(raw_value):
         if not txt:
             raw_tokens = []
         else:
-            raw_tokens = [x.strip() for x in re.split(r"[,，;；、|/\n]+", txt) if x.strip()]
+            # Protect scale fractions like 1/6, 1/12 before splitting by slash.
+            marker = "__RATIO_SLASH__"
+            txt_safe = re.sub(
+                r"(?<!\d)(\d{1,2})\s*/\s*(\d{1,2})(?!\d)",
+                lambda m: f"{m.group(1)}{marker}{m.group(2)}",
+                txt,
+            )
+            raw_tokens = [x.strip() for x in re.split(r"[,\uFF0C;\uFF1B\u3001|/\n]+", txt_safe) if x.strip()]
+            raw_tokens = [re.sub(r"\s*/\s*", "/", x.replace(marker, "/").strip()) for x in raw_tokens]
 
     out = []
     for token in raw_tokens:
         if token in ["(不关联项目)", "-"]:
+            continue
+        # Common split artifact from ratio tokens: standalone digits like "1" / "6".
+        if re.fullmatch(r"\d{1,2}", token or ""):
             continue
         if token not in out:
             out.append(token)
@@ -1921,8 +1932,37 @@ def build_project_shell(owner_name="", ratio_preset="", ip_owner=""):
     }
 
 
+def _normalize_autocreate_project_name(project_name):
+    name = re.sub(r"\s*/\s*", "/", str(project_name or "").strip())
+    if not name:
+        return ""
+
+    alias_map = db.get("系统配置", {}).get("项目别名", {}) if isinstance(db, dict) else {}
+    resolved = resolve_alias_project(name, alias_map)
+    if isinstance(db, dict) and resolved in db:
+        return resolved
+
+    # Fallback fix: 6xx -> 1/6xx for ratio-style names.
+    if "/" not in name:
+        m = re.match(r"^(1|3|4|6|12)\s*([A-Za-z0-9\u4e00-\u9fa5_\-].+)$", name)
+        if m:
+            scale = m.group(1)
+            rest = str(m.group(2) or "").strip()
+            if rest and (not re.fullmatch(r"\d+", rest)) and re.search(r"[\u4e00-\u9fa5]", rest):
+                inferred = f"1/{scale}{rest}"
+                resolved_inferred = resolve_alias_project(inferred, alias_map)
+                if isinstance(db, dict):
+                    if resolved_inferred in db:
+                        return resolved_inferred
+                    if inferred in db:
+                        return inferred
+                return inferred
+
+    return name
+
+
 def create_project_shell_if_missing(project_name, owner_name="", ratio_preset="", ip_owner=""):
-    proj = str(project_name or "").strip()
+    proj = _normalize_autocreate_project_name(project_name)
     if not proj or proj == "系统配置":
         return False
     if proj in db and isinstance(db.get(proj), dict):
@@ -5954,56 +5994,110 @@ if menu == MENU_DASHBOARD:
 
         def _latest_event_binding(proj_name):
             latest = None
-            for comp_name, comp_info in db.get(proj_name, {}).get("\u90e8\u4ef6\u5217\u8868", {}).items():
-                for lg in comp_info.get("\u65e5\u5fd7\u6d41", []):
+            for comp_name, comp_info in db.get(proj_name, {}).get("部件列表", {}).items():
+                for lg in comp_info.get("日志流", []):
                     if is_hidden_system_log(lg):
                         continue
-                    d_txt = str((lg or {}).get("\u65e5\u671f", "")).strip()
+                    d_txt = str((lg or {}).get("日期", "")).strip()
                     d_obj = parse_date_safe(d_txt) or datetime.date.min
                     rank = (d_obj.toordinal(), d_txt, str((lg or {}).get("_id", "")), str(comp_name))
                     if (latest is None) or (rank > latest["rank"]):
                         latest = {"rank": rank, "component": str(comp_name), "log": lg}
             return latest
 
-        def _apply_latest_dynamic_update(project_name, new_text, mode, auto_save=True, event_date=None):
+        def _infer_component_for_dynamic(project_name, raw_text, fallback_component=""):
+            proj = str(project_name or "").strip()
+            comp_map = db.get(proj, {}).get("部件列表", {}) if proj in db else {}
+            comp_names = list(comp_map.keys())
+            global_comp = next((k for k in comp_names if "全局" in str(k)), "全局进度")
+            txt = str(raw_text or "").strip()
+
+            def _pick_component(hint):
+                h = str(hint or "").strip()
+                if not h:
+                    return ""
+                if ("全局" in h) or (h.lower() in ["overall", "global"]):
+                    return global_comp
+                h_norm = norm_text(h)
+                for c in comp_names:
+                    c_txt = str(c).strip()
+                    if not c_txt:
+                        continue
+                    c_norm = norm_text(c_txt)
+                    if h == c_txt or (h_norm and h_norm == c_norm):
+                        return c_txt
+                    if h in c_txt or (h_norm and h_norm in c_norm):
+                        return c_txt
+                return ""
+
+            lead = re.match(r"^\s*((?:\[[^\]]+\]\s*)+)", txt)
+            if lead:
+                for tg in re.findall(r"\[([^\]]+)\]", lead.group(1)):
+                    picked = _pick_component(tg)
+                    if picked:
+                        return picked
+
+            comp_hint_pairs = [
+                ("\u5934\u96d5", "\u5934\u96d5(\u8868\u60c5)"), ("\u8868\u60c5", "\u5934\u96d5(\u8868\u60c5)"), ("\u8138", "\u5934\u96d5(\u8868\u60c5)"),
+                ("\u690d\u53d1", "\u690d\u53d1"), ("\u5934\u53d1", "\u690d\u53d1"),
+                ("\u7d20\u4f53", "\u7d20\u4f53"), ("\u8eab\u4f53", "\u7d20\u4f53"),
+                ("\u624b\u578b", "\u624b\u578b"), ("\u914d\u4ef6", "\u914d\u4ef6"), ("\u5730\u53f0", "\u5730\u53f0"),
+                ("\u670d\u88c5", "\u670d\u88c5"), ("\u5305\u88c5", "\u5305\u88c5"),
+                ("\u5168\u5c40", "\u5168\u5c40\u8fdb\u5ea6"), ("\u6574\u4f53", "\u5168\u5c40\u8fdb\u5ea6"),
+            ]
+            for kw, target in comp_hint_pairs:
+                if kw in txt:
+                    picked = _pick_component(target)
+                    if picked:
+                        return picked
+
+            if any(k in txt for k in ["\u5168\u5c40", "\u6574\u4f53", "\u9879\u76ee", "\u603b\u4f53"]):
+                return global_comp
+            if fallback_component and fallback_component in comp_map:
+                return fallback_component
+            return global_comp
+
+        def _apply_latest_dynamic_update(project_name, new_text, mode, auto_save=True, event_date=None, raw_text_for_target=""):
             proj = str(project_name or "").strip()
             msg = str(new_text or "").strip()
             if (not proj) or proj not in db:
-                return False, "未选择有效项目。"
+                return False, "\u672a\u9009\u62e9\u6709\u6548\u9879\u76ee\u3002"
             if not msg:
-                return False, "动态内容不能为空。"
+                return False, "\u52a8\u6001\u5185\u5bb9\u4e0d\u80fd\u4e3a\u7a7a\u3002"
 
             binding = _latest_event_binding(proj)
-            comps = db.get(proj, {}).setdefault("部件列表", {})
-            target_comp = binding["component"] if binding else next((k for k in comps.keys() if "全局" in str(k)), "全局进度")
+            comps = db.get(proj, {}).setdefault("\u90e8\u4ef6\u5217\u8868", {})
+            binding_comp = binding["component"] if binding else ""
+            target_seed = str(raw_text_for_target or msg).strip()
+            target_comp = _infer_component_for_dynamic(proj, target_seed, fallback_component=binding_comp)
             if target_comp not in comps or not isinstance(comps.get(target_comp), dict):
-                comps[target_comp] = {"主流程": STAGES_UNIFIED[0], "日志流": []}
+                comps[target_comp] = {"\u4e3b\u6d41\u7a0b": STAGES_UNIFIED[0], "\u65e5\u5fd7\u6d41": []}
 
             if mode == "edit_latest" and binding and isinstance(binding.get("log"), dict):
-                binding["log"]["事件"] = msg
+                binding["log"]["\u4e8b\u4ef6"] = msg
                 if auto_save:
                     sync_save_db(proj)
-                return True, f"已改写 {proj} 的当前最新动态。"
+                return True, f"\u5df2\u6539\u5199 {proj} \u7684\u5f53\u524d\u6700\u65b0\u52a8\u6001\u3002"
 
             comp_info = comps[target_comp]
-            curr_stage = str(comp_info.get("主流程", "")).strip()
+            curr_stage = str(comp_info.get("\u4e3b\u6d41\u7a0b", "")).strip()
             if curr_stage not in STAGES_UNIFIED:
                 curr_stage = STAGES_UNIFIED[0]
             log_date = event_date if isinstance(event_date, datetime.date) else datetime.date.today()
-            comp_info.setdefault("日志流", []).append({
-                "日期": str(log_date),
-                "流转": "大盘动态",
-                "工序": curr_stage,
-                "事件": msg,
+            comp_info.setdefault("\u65e5\u5fd7\u6d41", []).append({
+                "\u65e5\u671f": str(log_date),
+                "\u6d41\u8f6c": "\u5927\u76d8\u52a8\u6001",
+                "\u5de5\u5e8f": curr_stage,
+                "\u4e8b\u4ef6": msg,
             })
-            comp_info["日志流"] = sorted(comp_info.get("日志流", []), key=lambda x: str((x or {}).get("日期", "")))
+            comp_info["\u65e5\u5fd7\u6d41"] = sorted(comp_info.get("\u65e5\u5fd7\u6d41", []), key=lambda x: str((x or {}).get("\u65e5\u671f", "")))
             if auto_save:
                 sync_save_db(proj)
-            return True, f"已追加 {proj} 的最新动态。"
+            return True, f"\u5df2\u8ffd\u52a0 {proj} \u7684\u6700\u65b0\u52a8\u6001\u3002"
 
         def _dashboard_dynamic_is_placeholder(text):
             t = norm_text(text)
-            return (not t) or (t in {"-", "无", "无数据", "暂无", "none", "null", "n/a"})
+            return (not t) or (t in {"-", "\u65e0", "\u65e0\u6570\u636e", "\u6682\u65e0", "none", "null", "n/a"})
 
         def _normalize_dashboard_dynamic_input(project_name, cell_text):
             raw = str(cell_text or "").strip()
@@ -6019,7 +6113,7 @@ if menu == MENU_DASHBOARD:
                 if not m:
                     break
                 tag = str(m.group(1) or "").strip()
-                if tag in {"全局进度", "全局", "整体", "Overall", "-", ""}:
+                if tag in {"\u5168\u5c40\u8fdb\u5ea6", "\u5168\u5c40", "\u6574\u4f53", "Overall", "-", ""}:
                     txt = txt[m.end():].strip()
                     continue
                 if latest_comp and tag == latest_comp:
@@ -6038,9 +6132,19 @@ if menu == MENU_DASHBOARD:
                 return None, s
             ref = ref_date or datetime.date.today()
 
+            def _clean_event_body(raw):
+                body = str(raw or "").strip()
+                body = re.sub(r"^(?:\[[^\]]+\]\s*){1,6}", "", body).strip()
+                body = re.sub(r"\s+", " ", body).strip(" \uff0c,;\uff1b|")
+                body = re.sub(r"^(\u9884\u8ba1|\u8ba1\u5212|\u9884\u4f30|\u4e89\u53d6|\u76ee\u6807|\u9884\u8ba1\u5728|\u9884\u8ba1\u4e8e)\s*", "", body)
+                body = re.sub(r"\s*(\u5de6\u53f3|\u524d\u540e)\s*", " ", body)
+                body = re.sub(r"^(\u5927\u7ea6|\u7ea6)\s*", "", body)
+                body = re.sub(r"\s+", " ", body).strip(" \uff0c,;\uff1b|")
+                return body
+
             full_patterns = [
-                r"(20\d{2})[-/\.](\d{1,2})[-/\.](\d{1,2})",
-                r"(20\d{2})年(\d{1,2})月(\d{1,2})日?",
+                r"(20\d{2})[-/\uff0f\.](\d{1,2})[-/\uff0f\.](\d{1,2})",
+                r"(20\d{2})\u5e74\s*(\d{1,2})\u6708\s*(\d{1,2})\u65e5?",
             ]
             for pat in full_patterns:
                 m = re.search(pat, s)
@@ -6049,16 +6153,16 @@ if menu == MENU_DASHBOARD:
                 try:
                     y = int(m.group(1)); mm = int(m.group(2)); dd = int(m.group(3))
                     dt = datetime.date(y, mm, dd)
-                    cleaned = (s[:m.start()] + " " + s[m.end():]).strip(" ，,;；|")
-                    return dt, cleaned
+                    cleaned = _clean_event_body((s[:m.start()] + " " + s[m.end():]))
+                    return dt, (cleaned or s)
                 except Exception:
                     pass
 
             md_patterns = [
-                r"(?<!\d)(\d{1,2})/(\d{1,2})(?!\d)",
+                r"(?<!\d)(\d{1,2})[\/\uff0f](\d{1,2})(?!\d)",
                 r"(?<!\d)(\d{1,2})-(\d{1,2})(?!\d)",
                 r"(?<!\d)(\d{1,2})\.(\d{1,2})(?!\d)",
-                r"(?<!\d)(\d{1,2})月(\d{1,2})日?",
+                r"(?<!\d)(\d{1,2})\u6708(\d{1,2})\u65e5?",
             ]
             for pat in md_patterns:
                 m = re.search(pat, s)
@@ -6072,22 +6176,23 @@ if menu == MENU_DASHBOARD:
                         cand = datetime.date(y - 1, mm, dd)
                     if (not prefer_past) and cand < ref - datetime.timedelta(days=30):
                         cand = datetime.date(y + 1, mm, dd)
-                    cleaned = (s[:m.start()] + " " + s[m.end():]).strip(" ，,;；|")
-                    return cand, cleaned
+                    cleaned = _clean_event_body((s[:m.start()] + " " + s[m.end():]))
+                    return cand, (cleaned or s)
                 except Exception:
                     pass
 
-            return None, s
+            return None, (_clean_event_body(s) or s)
 
         def _classify_dynamic_intent(text):
             txt = str(text or "")
             txt_norm = norm_text(txt)
             todo_keys = [
-                "待", "待办", "需要", "需", "跟进", "跟催", "补", "安排", "todo", "to do", "ddl", "cp", "待审", "待反馈", "待版权",
+                "\u5f85", "\u5f85\u529e", "\u9700\u8981", "\u9700", "\u8ddf\u8fdb", "\u8ddf\u50ac", "\u8865", "\u5b89\u6392", "todo", "to do", "ddl", "cp", "\u5f85\u5ba1", "\u5f85\u53cd\u9988", "\u5f85\u7248\u6743",
+                "\u9884\u8ba1", "\u9884\u8ba1\u51fa", "\u9884\u8ba1\u7ed9\u51fa", "\u5373\u5c06",
             ]
             past_keys = [
-                "已", "已经", "完成", "完毕", "通过", "收到", "确认了", "确认完成", "看过", "on-hand", "on hand", "done", "ok",
-                "提交", "已提交", "已提审", "提审通过", "已发",
+                "\u5df2", "\u5df2\u7ecf", "\u5b8c\u6210", "\u5b8c\u6bd5", "\u901a\u8fc7", "\u6536\u5230", "\u786e\u8ba4\u4e86", "\u786e\u8ba4\u5b8c\u6210", "\u770b\u8fc7", "on-hand", "on hand", "done", "ok",
+                "\u63d0\u4ea4", "\u5df2\u63d0\u4ea4", "\u5df2\u63d0\u5ba1", "\u63d0\u5ba1\u901a\u8fc7", "\u5df2\u53d1",
             ]
             todo_score = sum(1 for k in todo_keys if (k in txt) or (norm_text(k) in txt_norm))
             past_score = sum(1 for k in past_keys if (k in txt) or (norm_text(k) in txt_norm))
@@ -6096,13 +6201,12 @@ if menu == MENU_DASHBOARD:
             if past_score > todo_score and past_score > 0:
                 return "past"
             if todo_score > 0 and past_score > 0:
-                if any(k in txt for k in ["待", "需要", "需", "跟进", "跟催", "待审", "待反馈", "待版权"]):
+                if any(k in txt for k in ["\u5f85\u7248\u6743", "\u5f85\u5ba1\u6838", "\u5f85\u5ba1", "\u5f85\u53cd\u9988", "\u5f85\u786e\u8ba4", "\u5f85\u56de\u590d", "\u5f85"]):
                     return "todo"
-                if any(k in txt for k in ["已", "已经", "完成", "通过", "提交", "收到", "看过", "on-hand", "done", "ok"]):
+                if any(k in txt for k in ["\u5df2", "\u5df2\u7ecf", "\u5b8c\u6210", "\u901a\u8fc7", "\u63d0\u4ea4", "\u6536\u5230", "\u770b\u8fc7", "on-hand", "done", "ok"]):
                     return "past"
                 return "past"
             return "neutral"
-
 
         def _sync_todo_checkpoint_from_dynamic(project_name, event_text, forced_due_dt=None, forced_task_body="", skip_intent_check=False):
             if not skip_intent_check:
@@ -6353,6 +6457,7 @@ if menu == MENU_DASHBOARD:
                             row_dynamic_mode,
                             auto_save=False,
                             event_date=event_date,
+                            raw_text_for_target=latest_raw_after,
                         )
                         if ok:
                             if row_dynamic_mode == "append_latest":
