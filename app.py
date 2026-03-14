@@ -184,8 +184,13 @@ st.markdown("""
     --pm-sidebar-start: #f7fafc;
     --pm-sidebar-end: #edf4ff;
     --pm-card: #ffffff;
+    --pm-card-soft: rgba(255,255,255,0.78);
     --pm-text-soft: #475569;
+    --pm-text-main: #102033;
     --pm-accent: #0f766e;
+    --pm-accent-soft: rgba(15, 118, 110, 0.12);
+    --pm-shadow: 0 14px 32px rgba(15, 23, 42, 0.08);
+    --pm-radius: 18px;
 }
 @media (prefers-color-scheme: dark) {
     :root {
@@ -195,8 +200,12 @@ st.markdown("""
         --pm-sidebar-start: #0f172a;
         --pm-sidebar-end: #111827;
         --pm-card: #0f172a;
+        --pm-card-soft: rgba(15, 23, 42, 0.84);
         --pm-text-soft: #cbd5e1;
+        --pm-text-main: #f8fafc;
         --pm-accent: #22c55e;
+        --pm-accent-soft: rgba(34, 197, 94, 0.16);
+        --pm-shadow: 0 18px 38px rgba(2, 6, 23, 0.34);
     }
 }
 /* prevent blank flash while switching pages */
@@ -205,15 +214,107 @@ st.markdown("""
 [data-testid="stAppViewContainer"] {
     background: linear-gradient(180deg, var(--pm-bg-start) 0%, var(--pm-bg-end) 100%);
 }
+[data-testid="stAppViewContainer"] .main {
+    color: var(--pm-text-main);
+}
+[data-testid="stAppViewContainer"] .main h1,
+[data-testid="stAppViewContainer"] .main h2,
+[data-testid="stAppViewContainer"] .main h3 {
+    letter-spacing: 0.01em;
+}
+[data-testid="stAppViewContainer"] .main p,
+[data-testid="stAppViewContainer"] .main li,
+[data-testid="stAppViewContainer"] .main label {
+    color: var(--pm-text-main);
+}
 /* compact table cells for denser information */
 [data-testid="stDataFrame"] table td { padding: 4px 8px !important; font-size: 13px; }
 [data-testid="stDataEditor"] [role="gridcell"] { font-size: 13px; }
+[data-testid="stDataFrame"], [data-testid="stDataEditor"] {
+    border: 1px solid var(--pm-border);
+    border-radius: 16px;
+    overflow: hidden;
+    box-shadow: var(--pm-shadow);
+    background: var(--pm-card-soft);
+    backdrop-filter: blur(10px);
+}
+[data-testid="stDataFrame"] thead tr th,
+[data-testid="stDataEditor"] [role="columnheader"] {
+    background: linear-gradient(180deg, var(--pm-card) 0%, var(--pm-card-soft) 100%);
+}
+[data-testid="stDataEditor"] [role="gridcell"]:focus,
+[data-testid="stDataEditor"] [role="gridcell"]:focus-within {
+    box-shadow: inset 0 0 0 2px var(--pm-accent-soft) !important;
+}
 /* sidebar visual tuning with same theme variables */
 section[data-testid="stSidebar"] { background: linear-gradient(180deg, var(--pm-sidebar-start) 0%, var(--pm-sidebar-end) 100%); }
 section[data-testid="stSidebar"] .stButton button { width: 100%; border-radius: 8px; }
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p { color: var(--pm-text-main); }
 /* metric cards */
-[data-testid="stMetric"] { border: 1px solid var(--pm-border); border-radius: 10px; padding: 6px 10px; background: var(--pm-card); }
+[data-testid="stMetric"] { border: 1px solid var(--pm-border); border-radius: 14px; padding: 8px 12px; background: var(--pm-card-soft); box-shadow: var(--pm-shadow); backdrop-filter: blur(10px); }
 [data-testid="stMetric"] [data-testid="stMetricLabel"] { color: var(--pm-text-soft); }
+div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlockBorderWrapper"] > div {
+    border-radius: var(--pm-radius) !important;
+    border: 1px solid var(--pm-border) !important;
+    background: var(--pm-card-soft) !important;
+    box-shadow: var(--pm-shadow);
+    backdrop-filter: blur(12px);
+}
+[data-testid="stExpander"] {
+    border: 1px solid var(--pm-border);
+    border-radius: var(--pm-radius);
+    background: var(--pm-card-soft);
+    box-shadow: var(--pm-shadow);
+    overflow: hidden;
+}
+[data-testid="stExpander"] details summary {
+    background: linear-gradient(180deg, var(--pm-card-soft) 0%, transparent 100%);
+    border-radius: var(--pm-radius);
+}
+.stButton button, .stDownloadButton button {
+    border-radius: 12px !important;
+    border: 1px solid var(--pm-border) !important;
+    box-shadow: none !important;
+}
+.stButton button[kind="primary"], .stDownloadButton button[kind="primary"] {
+    background: linear-gradient(135deg, var(--pm-accent) 0%, #0ea5a4 100%) !important;
+    color: #ffffff !important;
+    border: none !important;
+}
+.stButton button:hover, .stDownloadButton button:hover {
+    transform: translateY(-1px);
+    transition: all .16s ease;
+}
+.stTextInput input, .stTextArea textarea, .stDateInput input,
+.stNumberInput input, .stSelectbox [data-baseweb="select"] > div,
+.stMultiSelect [data-baseweb="select"] > div {
+    border-radius: 12px !important;
+    border-color: var(--pm-border) !important;
+    background: var(--pm-card) !important;
+}
+.pm-section-title {
+    margin: 0.2rem 0 1rem 0;
+    padding: 0.95rem 1.15rem;
+    border-radius: 16px;
+    border: 1px solid var(--pm-border);
+    background:
+        radial-gradient(circle at top right, var(--pm-accent-soft) 0%, transparent 36%),
+        linear-gradient(135deg, var(--pm-card) 0%, var(--pm-card-soft) 100%);
+    box-shadow: var(--pm-shadow);
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: var(--pm-text-main);
+}
+.pm-kicker {
+    display: inline-block;
+    padding: 0.25rem 0.6rem;
+    border-radius: 999px;
+    background: var(--pm-accent-soft);
+    color: var(--pm-accent);
+    font-size: 0.8rem;
+    font-weight: 700;
+    margin-bottom: 0.5rem;
+}
 /* localize streamlit uploader default English copy */
 [data-testid="stFileUploaderDropzoneInstructions"] span { display: none !important; }
 [data-testid="stFileUploaderDropzoneInstructions"]::before { content: "拖拽文件到这里"; font-size: 14px; color: var(--pm-text-soft); }
@@ -221,6 +322,11 @@ section[data-testid="stSidebar"] .stButton button { width: 100%; border-radius: 
 [data-testid="stFileUploader"] small::after { content: "单文件上限 200MB（PNG/JPG/JPEG）"; font-size: 12px; color: var(--pm-text-soft); }
 [data-testid="stFileUploaderDropzone"] button { font-size: 0 !important; }
 [data-testid="stFileUploaderDropzone"] button::after { content: "选择文件"; font-size: 14px; }
+[data-testid="stFileUploaderDropzone"] {
+    border: 1px dashed var(--pm-border) !important;
+    border-radius: 16px !important;
+    background: var(--pm-card-soft) !important;
+}
 /* hide streamlit footer */
 footer { visibility: hidden; }
 </style>
@@ -261,6 +367,46 @@ PRINT_TRACK_SOURCE_LABELS = {
     "日志自动捞取": "📋 日志自动捞取",
     "手动录入": "✏️ 手动录入",
 }
+DEFAULT_COMPONENT_KEYWORDS = {
+    "头雕": "头雕(表情)", "表情": "头雕(表情)", "头": "头雕(表情)", "眼": "头雕(表情)", "脸": "头雕(表情)",
+    "植发": "植发", "头发": "植发", "发": "植发",
+    "手": "手型", "手型": "手型",
+    "衣": "服装", "服": "服装", "服装": "服装",
+    "包": "包装", "盒": "包装", "包装": "包装",
+    "地台": "地台",
+    "扣": "配件", "法杖": "配件", "杯": "配件", "剑": "配件", "配件": "配件",
+}
+DEFAULT_STAGE_KEYWORDS = {
+    "定价": "立项", "评估": "立项", "开定": "立项",
+    "打印": "建模(含打印/签样)", "模型": "建模(含打印/签样)", "缩放": "建模(含打印/签样)",
+    "修": "建模(含打印/签样)", "建模": "建模(含打印/签样)", "打样": "建模(含打印/签样)",
+    "涂": "涂装", "色": "涂装",
+    "设计": "设计", "原画": "设计",
+    "拆件": "工程拆件", "官图": "官图",
+    "开模": "开模", "模具": "开模", "试模": "开模",
+    "大货": "大货",
+    "完成": "✅ 已完成(结束)", "结束": "✅ 已完成(结束)",
+}
+DEFAULT_COMPONENT_SPLIT_KEYWORDS = {
+    "头雕": "头雕(表情)",
+    "表情": "头雕(表情)",
+    "脸": "头雕(表情)",
+    "植发": "植发",
+    "头发": "植发",
+    "手型": "手型",
+    "服装": "服装",
+    "包装": "包装",
+    "地台": "地台",
+    "配件": "配件",
+}
+DEFAULT_RECOGNITION_DICT = {
+    "未来意图词": ["待", "待办", "需要", "需", "跟进", "跟催", "补", "安排", "todo", "to do", "ddl", "cp", "待审", "待反馈", "待版权", "预计", "预计出", "预计给出", "即将"],
+    "过去意图词": ["已", "已经", "完成", "完毕", "通过", "收到", "确认了", "确认完成", "看过", "on-hand", "on hand", "done", "ok", "提交", "已提交", "已提审", "提审通过", "已发"],
+    "恢复推进词": ["resume", "恢复", "重启", "继续推进", "解除暂停", "复工"],
+    "打印正向词": ["打印", "开打", "安排打", "去打", "送打", "打件", "打印件", "打样件", "博泰", "逸博", "小样儿"],
+    "打印排除词": ["打印件已收到"],
+    "日期噪音词": ["预计", "左右", "大概", "约", "计划", "可", "能", "初版"],
+}
 
 DEFAULT_SYS_CFG = {
     "标准部件": ["头雕(表情)", "素体", "手型", "服装", "配件", "地台", "包装"],
@@ -270,6 +416,9 @@ DEFAULT_SYS_CFG = {
     "项目别名": {},
     "AI_COMP_KW":  {},
     "AI_STAGE_KW":  {},
+    "AI_SPLIT_COMP_KW": {},
+    "人员别名": {},
+    "识别词典": json.loads(json.dumps(DEFAULT_RECOGNITION_DICT, ensure_ascii=False)),
     "打印追踪列表": [],
     "打印地点选项": PRINT_TRACK_LOCATION_DEFAULTS.copy()
     ,"PROJECT_TEMPLATE": {"default_ratio": "1/6", "default_ip_owner": "", "ratio_options": PROJECT_RATIO_OPTIONS.copy()}
@@ -278,6 +427,91 @@ DEFAULT_DB = {"系统配置": DEFAULT_SYS_CFG}
 
 def _deep_copy_obj(obj):
     return json.loads(json.dumps(obj, ensure_ascii=False))
+
+
+def get_recognition_dict():
+    cfg = st.session_state.db.setdefault("系统配置", {}) if "db" in st.session_state else DEFAULT_DB.setdefault("系统配置", {})
+    raw = cfg.setdefault("识别词典", _deep_copy_obj(DEFAULT_RECOGNITION_DICT))
+    out = _deep_copy_obj(DEFAULT_RECOGNITION_DICT)
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            if isinstance(v, list):
+                out[k] = [str(x).strip() for x in v if str(x).strip()]
+    return out
+
+
+def get_component_keyword_map():
+    cfg = st.session_state.db.setdefault("系统配置", {}) if "db" in st.session_state else DEFAULT_DB.setdefault("系统配置", {})
+    sys_map = cfg.get("AI_COMP_KW", {}) if isinstance(cfg.get("AI_COMP_KW", {}), dict) else {}
+    out = dict(DEFAULT_COMPONENT_KEYWORDS)
+    out.update({str(k).strip(): str(v).strip() for k, v in sys_map.items() if str(k).strip() and str(v).strip()})
+    return out
+
+
+def get_stage_keyword_map():
+    cfg = st.session_state.db.setdefault("系统配置", {}) if "db" in st.session_state else DEFAULT_DB.setdefault("系统配置", {})
+    sys_map = cfg.get("AI_STAGE_KW", {}) if isinstance(cfg.get("AI_STAGE_KW", {}), dict) else {}
+    out = dict(DEFAULT_STAGE_KEYWORDS)
+    out.update({str(k).strip(): str(v).strip() for k, v in sys_map.items() if str(k).strip() and str(v).strip()})
+    return out
+
+
+def get_component_split_keyword_map():
+    cfg = st.session_state.db.setdefault("系统配置", {}) if "db" in st.session_state else DEFAULT_DB.setdefault("系统配置", {})
+    sys_map = cfg.get("AI_SPLIT_COMP_KW", {}) if isinstance(cfg.get("AI_SPLIT_COMP_KW", {}), dict) else {}
+    out = dict(DEFAULT_COMPONENT_SPLIT_KEYWORDS)
+    out.update({str(k).strip(): str(v).strip() for k, v in sys_map.items() if str(k).strip() and str(v).strip()})
+    return out
+
+
+def get_people_alias_map():
+    cfg = st.session_state.db.setdefault("系统配置", {}) if "db" in st.session_state else DEFAULT_DB.setdefault("系统配置", {})
+    raw = cfg.get("人员别名", {}) if isinstance(cfg.get("人员别名", {}), dict) else {}
+    return {norm_text(k): str(v).strip() for k, v in raw.items() if str(k).strip() and str(v).strip()}
+
+
+def resolve_people_alias(raw_label):
+    token = str(raw_label or "").strip()
+    if not token:
+        return ""
+    alias_map = get_people_alias_map()
+    return alias_map.get(norm_text(token), token)
+
+
+def get_recognition_keywords(list_key):
+    return get_recognition_dict().get(list_key, [])
+
+
+def _format_keyword_map_text(mapping):
+    rows = []
+    for k, v in sorted((mapping or {}).items(), key=lambda x: str(x[0])):
+        kk = str(k).strip(); vv = str(v).strip()
+        if kk and vv:
+            rows.append(f"{kk}={vv}")
+    return "\n".join(rows)
+
+
+def _parse_keyword_map_text(raw_text):
+    out = {}
+    for line in str(raw_text or "").splitlines():
+        txt = str(line).strip()
+        if (not txt) or txt.startswith("#"):
+            continue
+        if "=" not in txt:
+            continue
+        k, v = txt.split("=", 1)
+        kk = str(k).strip(); vv = str(v).strip()
+        if kk and vv:
+            out[kk] = vv
+    return out
+
+
+def _format_keyword_list_text(values):
+    return "\n".join([str(x).strip() for x in (values or []) if str(x).strip()])
+
+
+def _parse_keyword_list_text(raw_text):
+    return [str(x).strip() for x in str(raw_text or "").splitlines() if str(x).strip() and not str(x).strip().startswith("#")]
 
 
 class _LocalJsonDBManager:
@@ -1818,7 +2052,7 @@ def todo_link_status_text(td):
 
 
 def parse_role_person_label(raw_label):
-    token = str(raw_label or "").strip()
+    token = resolve_people_alias(raw_label)
     if not token:
         return "综合", ""
     if "-" in token:
@@ -1969,6 +2203,71 @@ def create_project_shell_if_missing(project_name, owner_name="", ratio_preset=""
         return False
     db[proj] = build_project_shell(owner_name=owner_name, ratio_preset=ratio_preset, ip_owner=ip_owner)
     return True
+
+
+def infer_malformed_ratio_project_target(project_name):
+    name = str(project_name or "").strip()
+    if (not name) or ("/" in name) or name == "系统配置":
+        return ""
+
+    m = re.match(r"^(1|3|4|6|12)\s*(.+)$", name)
+    if not m:
+        return ""
+    scale = str(m.group(1)).strip()
+    rest = str(m.group(2) or "").strip()
+    if (not rest) or re.fullmatch(r"\d+", rest):
+        return ""
+    if not re.search(r"[\u4e00-\u9fa5A-Za-z]", rest):
+        return ""
+
+    inferred = f"1/{scale}{rest}"
+    alias_map = db.get("系统配置", {}).get("项目别名", {}) if isinstance(db, dict) else {}
+    resolved = resolve_alias_project(inferred, alias_map)
+    if resolved in db:
+        return resolved
+    if inferred in db:
+        return inferred
+    return ""
+
+
+def merge_project_into_target(merge_src, merge_dst, learned_aliases=None):
+    src = str(merge_src or "").strip()
+    dst = str(merge_dst or "").strip()
+    if (not src) or (not dst) or src == dst or src not in db or dst not in db:
+        return False
+
+    src_data = db.get(src, {})
+    dst_data = db.get(dst, {})
+    dst_data.setdefault("部件列表", {})
+    for comp_name, comp_data in src_data.get("部件列表", {}).items():
+        if comp_name not in dst_data["部件列表"]:
+            dst_data["部件列表"][comp_name] = comp_data
+        else:
+            dst_data["部件列表"][comp_name].setdefault("日志流", [])
+            dst_data["部件列表"][comp_name]["日志流"].extend(comp_data.get("日志流", []))
+
+    for bucket in ["发货数据", "成本数据"]:
+        dst_data.setdefault(bucket, {})
+        for k, v in src_data.get(bucket, {}).items():
+            if k not in dst_data[bucket]:
+                dst_data[bucket][k] = v
+
+    for extra_key in ["计划排期", "周会备注", "print_tracking", "workbench_logs"]:
+        if extra_key in src_data:
+            dst_data.setdefault(extra_key, [])
+            if isinstance(dst_data.get(extra_key), list) and isinstance(src_data.get(extra_key), list):
+                dst_data[extra_key].extend(src_data.get(extra_key, []))
+
+    db[dst] = dst_data
+    if src in db:
+        del db[src]
+
+    alias_map = db.setdefault("系统配置", {}).setdefault("项目别名", {})
+    for a in set([src, dst] + [str(x).strip() for x in (learned_aliases or []) if str(x).strip()]):
+        alias_map[norm_text(a)] = dst
+    return True
+
+
 def split_people_text(raw_text):
     return [x.strip() for x in re.split(r'[,，;；、/|\n]+', str(raw_text or "")) if x.strip()]
 
@@ -2000,6 +2299,7 @@ def infer_todo_people_bundle(td):
             unknown.append(token)
 
     for token in split_people_text(td_obj.get("关联人员", "")):
+        token = resolve_people_alias(token)
         token_norm = norm_text(token)
         if token_norm in label_map:
             add_match(label_map[token_norm])
@@ -2015,6 +2315,12 @@ def infer_todo_people_bundle(td):
 
     free_text = f"{str(td_obj.get('任务', '')).strip()} {todo_cpddl_text(td_obj)}".strip()
     txt_norm = norm_text(free_text)
+    alias_map = get_people_alias_map()
+    for alias_norm, canonical_label in alias_map.items():
+        if alias_norm and alias_norm in txt_norm:
+            role, person = parse_role_person_label(canonical_label)
+            final_label = f"{role}-{person}" if role != "综合" else person
+            add_match(final_label)
     for label in labels:
         label_norm = norm_text(label)
         if label_norm and label_norm in txt_norm:
@@ -2288,6 +2594,327 @@ def append_standard_event_entry(
     if len(event_stream) > 3000:
         cfg["标准事件流"] = event_stream[-2500:]
     return True
+
+
+def get_latest_project_log_binding(project_name):
+    proj = str(project_name or "").strip()
+    if (not proj) or proj not in db:
+        return None
+    latest = None
+    for comp_name, comp_info in db.get(proj, {}).get("部件列表", {}).items():
+        for lg in comp_info.get("日志流", []):
+            if is_hidden_system_log(lg):
+                continue
+            d_txt = str((lg or {}).get("日期", "")).strip()
+            d_obj = parse_date_safe(d_txt) or datetime.date.min
+            rank = (d_obj.toordinal(), d_txt, str((lg or {}).get("_id", "")), str(comp_name))
+            if (latest is None) or (rank > latest["rank"]):
+                latest = {"rank": rank, "component": str(comp_name), "log": lg}
+    return latest
+
+
+def get_latest_standard_event_binding(project_name):
+    proj = str(project_name or "").strip()
+    if not proj:
+        return None
+    alias_map = db.get("系统配置", {}).get("项目别名", {})
+    proj = resolve_alias_project(proj, alias_map)
+    if proj not in db:
+        return None
+
+    events = db.get("系统配置", {}).get("标准事件流", [])
+    source_weight = {
+        "历史溯源": 5,
+        "PM工作台": 4,
+        "全局大盘": 3,
+        "To-do": 2,
+    }
+    latest = None
+    for evt in events:
+        if str((evt or {}).get("项目", "")).strip() != proj:
+            continue
+        evt_date_txt = str((evt or {}).get("日期", "")).strip()
+        evt_date = parse_date_safe(evt_date_txt) or datetime.date.min
+        src = str((evt or {}).get("来源", "")).strip()
+        rank = (
+            evt_date.toordinal(),
+            source_weight.get(src, 0),
+            str((evt or {}).get("写入时间", "")).strip(),
+            str((evt or {}).get("_id", "")).strip(),
+        )
+        if (latest is None) or (rank > latest["rank"]):
+            latest = {"rank": rank, "event": evt}
+    return latest
+
+
+def _is_todo_standard_event(evt_obj):
+    evt = evt_obj if isinstance(evt_obj, dict) else {}
+    src = str(evt.get("来源", "")).strip()
+    act = str(evt.get("动作", "")).strip()
+    if src == "To-do":
+        return True
+    if act in ["待办更新", "待办完成", "待办重开", "动态联动待办"]:
+        return True
+    if str(evt.get("意图", "")).strip() == "todo":
+        return True
+    return False
+
+
+def get_latest_standard_event_pair(project_name):
+    proj = str(project_name or "").strip()
+    if not proj:
+        return {"progress": None, "todo": None}
+    alias_map = db.get("系统配置", {}).get("项目别名", {})
+    proj = resolve_alias_project(proj, alias_map)
+    if proj not in db:
+        return {"progress": None, "todo": None}
+
+    events = db.get("系统配置", {}).get("标准事件流", [])
+    source_weight = {
+        "历史溯源": 5,
+        "PM工作台": 4,
+        "全局大盘": 3,
+        "To-do": 2,
+    }
+    latest_progress = None
+    latest_todo = None
+    for evt in events:
+        if str((evt or {}).get("项目", "")).strip() != proj:
+            continue
+        evt_date_txt = str((evt or {}).get("日期", "")).strip()
+        evt_date = parse_date_safe(evt_date_txt) or datetime.date.min
+        src = str((evt or {}).get("来源", "")).strip()
+        rank = (
+            evt_date.toordinal(),
+            source_weight.get(src, 0),
+            str((evt or {}).get("写入时间", "")).strip(),
+            str((evt or {}).get("_id", "")).strip(),
+        )
+        target_key = "todo" if _is_todo_standard_event(evt) else "progress"
+        if target_key == "todo":
+            if (latest_todo is None) or (rank > latest_todo["rank"]):
+                latest_todo = {"rank": rank, "event": evt}
+        else:
+            if (latest_progress is None) or (rank > latest_progress["rank"]):
+                latest_progress = {"rank": rank, "event": evt}
+    return {"progress": latest_progress, "todo": latest_todo}
+
+
+def build_project_current_explanation(project_name):
+    proj = str(project_name or "").strip()
+    if (not proj) or proj not in db:
+        return {}
+
+    std_pair = get_latest_standard_event_pair(proj)
+    std_binding = std_pair.get("progress")
+    todo_binding = std_pair.get("todo")
+    log_binding = get_latest_project_log_binding(proj)
+
+    std_date = parse_date_safe(((std_binding or {}).get("event", {}) or {}).get("日期", "")) if std_binding else None
+    log_date = parse_date_safe(((log_binding or {}).get("log", {}) or {}).get("日期", "")) if log_binding else None
+
+    use_std = False
+    if std_binding and not log_binding:
+        use_std = True
+    elif std_binding and log_binding:
+        std_ord = std_date.toordinal() if isinstance(std_date, datetime.date) else -1
+        log_ord = log_date.toordinal() if isinstance(log_date, datetime.date) else -1
+        if std_ord >= log_ord:
+            use_std = True
+
+    if use_std:
+        evt = std_binding["event"]
+        content = str(evt.get("内容", "")).strip() or str(evt.get("原始文本", "")).strip() or "无数据"
+        raw = str(evt.get("原始文本", "")).strip() or content
+        reminder_evt = (todo_binding or {}).get("event", {}) if todo_binding else {}
+        return {
+            "项目": proj,
+            "日期": str(evt.get("日期", "")).strip(),
+            "来源": str(evt.get("来源", "")).strip() or "标准事件",
+            "动作": str(evt.get("动作", "")).strip(),
+            "部件": str(evt.get("部件", "")).strip() or "全局进度",
+            "阶段": str(evt.get("阶段", "")).strip() or "-",
+            "内容": content,
+            "原始文本": raw,
+            "关联人员": str(evt.get("关联人员", "")).strip(),
+            "关联待办": [str(x).strip() for x in (evt.get("关联待办", []) or []) if str(x).strip()],
+            "意图": str(evt.get("意图", "")).strip(),
+            "提醒内容": str(reminder_evt.get("内容", "")).strip(),
+            "提醒日期": str(reminder_evt.get("日期", "")).strip(),
+            "提醒动作": str(reminder_evt.get("动作", "")).strip(),
+            "模式": "标准事件",
+        }
+
+    if log_binding and isinstance(log_binding.get("log"), dict):
+        lg = log_binding["log"]
+        evt = str(lg.get("事件", "")).strip() or "无数据"
+        clean = evt
+        if "补充:" in clean:
+            clean = clean.split("补充:")[-1]
+        if "】" in clean:
+            clean = clean.split("】")[-1]
+        clean = clean.split("[系统]")[0].strip() or evt
+        reminder_evt = (todo_binding or {}).get("event", {}) if todo_binding else {}
+        return {
+            "项目": proj,
+            "日期": str(lg.get("日期", "")).strip(),
+            "来源": "项目日志",
+            "动作": str(lg.get("流转", "")).strip() or "日志记录",
+            "部件": str(log_binding.get("component", "")).strip() or "全局进度",
+            "阶段": str(lg.get("工序", "")).strip() or "-",
+            "内容": clean,
+            "原始文本": evt,
+            "关联人员": "",
+            "关联待办": [],
+            "意图": "",
+            "提醒内容": str(reminder_evt.get("内容", "")).strip(),
+            "提醒日期": str(reminder_evt.get("日期", "")).strip(),
+            "提醒动作": str(reminder_evt.get("动作", "")).strip(),
+            "模式": "项目日志",
+        }
+
+    if todo_binding and isinstance(todo_binding.get("event"), dict):
+        evt = todo_binding["event"]
+        content = str(evt.get("内容", "")).strip() or str(evt.get("原始文本", "")).strip() or "无数据"
+        return {
+            "项目": proj,
+            "日期": str(evt.get("日期", "")).strip(),
+            "来源": str(evt.get("来源", "")).strip() or "To-do",
+            "动作": str(evt.get("动作", "")).strip(),
+            "部件": str(evt.get("部件", "")).strip() or "全局进度",
+            "阶段": str(evt.get("阶段", "")).strip() or "-",
+            "内容": content,
+            "原始文本": str(evt.get("原始文本", "")).strip() or content,
+            "关联人员": str(evt.get("关联人员", "")).strip(),
+            "关联待办": [str(x).strip() for x in (evt.get("关联待办", []) or []) if str(x).strip()],
+            "意图": str(evt.get("意图", "")).strip(),
+            "提醒内容": content,
+            "提醒日期": str(evt.get("日期", "")).strip(),
+            "提醒动作": str(evt.get("动作", "")).strip(),
+            "模式": "待办提醒",
+        }
+
+    return {
+        "项目": proj,
+        "日期": "",
+        "来源": "",
+        "动作": "",
+        "部件": "全局进度",
+        "阶段": "-",
+        "内容": "无数据",
+        "原始文本": "",
+        "关联人员": "",
+        "关联待办": [],
+        "意图": "",
+        "提醒内容": "",
+        "提醒日期": "",
+        "提醒动作": "",
+        "模式": "空",
+    }
+
+
+def append_history_refresh_standard_event(project_name, actor="系统"):
+    proj = str(project_name or "").strip()
+    if (not proj) or proj not in db:
+        return False
+    binding = get_latest_project_log_binding(proj)
+    if not binding or not isinstance(binding.get("log"), dict):
+        return False
+    lg = binding["log"]
+    evt_date = parse_date_safe(str(lg.get("日期", "")).strip()) or datetime.date.today()
+    return append_standard_event_entry(
+        source_module="历史溯源",
+        action_type="同步当前解释",
+        project_name=proj,
+        event_date=evt_date,
+        component_name=str(binding.get("component", "")).strip(),
+        stage_name=str(lg.get("工序", "")).strip(),
+        content_text=str(lg.get("事件", "")).strip(),
+        raw_text=str(lg.get("事件", "")).strip(),
+        actor=actor,
+        extra_payload={"来源流转": str(lg.get("流转", "")).strip()},
+    )
+
+
+def analyze_standard_event_confidence(evt_obj):
+    evt = evt_obj if isinstance(evt_obj, dict) else {}
+    score = 100
+    reasons = []
+    raw = str(evt.get("原始文本", "")).strip()
+    content = str(evt.get("内容", "")).strip()
+    full_text = f"{raw} {content}".strip()
+    comp = str(evt.get("部件", "")).strip() or "全局进度"
+    stage = str(evt.get("阶段", "")).strip()
+    src = str(evt.get("来源", "")).strip()
+
+    if any(tok in full_text for tok in ["⚠️请手动选择", "未知", "冲突"]):
+        score -= 45
+        reasons.append("含有手动选择/未知/冲突信号")
+
+    split_kw_map = get_component_split_keyword_map()
+    split_hit = next((kw for kw in split_kw_map.keys() if kw and kw in full_text), "")
+    if split_hit and comp in ["", "全局进度"]:
+        score -= 30
+        reasons.append(f"命中部件分叉词“{split_hit}”，但仍落在全局进度")
+
+    if not stage:
+        score -= 10
+        reasons.append("阶段为空")
+
+    if src == "To-do" and not str(evt.get("关联人员", "")).strip():
+        score -= 10
+        reasons.append("待办事件未识别到关联人员")
+
+    if src == "全局大盘" and not parse_date_safe(str(evt.get("日期", "")).strip()):
+        score -= 10
+        reasons.append("日期解析不稳定")
+
+    if score >= 85:
+        level = "高"
+    elif score >= 70:
+        level = "中"
+    else:
+        level = "低"
+
+    return {
+        "score": max(0, score),
+        "level": level,
+        "reasons": reasons,
+    }
+
+
+def collect_low_confidence_standard_events(limit=120):
+    events = db.get("系统配置", {}).get("标准事件流", [])
+    picked = []
+    for evt in reversed(events):
+        conf = analyze_standard_event_confidence(evt)
+        if conf["score"] >= 70:
+            continue
+        row = dict(evt)
+        row["_confidence"] = conf
+        picked.append(row)
+        if len(picked) >= limit:
+            break
+    return picked
+
+
+def format_event_recognition_hint(project_name="", component_name="", stage_name="", todo_state="", reminder_text=""):
+    bits = []
+    proj = str(project_name or "").strip()
+    comp = str(component_name or "").strip()
+    stage = str(stage_name or "").strip()
+    if proj:
+        bits.append(f"项目→{proj}")
+    if comp:
+        bits.append(f"部件→{comp}")
+    if stage:
+        bits.append(f"阶段→{stage}")
+    if todo_state:
+        todo_map = {"created": "新建待办", "updated": "更新待办", "exists": "命中已有待办"}
+        bits.append(f"待办→{todo_map.get(todo_state, todo_state)}")
+    if reminder_text:
+        bits.append(f"提醒→{reminder_text[:24]}")
+    return " ｜ ".join(bits)
 
 
 def append_todo_completion_history(td, action_date=None):
@@ -3485,20 +4112,8 @@ def render_pm_batch_fastlog_integrated(visible_projects, default_proj=""):
 
     MANUAL_PICK = "⚠️请手动选择项目"
     PROJECT_ALIAS_MAP = SYS_CFG.get("项目别名", {})
-    COMP_KW = {
-        "头": "头雕(表情)", "眼": "头雕(表情)", "脸": "头雕(表情)", "手": "手型",
-        "衣": "服装", "包": "包装", "盒": "包装", "地台": "地台",
-        "扣": "配件", "法杖": "配件", "杯": "配件", "剑": "配件"
-    }
-    STAGE_KW = {
-        "定价": "立项", "评估": "立项", "打印": "建模(含打印/签样)",
-        "模型": "建模(含打印/签样)", "缩放": "建模(含打印/签样)", "建模": "建模(含打印/签样)",
-        "涂": "涂装", "色": "涂装", "设计": "设计", "原画": "设计",
-        "拆件": "工程拆件", "官图": "官图", "开模": "开模", "模具": "开模", "试模": "开模", "大货": "大货",
-        "完成": "✅ 已完成(结束)", "结束": "✅ 已完成(结束)"
-    }
-    comp_kw = {**COMP_KW, **SYS_CFG.get("AI_COMP_KW", {})}
-    stage_kw = {**STAGE_KW, **SYS_CFG.get("AI_STAGE_KW", {})}
+    comp_kw = get_component_keyword_map()
+    stage_kw = get_stage_keyword_map()
 
     k_rows = "pm_batch_rows"
     d1, d2 = st.columns([1, 3])
@@ -3788,20 +4403,8 @@ def render_pm_fastlog_integrated(sel_proj):
     st.markdown("#### 📝 速记功能（已并入 PM）")
     st.caption("当前为【单项目速记】。AI 仅猜部件/阶段/提审，不自动跳到全局进度。")
 
-    COMP_KW = {
-        "头": "头雕(表情)", "眼": "头雕(表情)", "脸": "头雕(表情)", "手": "手型",
-        "衣": "服装", "包": "包装", "盒": "包装", "地台": "地台",
-        "扣": "配件", "法杖": "配件", "杯": "配件", "剑": "配件"
-    }
-    STAGE_KW = {
-        "定价": "立项", "评估": "立项", "打印": "建模(含打印/签样)",
-        "模型": "建模(含打印/签样)", "缩放": "建模(含打印/签样)", "建模": "建模(含打印/签样)",
-        "涂": "涂装", "色": "涂装", "设计": "设计", "原画": "设计",
-        "拆件": "工程拆件", "官图": "官图", "开模": "开模", "模具": "开模", "试模": "开模", "大货": "大货",
-        "完成": "✅ 已完成(结束)", "结束": "✅ 已完成(结束)"
-    }
-    comp_kw = {**COMP_KW, **SYS_CFG.get("AI_COMP_KW", {})}
-    stage_kw = {**STAGE_KW, **SYS_CFG.get("AI_STAGE_KW", {})}
+    comp_kw = get_component_keyword_map()
+    stage_kw = get_stage_keyword_map()
 
     unresolved_comp = "(待选择部件)"
     rk = f"pm_fast_rows_{sel_proj}"
@@ -4493,7 +5096,18 @@ def _normalize_print_tracking_rows(raw_rows):
             "\u6765\u6e90": src,
         })
 
-    out.sort(key=lambda x: (0 if not x.get("\u5df2\u6536\u5230") else 1, str(x.get("\u65e5\u671f", "")), str(x.get("\u9879\u76ee", ""))), reverse=False)
+    def _print_sort_date(row_obj):
+        dt = parse_date_safe((row_obj or {}).get("\u65e5\u671f", ""))
+        return dt.toordinal() if isinstance(dt, datetime.date) else -1
+
+    out.sort(
+        key=lambda x: (
+            0 if not x.get("\u5df2\u6536\u5230") else 1,
+            -_print_sort_date(x),
+            str(x.get("\u9879\u76ee", "")),
+        ),
+        reverse=False,
+    )
     return out
 
 
@@ -4515,6 +5129,17 @@ def _extract_print_location(text, locations):
         if str(loc).strip() and str(loc) in txt:
             return str(loc)
     return ""
+
+
+def _contains_print_tracking_signal(text):
+    txt = str(text or "").strip()
+    if not txt:
+        return False
+    positive_kw = get_recognition_keywords("打印正向词")
+    negative_kw = get_recognition_keywords("打印排除词")
+    if any(k in txt for k in negative_kw):
+        return False
+    return any(k in txt for k in positive_kw)
 
 
 def _infer_print_component(project_name, free_text):
@@ -4553,7 +5178,7 @@ def _build_auto_print_rows_from_todo(pm_view, visible_projects, locations):
         task = str((td or {}).get("\u4efb\u52a1", "")).strip()
         cpddl = todo_cpddl_text(td)
         combined = f"{task} {cpddl}".strip()
-        if "\u6253\u5370" not in combined:
+        if not _contains_print_tracking_signal(combined):
             continue
 
         proj_list = [p for p in todo_project_list(td) if p in visible_set]
@@ -4599,7 +5224,7 @@ def _build_auto_print_rows_from_logs(visible_projects, locations, days=30):
                 evt = str((lg or {}).get("\u4e8b\u4ef6", "")).strip()
                 if not evt and not stage:
                     continue
-                if (stage != "\u5efa\u6a21(\u542b\u6253\u5370/\u7b7e\u6837)") and ("\u6253\u5370" not in evt):
+                if not _contains_print_tracking_signal(evt):
                     continue
 
                 d_obj = parse_date_safe((lg or {}).get("\u65e5\u671f", ""))
@@ -4650,6 +5275,9 @@ def _merge_print_tracking_rows(stored_rows, auto_rows):
     for row in stored:
         rid = str(row.get("_id", "")).strip()
         if rid in used:
+            continue
+        src = str(row.get("来源", "")).strip()
+        if src in ["Todo自动捞取", "日志自动捞取"]:
             continue
         merged.append(row)
 
@@ -5803,16 +6431,17 @@ if menu == MENU_DASHBOARD:
                         elif c_name not in grouped[k]["部件"]:
                             grouped[k]["部件"].append(c_name)
                     except: pass
-            dt_txt=f"{(datetime.date.today()-latest_date_obj).days} 天" if latest_date_obj else "-"
-            ce=latest_event_str
-            if "补充:" in ce: ce=ce.split("补充:")[-1].split("[系统]")[0].strip()
-            elif "】" in ce: ce=ce.split("】")[-1].split("[系统]")[0].strip()
+            explanation = build_project_current_explanation(proj)
+            latest_dt_for_gap = parse_date_safe(explanation.get("日期", "")) or latest_date_obj
+            dt_txt=f"{(datetime.date.today()-latest_dt_for_gap).days} 天" if latest_dt_for_gap else "-"
+            ce = str(explanation.get("内容", "")).strip() or latest_event_str
+            latest_comp_name = str(explanation.get("部件", "")).strip() or latest_comp_name or "-"
             _table.append({"状态":r_txt,"项目":proj,"跟单":gd,"项目当前阶段":ms,
                 "开定时间":tgt,"预计发货":ship_itv,"断更":dt_txt,"最新全盘动态":f"[{latest_comp_name}] {ce}"})
             _meta.append({
                 "项目": proj,
                 "项目标签": proj_y_label,
-                "最近更新": latest_date_obj.strftime("%Y-%m-%d") if latest_date_obj else "0001-01-01",
+                "最近更新": latest_dt_for_gap.strftime("%Y-%m-%d") if latest_dt_for_gap else "0001-01-01",
                 "是否暂停": 1 if str(ms).strip() == "暂停研发" else 0,
                 "是否完结": 1 if str(ms).strip() in ["生产结束", "项目结束撒花🎉", "✅ 已完成(结束)"] else 0
             })
@@ -5876,8 +6505,8 @@ if menu == MENU_DASHBOARD:
                         if nxt["工序"] == "暂停" or not in_pause_period(nxt["日期_obj"]):
                             ns = nxt["工序"]; break
                     if is_last or ns != cs:
-                        # 暂停在甘特图里只占 1 天体量：暂停当天有色块，后续保持留白直到恢复
-                        if cs == "暂停":
+                        # 暂停和立项都只占 1 天体量，避免把阶段误拉成长条。
+                        if cs in ["暂停", "立项"]:
                             ed = sd + datetime.timedelta(days=1)
                         else:
                             ed = log["日期_obj"]
@@ -6119,17 +6748,7 @@ if menu == MENU_DASHBOARD:
             return txt.split("[\u7cfb\u7edf]")[0].strip() or str(event_text or "").strip()
 
         def _latest_event_binding(proj_name):
-            latest = None
-            for comp_name, comp_info in db.get(proj_name, {}).get("部件列表", {}).items():
-                for lg in comp_info.get("日志流", []):
-                    if is_hidden_system_log(lg):
-                        continue
-                    d_txt = str((lg or {}).get("日期", "")).strip()
-                    d_obj = parse_date_safe(d_txt) or datetime.date.min
-                    rank = (d_obj.toordinal(), d_txt, str((lg or {}).get("_id", "")), str(comp_name))
-                    if (latest is None) or (rank > latest["rank"]):
-                        latest = {"rank": rank, "component": str(comp_name), "log": lg}
-            return latest
+            return get_latest_project_log_binding(proj_name)
 
         def _infer_component_for_dynamic(project_name, raw_text, fallback_component=""):
             proj = str(project_name or "").strip()
@@ -6171,6 +6790,11 @@ if menu == MENU_DASHBOARD:
                 ("\u670d\u88c5", "\u670d\u88c5"), ("\u5305\u88c5", "\u5305\u88c5"),
                 ("\u5168\u5c40", "\u5168\u5c40\u8fdb\u5ea6"), ("\u6574\u4f53", "\u5168\u5c40\u8fdb\u5ea6"),
             ]
+            for kw, target in get_component_split_keyword_map().items():
+                if kw and kw in txt:
+                    picked = _pick_component(target)
+                    if picked:
+                        return picked
             for kw, target in comp_hint_pairs:
                 if kw in txt:
                     picked = _pick_component(target)
@@ -6262,7 +6886,10 @@ if menu == MENU_DASHBOARD:
                 body = str(raw or "").strip()
                 body = re.sub(r"^(?:\[[^\]]+\]\s*){1,6}", "", body).strip()
                 body = re.sub(r"\s+", " ", body).strip(" \uff0c,;\uff1b|")
-                body = re.sub(r"^(\u9884\u8ba1|\u8ba1\u5212|\u9884\u4f30|\u4e89\u53d6|\u76ee\u6807|\u9884\u8ba1\u5728|\u9884\u8ba1\u4e8e)\s*", "", body)
+                for noise in get_recognition_keywords("日期噪音词"):
+                    if not noise:
+                        continue
+                    body = re.sub(rf"(^|\\s){re.escape(str(noise))}(?=\\s|$)", " ", body)
                 body = re.sub(r"\s*(\u5de6\u53f3|\u524d\u540e)\s*", " ", body)
                 body = re.sub(r"^(\u5927\u7ea6|\u7ea6)\s*", "", body)
                 body = re.sub(r"\s+", " ", body).strip(" \uff0c,;\uff1b|")
@@ -6312,14 +6939,8 @@ if menu == MENU_DASHBOARD:
         def _classify_dynamic_intent(text):
             txt = str(text or "")
             txt_norm = norm_text(txt)
-            todo_keys = [
-                "\u5f85", "\u5f85\u529e", "\u9700\u8981", "\u9700", "\u8ddf\u8fdb", "\u8ddf\u50ac", "\u8865", "\u5b89\u6392", "todo", "to do", "ddl", "cp", "\u5f85\u5ba1", "\u5f85\u53cd\u9988", "\u5f85\u7248\u6743",
-                "\u9884\u8ba1", "\u9884\u8ba1\u51fa", "\u9884\u8ba1\u7ed9\u51fa", "\u5373\u5c06",
-            ]
-            past_keys = [
-                "\u5df2", "\u5df2\u7ecf", "\u5b8c\u6210", "\u5b8c\u6bd5", "\u901a\u8fc7", "\u6536\u5230", "\u786e\u8ba4\u4e86", "\u786e\u8ba4\u5b8c\u6210", "\u770b\u8fc7", "on-hand", "on hand", "done", "ok",
-                "\u63d0\u4ea4", "\u5df2\u63d0\u4ea4", "\u5df2\u63d0\u5ba1", "\u63d0\u5ba1\u901a\u8fc7", "\u5df2\u53d1",
-            ]
+            todo_keys = get_recognition_keywords("未来意图词")
+            past_keys = get_recognition_keywords("过去意图词")
             todo_score = sum(1 for k in todo_keys if (k in txt) or (norm_text(k) in txt_norm))
             past_score = sum(1 for k in past_keys if (k in txt) or (norm_text(k) in txt_norm))
             if todo_score > past_score and todo_score > 0:
@@ -6508,6 +7129,7 @@ if menu == MENU_DASHBOARD:
             todo_updated = 0
             standard_event_dirty = False
             error_msgs = []
+            hint_lines = []
 
             for row in edited_dashboard_df.to_dict("records"):
                 proj = str(row.get("项目", "")).strip()
@@ -6637,6 +7259,15 @@ if menu == MENU_DASHBOARD:
                                     todo_created += 1
                                 elif todo_state == "updated":
                                     todo_updated += 1
+                                hint_line = format_event_recognition_hint(
+                                    project_name=proj,
+                                    component_name=target_comp,
+                                    stage_name=str(db.get(proj, {}).get("部件列表", {}).get(target_comp, {}).get("主流程", "")).strip(),
+                                    todo_state=todo_state,
+                                    reminder_text=parsed_body or latest_after,
+                                )
+                                if hint_line:
+                                    hint_lines.append(hint_line)
 
                                 if todo_state in ["created", "updated", "exists"]:
                                     standard_event_dirty = (
@@ -6677,6 +7308,8 @@ if menu == MENU_DASHBOARD:
                     f"已保存 {len(changed_projects)} 个项目：基础字段 {basic_updates} 条，"
                     f"动态新增 {dynamic_append_updates} 条，动态改写 {dynamic_rewrite_updates} 条{todo_suffix}。"
                 )
+                if hint_lines:
+                    st.caption("识别结果：" + " ； ".join(hint_lines[:4]))
                 if error_msgs:
                     st.warning("\n".join(error_msgs[:6]))
                 st.rerun()
@@ -6766,6 +7399,31 @@ elif menu == MENU_SPECIFIC:
         st.session_state.exclude_imgs        = set()
         st.session_state.config_consumed_hashes = set()
         st.session_state.current_proj_context   = sel_proj
+    proj_explain = build_project_current_explanation(sel_proj)
+    with st.container(border=True):
+        st.markdown("**当前项目统一状态解释**")
+        explain_bits = [
+            f"来源：{str(proj_explain.get('来源', '')).strip() or '-'}",
+            f"日期：{str(proj_explain.get('日期', '')).strip() or '-'}",
+            f"部件：{str(proj_explain.get('部件', '')).strip() or '全局进度'}",
+            f"阶段：{str(proj_explain.get('阶段', '')).strip() or '-'}",
+        ]
+        st.caption(" ｜ ".join(explain_bits))
+        st.markdown(str(proj_explain.get("内容", "")).strip() or "无数据")
+        extra_bits = []
+        if str(proj_explain.get("动作", "")).strip():
+            extra_bits.append(f"动作：{str(proj_explain.get('动作', '')).strip()}")
+        if str(proj_explain.get("关联人员", "")).strip():
+            extra_bits.append(f"关联人员：{str(proj_explain.get('关联人员', '')).strip()}")
+        todo_refs = [x for x in (proj_explain.get("关联待办", []) or []) if str(x).strip()]
+        if todo_refs:
+            extra_bits.append(f"关联待办：{len(todo_refs)} 条")
+        if extra_bits:
+            st.caption(" ｜ ".join(extra_bits))
+        reminder_text = str(proj_explain.get("提醒内容", "")).strip()
+        if reminder_text:
+            reminder_date = str(proj_explain.get("提醒日期", "")).strip() or "-"
+            st.caption(f"待办提醒：{reminder_date} ｜ {reminder_text}")
     with st.expander("项目备忘录", expanded=False):
         memo_txt_pm = st.text_area("记录跨部门叮嘱等杂项", value=db[sel_proj].get("备忘录", ""), height=90, key=f"pm_memo_{sel_proj}")
         if st.button("保存项目备忘录", key=f"pm_save_memo_{sel_proj}"):
@@ -7520,6 +8178,12 @@ elif menu == MENU_SPECIFIC:
                         sync_save_db("系统配置")
                     todo_msg = f"；联动待办 {len(linked_todo_titles)} 条" if linked_todo_titles else ""
                     st.success(f"记录已保存{todo_msg}。")
+                    st.caption("识别结果：" + format_event_recognition_hint(
+                        project_name=sel_proj,
+                        component_name=actual_c,
+                        stage_name=wb_stage,
+                        reminder_text=str(wb_text).strip(),
+                    ))
                     st.rerun()
 
         with st.expander("👔 3. 服装流程", expanded=False):
@@ -7570,20 +8234,10 @@ elif menu == MENU_FASTLOG:
     global_ai_date = st.date_input("🕒 本次批量记录发生日期", datetime.date.today())
     raw_text       = st.text_area("✍️ 输入进展 (按模板语法输入)：", height=150)
 
-    COMP_KW  = {"头": "头雕(表情)", "眼": "头雕(表情)", "脸": "头雕(表情)", "手": "手型",
-                "衣": "服装", "包": "包装", "盒": "包装", "地台": "地台",
-                "扣": "配件", "法杖": "配件", "杯": "配件", "剑": "配件"}
-    STAGE_KW = {"定价": "立项", "评估": "立项", "打印": "建模(含打印/签样)",
-                "模型": "建模(含打印/签样)", "缩放": "建模(含打印/签样)",
-                "修": "建模(含打印/签样)", "建模": "建模(含打印/签样)",
-                "涂": "涂装", "色": "涂装", "设计": "设计", "原画": "设计",
-                "拆件": "工程拆件", "官图": "官图", "开模": "开模", "模具": "开模", "试模": "开模", "大货": "大货",
-                "完成": "✅ 已完成(结束)", "结束": "✅ 已完成(结束)"}
-    RESUME_KWS = ["resume", "恢复", "重启", "继续推进", "解除暂停", "复工"]
-
     PROJECT_ALIAS_MAP = SYS_CFG.get("项目别名", {})
-    DYNAMIC_COMP_KW  = {**COMP_KW,  **SYS_CFG.get("AI_COMP_KW",  {})}
-    DYNAMIC_STAGE_KW = {**STAGE_KW, **SYS_CFG.get("AI_STAGE_KW", {})}
+    DYNAMIC_COMP_KW  = get_component_keyword_map()
+    DYNAMIC_STAGE_KW = get_stage_keyword_map()
+    RESUME_KWS = get_recognition_keywords("恢复推进词")
 
     # 避免短词误伤（如“甘”几乎必然误判到甘道夫）
     DYNAMIC_COMP_KW = {k: v for k, v in DYNAMIC_COMP_KW.items() if len(str(k).strip()) >= 2}
@@ -7903,6 +8557,16 @@ elif menu == MENU_FASTLOG:
             st.session_state.ai_pasted_cache = {}
             msg = "🎉 入库成功！" if learned_count == 0 else f"🎉 入库成功！AI 已学会了 {learned_count} 个新词汇！"
             st.success(msg)
+            hint_lines = []
+            for log in edited_logs[:4]:
+                hint_lines.append(format_event_recognition_hint(
+                    project_name=resolve_alias_project(log.get("项目", ""), PROJECT_ALIAS_MAP),
+                    component_name=log.get("部件", ""),
+                    stage_name=log.get("推测阶段", ""),
+                    reminder_text=log.get("事件", ""),
+                ))
+            if hint_lines:
+                st.caption("识别结果：" + " ； ".join([x for x in hint_lines if x][:4]))
             st.rerun()
 
 # ==========================================
@@ -8143,6 +8807,23 @@ elif menu == MENU_HISTORY:
     valid_p = [p for p in db.keys() if p != "系统配置"]
     if not valid_p: st.stop()
     sel_proj = st.selectbox("📌 选择溯源项目", valid_p)
+    low_conf_events = [x for x in collect_low_confidence_standard_events(limit=80) if str(x.get("项目", "")).strip() == str(sel_proj).strip()]
+    if low_conf_events:
+        with st.expander(f"🧭 当前项目的识别待确认 ({len(low_conf_events)} 条)", expanded=False):
+            st.caption("这里直接显示当前项目的高风险识别记录，方便你在查历史时顺手确认，不用再切去系统维护。")
+            quick_rows = []
+            for evt in low_conf_events[:20]:
+                conf = evt.get("_confidence", {})
+                quick_rows.append({
+                    "日期": str(evt.get("日期", "")).strip(),
+                    "来源": str(evt.get("来源", "")).strip(),
+                    "部件": str(evt.get("部件", "")).strip() or "全局进度",
+                    "阶段": str(evt.get("阶段", "")).strip() or "-",
+                    "内容": str(evt.get("内容", "")).strip(),
+                    "置信度": conf.get("score", 0),
+                    "原因": "；".join(conf.get("reasons", [])[:2]) or "-",
+                })
+            st.dataframe(pd.DataFrame(quick_rows), width="stretch", hide_index=True)
 
     for c_name, comp in db[sel_proj].get("部件列表", {}).items():
         for log in comp.get("日志流", []):
@@ -8618,10 +9299,17 @@ elif menu == MENU_HISTORY:
                                     touched_projects.add(proj_name)
 
                     if touched_projects:
+                        history_event_dirty = False
                         for proj_name in sorted(touched_projects):
                             for c_info in db.get(proj_name, {}).get("部件列表", {}).values():
                                 c_info["日志流"] = sorted(c_info.get("日志流", []), key=lambda x: str((x or {}).get("日期", "")))
                             sync_save_db(proj_name)
+                            history_event_dirty = append_history_refresh_standard_event(
+                                proj_name,
+                                actor=current_pm if current_pm != "所有人" else "系统",
+                            ) or history_event_dirty
+                        if history_event_dirty:
+                            sync_save_db("系统配置")
 
                         msg = f"当日修正已保存：更新 {update_count} 条，删除 {delete_count} 条，影响 {len(touched_projects)} 个项目。"
                         if day_errors:
@@ -8688,6 +9376,8 @@ elif menu == MENU_HISTORY:
                         new_logs_by_comp.get(c, []), key=lambda x: x.get("日期", "")
                     )
             sync_save_db(sel_proj)
+            if append_history_refresh_standard_event(sel_proj, actor=current_pm if current_pm != "所有人" else "系统"):
+                sync_save_db("系统配置")
             st.success("✅ 历史记录已更新！")
             st.rerun()
 
@@ -8810,6 +9500,37 @@ elif menu == MENU_SETTINGS:
                     st.success(f"✅ 合并完成：{merge_src} → {merge_dst}，并已学习 {len(learned_aliases)} 个别名。")
                     st.rerun()
 
+            st.markdown("---")
+            st.markdown("**C. 异常比例项目清理（如 6威龙 → 1/6威龙）**")
+            malformed_pairs = []
+            for p_name in all_proj_names:
+                inferred_target = infer_malformed_ratio_project_target(p_name)
+                if inferred_target and inferred_target != p_name:
+                    malformed_pairs.append((p_name, inferred_target))
+
+            if malformed_pairs:
+                malformed_labels = [f"{src} → {dst}" for src, dst in malformed_pairs]
+                picked_malformed = st.multiselect(
+                    "检测到的异常比例项目",
+                    malformed_labels,
+                    default=malformed_labels,
+                    key="malformed_ratio_cleanup_pick",
+                )
+                if st.button("🧹 执行异常比例项目清理", type="primary", key="btn_cleanup_ratio"):
+                    cleaned = []
+                    for label in picked_malformed:
+                        src, dst = label.split(" → ", 1)
+                        if merge_project_into_target(src, dst, learned_aliases=[src]):
+                            cleaned.append(label)
+                    if cleaned:
+                        sync_save_db()
+                        st.success(f"已清理 {len(cleaned)} 个异常项目：{'；'.join(cleaned[:6])}")
+                        st.rerun()
+                    else:
+                        st.info("没有可执行的异常项目清理。")
+            else:
+                st.caption("当前未检测到可自动清理的异常比例项目。")
+
             alias_map = st.session_state.db["系统配置"].get("项目别名", {})
             if alias_map:
                 alias_df = pd.DataFrame([
@@ -8890,6 +9611,204 @@ elif menu == MENU_SETTINGS:
                         sync_save_db()
                         st.success(f"已删除 {len(del_ids)} 条历史记录。")
                         st.rerun()
+
+    with st.expander("📚 识别词典中心（规则 / 联动 / 自学习词库）", expanded=True):
+        st.caption("这里集中维护系统识别规则。项目别名仍放在上面的【项目管理】里；这里主要维护部件、阶段、日期语气、打印信号等通用词典。")
+        current_rec = get_recognition_dict()
+        current_comp_kw = get_component_keyword_map()
+        current_stage_kw = get_stage_keyword_map()
+        current_split_kw = get_component_split_keyword_map()
+        current_people_alias = st.session_state.db.setdefault("系统配置", {}).get("人员别名", {})
+
+        col_d1, col_d2 = st.columns(2)
+        with col_d1:
+            comp_kw_text = st.text_area(
+                "部件关键词（每行 `关键词=部件`）",
+                value=_format_keyword_map_text(current_comp_kw),
+                height=220,
+                key="dict_comp_kw_text",
+            )
+        with col_d2:
+            stage_kw_text = st.text_area(
+                "阶段关键词（每行 `关键词=阶段`）",
+                value=_format_keyword_map_text(current_stage_kw),
+                height=220,
+                key="dict_stage_kw_text",
+            )
+
+        col_d3, col_d4 = st.columns(2)
+        with col_d3:
+            future_kw_text = st.text_area(
+                "未来 / 待办意图词（每行一个）",
+                value=_format_keyword_list_text(current_rec.get("未来意图词", [])),
+                height=170,
+                key="dict_future_kw_text",
+            )
+            past_kw_text = st.text_area(
+                "过去 / 已完成意图词（每行一个）",
+                value=_format_keyword_list_text(current_rec.get("过去意图词", [])),
+                height=170,
+                key="dict_past_kw_text",
+            )
+        with col_d4:
+            split_kw_text = st.text_area(
+                "部件分叉词（每行 `关键词=部件`）",
+                value=_format_keyword_map_text(current_split_kw),
+                height=170,
+                key="dict_split_kw_text",
+            )
+            date_noise_text = st.text_area(
+                "日期噪音词（每行一个）",
+                value=_format_keyword_list_text(current_rec.get("日期噪音词", [])),
+                height=170,
+                key="dict_date_noise_text",
+            )
+        col_d4b1, col_d4b2 = st.columns(2)
+        with col_d4b1:
+            resume_kw_text = st.text_area(
+                "恢复推进词（每行一个）",
+                value=_format_keyword_list_text(current_rec.get("恢复推进词", [])),
+                height=170,
+                key="dict_resume_kw_text",
+            )
+        with col_d4b2:
+            people_alias_text = st.text_area(
+                "人员别名（每行 `别名=角色-姓名`）",
+                value=_format_keyword_map_text(current_people_alias),
+                height=170,
+                key="dict_people_alias_text",
+            )
+
+        col_d5, col_d6 = st.columns(2)
+        with col_d5:
+            print_pos_text = st.text_area(
+                "打印正向词（每行一个）",
+                value=_format_keyword_list_text(current_rec.get("打印正向词", [])),
+                height=160,
+                key="dict_print_pos_text",
+            )
+        with col_d6:
+            print_neg_text = st.text_area(
+                "打印排除词（每行一个）",
+                value=_format_keyword_list_text(current_rec.get("打印排除词", [])),
+                height=160,
+                key="dict_print_neg_text",
+            )
+
+        if st.button("💾 保存识别词典中心", type="primary", key="btn_save_dict_center"):
+            cfg = st.session_state.db.setdefault("系统配置", {})
+            cfg["AI_COMP_KW"] = _parse_keyword_map_text(comp_kw_text)
+            cfg["AI_STAGE_KW"] = _parse_keyword_map_text(stage_kw_text)
+            cfg["AI_SPLIT_COMP_KW"] = _parse_keyword_map_text(split_kw_text)
+            cfg["人员别名"] = _parse_keyword_map_text(people_alias_text)
+            cfg["识别词典"] = {
+                "未来意图词": _parse_keyword_list_text(future_kw_text),
+                "过去意图词": _parse_keyword_list_text(past_kw_text),
+                "恢复推进词": _parse_keyword_list_text(resume_kw_text),
+                "打印正向词": _parse_keyword_list_text(print_pos_text),
+                "打印排除词": _parse_keyword_list_text(print_neg_text),
+                "日期噪音词": _parse_keyword_list_text(date_noise_text),
+            }
+            sync_save_db("系统配置")
+            st.success("识别词典中心已保存。后续 To-do / 大盘 / AI 速记 / 打印追踪 会共用这些规则。")
+            st.rerun()
+
+    with st.expander("🧭 识别待确认队列（不删功能，只帮你先捞出高风险条目）", expanded=True):
+        low_conf_events = collect_low_confidence_standard_events(limit=80)
+        if not low_conf_events:
+            st.caption("当前没有低置信度统一事件，说明近期识别结果相对稳定。")
+        else:
+            st.caption("这些条目不会阻止系统运行；这里只是把容易识别错的记录提前列出来，方便你顺手修正和学习。")
+            review_rows = []
+            for evt in low_conf_events:
+                conf = evt.get("_confidence", {})
+                review_rows.append({
+                    "日期": str(evt.get("日期", "")).strip(),
+                    "项目": str(evt.get("项目", "")).strip(),
+                    "来源": str(evt.get("来源", "")).strip(),
+                    "部件": str(evt.get("部件", "")).strip() or "全局进度",
+                    "阶段": str(evt.get("阶段", "")).strip() or "-",
+                    "内容": str(evt.get("内容", "")).strip(),
+                    "置信度": conf.get("score", 0),
+                    "风险原因": "；".join(conf.get("reasons", [])[:3]) or "-",
+                })
+            st.dataframe(pd.DataFrame(review_rows), width="stretch", hide_index=True)
+
+            event_pick_map = {}
+            event_pick_options = []
+            for evt in low_conf_events[:50]:
+                evt_id = str(evt.get("_id", "")).strip()
+                label = " | ".join([
+                    str(evt.get("日期", "")).strip() or "-",
+                    str(evt.get("项目", "")).strip() or "-",
+                    str(evt.get("部件", "")).strip() or "全局进度",
+                    (str(evt.get("内容", "")).strip() or "-")[:28],
+                ])
+                if label in event_pick_map:
+                    label = f"{label} [{evt_id[:4]}]"
+                event_pick_map[label] = evt
+                event_pick_options.append(label)
+
+            picked_label = st.selectbox("选择一条待确认记录", event_pick_options, key="low_conf_pick")
+            picked_evt = event_pick_map.get(picked_label, {})
+
+            c_l1, c_l2, c_l3 = st.columns([1.2, 1.2, 1.2])
+            valid_proj_options = [p for p in db.keys() if p != "系统配置"]
+            with c_l1:
+                fix_proj = st.selectbox(
+                    "修正项目",
+                    valid_proj_options,
+                    index=valid_proj_options.index(str(picked_evt.get("项目", "")).strip()) if str(picked_evt.get("项目", "")).strip() in valid_proj_options else 0,
+                    key="low_conf_fix_proj",
+                )
+            with c_l2:
+                comp_options = list(dict.fromkeys(["全局进度"] + STD_COMPONENTS + list(db.get(fix_proj, {}).get("部件列表", {}).keys())))
+                cur_comp = str(picked_evt.get("部件", "")).strip() or "全局进度"
+                fix_comp = st.selectbox(
+                    "修正部件",
+                    comp_options,
+                    index=comp_options.index(cur_comp) if cur_comp in comp_options else 0,
+                    key="low_conf_fix_comp",
+                )
+            with c_l3:
+                learn_type = st.selectbox(
+                    "顺手学习到哪里",
+                    ["不学习，只修这条", "部件关键词", "部件分叉词", "人员别名"],
+                    key="low_conf_learn_type",
+                )
+
+            learn_phrase = st.text_input(
+                "学习短语（可选）",
+                key="low_conf_learn_phrase",
+                placeholder="例：头发 / 猫老师 / 包装刀线",
+            )
+            canonical_people = st.text_input(
+                "人员别名标准值（仅当学习到人员别名时填写）",
+                key="low_conf_people_canonical",
+                placeholder="例：设计-Venchar",
+            )
+
+            if st.button("💾 应用修正（保留原功能，只补识别）", type="primary", key="btn_low_conf_apply"):
+                if picked_evt:
+                    if str(picked_evt.get("项目", "")).strip() != fix_proj:
+                        picked_evt["项目"] = fix_proj
+                    if str(picked_evt.get("部件", "")).strip() != fix_comp:
+                        picked_evt["部件"] = fix_comp
+
+                    phrase = str(learn_phrase).strip()
+                    cfg = st.session_state.db.setdefault("系统配置", {})
+                    if phrase:
+                        if learn_type == "部件关键词":
+                            cfg.setdefault("AI_COMP_KW", {})[phrase] = fix_comp
+                        elif learn_type == "部件分叉词":
+                            cfg.setdefault("AI_SPLIT_COMP_KW", {})[phrase] = fix_comp
+                        elif learn_type == "人员别名":
+                            canonical = str(canonical_people).strip()
+                            if canonical:
+                                cfg.setdefault("人员别名", {})[phrase] = canonical
+                    sync_save_db("系统配置")
+                    st.success("待确认记录已修正，并按你的选择写入词典。")
+                    st.rerun()
 
     with st.expander("\u56e2\u961f\u6210\u5458\u7ef4\u62a4\uff08\u65b0\u589e / \u66ff\u6362 / \u5220\u9664 + \u540e\u6094\u836f\uff09", expanded=True):
         st.caption("\u7edf\u4e00\u5165\u53e3\uff1a\u652f\u6301\u65b0\u589e\u6210\u5458\u6c60\u3001\u6309\u6761\u4ef6\u66ff\u6362/\u5220\u9664\uff0c\u5e76\u53ef\u64a4\u9500\u4e0a\u4e00\u6b65\u8bef\u64cd\u4f5c\u3002")
