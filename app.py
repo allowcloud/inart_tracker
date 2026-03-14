@@ -3290,18 +3290,13 @@ def build_project_stage_segments(proj_label, proj_data):
         })
 
     pause_dates = sorted({x["date"] for x in stage_records.get("暂停", [])})
-    resume_dates = sorted({x["date"] for x in all_records if x["stage"] != "暂停"})
     for pause_dt in pause_dates:
-        resume_dt = next((d for d in resume_dates if d > pause_dt), None)
-        finish_dt = resume_dt or (today + datetime.timedelta(days=1))
-        if finish_dt <= pause_dt:
-            finish_dt = pause_dt + datetime.timedelta(days=1)
         records = [x for x in stage_records.get("暂停", []) if x["date"] == pause_dt]
         segments.append({
             "项目": proj_label,
             "工序阶段": "暂停",
             "Start": pause_dt.strftime("%Y-%m-%d"),
-            "Finish": finish_dt.strftime("%Y-%m-%d"),
+            "Finish": (pause_dt + datetime.timedelta(days=1)).strftime("%Y-%m-%d"),
             "详情": _detail_lines(records),
         })
 
@@ -6482,8 +6477,8 @@ if menu == MENU_DASHBOARD:
         df_g_all["Start_dt"] = pd.to_datetime(df_g_all["Start"], errors="coerce")
         df_g_all["Finish_dt"] = pd.to_datetime(df_g_all["Finish"], errors="coerce")
         month_anchor = datetime.date.today().replace(day=1)
-        default_gantt_start = add_months(month_anchor, -2)
-        default_gantt_end_month = add_months(month_anchor, 3)
+        default_gantt_start = add_months(month_anchor, -3)
+        default_gantt_end_month = add_months(month_anchor, 2)
         default_gantt_end = default_gantt_end_month.replace(day=month_last_day(default_gantt_end_month.year, default_gantt_end_month.month))
         if not isinstance(st.session_state.get("gantt_start"), datetime.date):
             st.session_state["gantt_start"] = default_gantt_start
@@ -6513,9 +6508,9 @@ if menu == MENU_DASHBOARD:
                 df_order = pd.DataFrame(table_data)
                 df_order["状态组"] = 2
                 df_order.loc[df_order["状态"].str.contains("研发|生产", na=False), "状态组"] = 0
-                df_order.loc[df_order["状态"].str.contains("暂停", na=False), "状态组"] = 1
                 df_order.loc[df_order["状态"].str.contains("未知", na=False), "状态组"] = 2
                 df_order.loc[df_order["状态"].str.contains("结案", na=False), "状态组"] = 3
+                df_order.loc[df_order["状态"].str.contains("暂停", na=False), "状态组"] = 4
                 df_order["开定排序"] = df_order["开定时间"].apply(
                     lambda x: parse_period_marker_date(x, end_of_period=False) or datetime.date.max
                 )
@@ -6530,7 +6525,7 @@ if menu == MENU_DASHBOARD:
                 y_order = [label_map.get(str(p), str(p)) for p in df_order["项目"].tolist()]
             else:
                 df_meta["排序组"] = df_meta.apply(
-                    lambda r: 2 if int(r.get("是否完结", 0)) == 1 else (1 if int(r.get("是否暂停", 0)) == 1 else 0),
+                    lambda r: 3 if int(r.get("是否暂停", 0)) == 1 else (2 if int(r.get("是否完结", 0)) == 1 else 0),
                     axis=1,
                 )
                 df_meta = df_meta.sort_values(by=["排序组", "有更新", "最近更新_dt", "项目标签"], ascending=[True, False, False, True])
