@@ -6419,7 +6419,7 @@ if menu == MENU_DASHBOARD:
             if not comps:
                 _table.append({"状态":r_txt,"项目":proj,"跟单":gd,"项目当前阶段":ms,
                     "开定时间":tgt,"预计发货":ship_itv,"断更":"-","最新全盘动态":"无数据"}); continue
-            latest_date_obj=None; latest_event_str="无数据"; latest_comp_name="-"; grouped={}
+            latest_date_obj=None; latest_event_str="无数据"; latest_comp_name="-"
             for c_name,info in comps.items():
                 for pair in re.split(r'[,，|]',str(info.get('负责人','')).strip()):
                     pair=pair.strip()
@@ -6433,21 +6433,6 @@ if menu == MENU_DASHBOARD:
                         l_dt=datetime.datetime.strptime(logs[-1]['日期'],"%Y-%m-%d").date()
                         if latest_date_obj is None or l_dt>latest_date_obj:
                             latest_date_obj=l_dt; latest_event_str=logs[-1]['事件']; latest_comp_name=c_name
-                    except: pass
-                for log in logs:
-                    log_stage = log.get('工序', info.get('主流程', '未知'))
-                    macro_stage = get_macro_phase(log_stage)
-                    try:
-                        dt_obj = datetime.datetime.strptime(log['日期'], "%Y-%m-%d")
-                        evt    = log['事件']
-                        k = (dt_obj, macro_stage, evt)
-                        if k not in grouped:
-                            grouped[k] = {"日期_obj": dt_obj, "日期_str": log['日期'],
-                                          "工序": macro_stage, "事件": evt,
-                                          "部件": [c_name], "is_pause": is_pause_stage(macro_stage),
-                                          "提审类型": log.get("提审类型", ""), "提审结果": log.get("提审结果", "")}
-                        elif c_name not in grouped[k]["部件"]:
-                            grouped[k]["部件"].append(c_name)
                     except: pass
             explanation = build_project_current_explanation(proj)
             latest_dt_for_gap = parse_date_safe(explanation.get("日期", "")) or latest_date_obj
@@ -6479,63 +6464,7 @@ if menu == MENU_DASHBOARD:
                     "类型": "发货",
                     "说明": f"[{proj}] 预计发货 {ship_itv}",
                 })
-            all_logs = sorted(grouped.values(), key=lambda x: x["日期_obj"])
-            if all_logs:
-                # 找出暂停时间段：[pause_start, resume_start) 之间的普通日志不产生甘特色块
-                # 暂停节点：工序=="暂停" 的日志日期
-                # 恢复节点：暂停之后第一条非暂停日志日期
-                pause_intervals = []  # list of (pause_dt, resume_dt or None)
-                in_pause = False; pause_start = None
-                for lg in all_logs:
-                    if lg["is_pause"] and not in_pause:
-                        in_pause = True; pause_start = lg["日期_obj"]
-                    elif not lg["is_pause"] and in_pause:
-                        pause_intervals.append((pause_start, lg["日期_obj"]))
-                        in_pause = False; pause_start = None
-                if in_pause and pause_start:
-                    pause_intervals.append((pause_start, None))  # 还未恢复
-
-                def in_pause_period(dt):
-                    """日志日期是否落在某个暂停区间内（暂停后、恢复前）"""
-                    for ps, pe in pause_intervals:
-                        if dt > ps and (pe is None or dt < pe):
-                            return True
-                    return False
-
-                cs = all_logs[0]["工序"]; sd = all_logs[0]["日期_obj"]; buf = []
-                for i, log in enumerate(all_logs):
-                    # 暂停区间内的非暂停日志（系统自动追踪等）跳过，不产生甘特色块
-                    if log["工序"] != "暂停" and in_pause_period(log["日期_obj"]):
-                        continue
-                    rv_type = str(log.get("提审类型", "")).strip()
-                    rv_res = str(log.get("提审结果", "")).strip()
-                    rv_txt = ""
-                    if rv_type and rv_type != "(无)":
-                        rv_txt = f" | 提审:{rv_type}"
-                        if rv_res and rv_res != "(无)":
-                            rv_txt += f"/{rv_res}"
-                    buf.append(f"[{log['日期_str']}] [{', '.join(log['部件'])}] {log['事件']}{rv_txt}")
-                    is_last  = (i == len(all_logs) - 1)
-                    # 看下一条有效日志（同样跳过暂停区间内的）
-                    ns = None
-                    for j in range(i + 1, len(all_logs)):
-                        nxt = all_logs[j]
-                        if nxt["工序"] == "暂停" or not in_pause_period(nxt["日期_obj"]):
-                            ns = nxt["工序"]; break
-                    if is_last or ns != cs:
-                        # 暂停和立项都只占 1 天体量，避免把阶段误拉成长条。
-                        if cs in ["暂停", "立项"]:
-                            ed = sd + datetime.timedelta(days=1)
-                        else:
-                            ed = log["日期_obj"]
-                            if sd == ed: ed += datetime.timedelta(days=1)
-                        _gantt.append({"项目": proj_y_label, "工序阶段": cs,
-                                       "Start": sd.strftime("%Y-%m-%d"),
-                                       "Finish": ed.strftime("%Y-%m-%d"),
-                                       "详情": "<br>".join([f"• {e}" for e in buf])})
-                        if not is_last:
-                            cs = ns if ns else log["工序"]
-                            sd = log["日期_obj"]; buf = []
+            _gantt.extend(build_project_stage_segments(proj_y_label, data))
         return _table, _gantt, _ppr, _marks, _meta
 
     # cache key：项目列表 + 数据指纹（只用非图片字段的哈希）
@@ -6582,12 +6511,37 @@ if menu == MENU_DASHBOARD:
             df_meta = pd.DataFrame(_meta).drop_duplicates(subset=["项目标签"])
             df_meta["最近更新_dt"] = pd.to_datetime(df_meta["最近更新"], errors="coerce").fillna(pd.Timestamp.min)
             df_meta["有更新"] = (df_meta["最近更新"] != "0001-01-01").astype(int)
-            df_meta["排序组"] = df_meta.apply(
-                lambda r: 2 if int(r.get("是否完结", 0)) == 1 else (1 if int(r.get("是否暂停", 0)) == 1 else 0),
-                axis=1,
-            )
-            df_meta = df_meta.sort_values(by=["排序组", "有更新", "最近更新_dt", "项目标签"], ascending=[True, False, False, True])
-            y_order = df_meta["项目标签"].tolist()
+            label_map = dict(zip(df_meta["项目"], df_meta["项目标签"]))
+            if table_data:
+                df_order = pd.DataFrame(table_data)
+                df_order["状态组"] = 2
+                df_order.loc[df_order["状态"].str.contains("研发|生产", na=False), "状态组"] = 0
+                df_order.loc[df_order["状态"].str.contains("暂停", na=False), "状态组"] = 1
+                df_order.loc[df_order["状态"].str.contains("未知", na=False), "状态组"] = 2
+                df_order.loc[df_order["状态"].str.contains("结案", na=False), "状态组"] = 3
+                df_order["开定排序"] = df_order["开定时间"].apply(
+                    lambda x: parse_period_marker_date(x, end_of_period=False) or datetime.date.max
+                )
+                df_order["发货排序"] = df_order["预计发货"].apply(
+                    lambda x: parse_period_marker_date(x, end_of_period=True) or datetime.date.max
+                )
+                df_order["断更天"] = df_order["断更"].str.extract(r'(\d+)').fillna('99999').astype(int)
+                df_order = df_order.sort_values(
+                    by=["状态组", "开定排序", "发货排序", "断更天", "项目"],
+                    ascending=[True, True, True, True, True]
+                )
+                y_order = [label_map.get(str(p), str(p)) for p in df_order["项目"].tolist()]
+            else:
+                df_meta["排序组"] = df_meta.apply(
+                    lambda r: 2 if int(r.get("是否完结", 0)) == 1 else (1 if int(r.get("是否暂停", 0)) == 1 else 0),
+                    axis=1,
+                )
+                df_meta = df_meta.sort_values(by=["排序组", "有更新", "最近更新_dt", "项目标签"], ascending=[True, False, False, True])
+                y_order = df_meta["项目标签"].tolist()
+            visible_labels = set(df_g["项目"].unique().tolist())
+            y_order = [p for p in y_order if p in visible_labels]
+            if not y_order:
+                y_order = sorted(visible_labels)
         else:
             y_order = sorted(df_g["项目"].unique().tolist())
         fig = px.timeline(
