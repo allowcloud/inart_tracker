@@ -2836,6 +2836,68 @@ def append_history_refresh_standard_event(project_name, actor="系统"):
     )
 
 
+def analyze_standard_event_confidence(evt_obj):
+    evt = evt_obj if isinstance(evt_obj, dict) else {}
+    score = 100
+    reasons = []
+    raw = str(evt.get("原始文本", "")).strip()
+    content = str(evt.get("内容", "")).strip()
+    full_text = f"{raw} {content}".strip()
+    comp = str(evt.get("部件", "")).strip() or "全局进度"
+    stage = str(evt.get("阶段", "")).strip()
+    src = str(evt.get("来源", "")).strip()
+
+    if any(tok in full_text for tok in ["⚠️请手动选择", "未知", "冲突"]):
+        score -= 45
+        reasons.append("含有手动选择/未知/冲突信号")
+
+    split_kw_map = get_component_split_keyword_map()
+    split_hit = next((kw for kw in split_kw_map.keys() if kw and kw in full_text), "")
+    if split_hit and comp in ["", "全局进度"]:
+        score -= 30
+        reasons.append(f"命中部件分叉词“{split_hit}”，但仍落在全局进度")
+
+    if not stage:
+        score -= 10
+        reasons.append("阶段为空")
+
+    if src == "To-do" and not str(evt.get("关联人员", "")).strip():
+        score -= 10
+        reasons.append("待办事件未识别到关联人员")
+
+    if src == "全局大盘" and not parse_date_safe(str(evt.get("日期", "")).strip()):
+        score -= 10
+        reasons.append("日期解析不稳定")
+
+    if score >= 85:
+        level = "高"
+    elif score >= 70:
+        level = "中"
+    else:
+        level = "低"
+
+    return {
+        "score": max(0, score),
+        "level": level,
+        "reasons": reasons,
+    }
+
+
+def collect_low_confidence_standard_events(limit=120):
+    events = db.get("系统配置", {}).get("标准事件流", [])
+    picked = []
+    for evt in reversed(events):
+        conf = analyze_standard_event_confidence(evt)
+        if conf["score"] >= 70:
+            continue
+        row = dict(evt)
+        row["_confidence"] = conf
+        picked.append(row)
+        if len(picked) >= limit:
+            break
+    return picked
+
+
 def append_todo_completion_history(td, action_date=None):
     td_obj = td or {}
     proj_list = [p for p in todo_project_list(td_obj) if p and p in db and p != "系统配置"]
@@ -9586,6 +9648,103 @@ elif menu == MENU_SETTINGS:
             sync_save_db("系统配置")
             st.success("识别词典中心已保存。后续 To-do / 大盘 / AI 速记 / 打印追踪 会共用这些规则。")
             st.rerun()
+
+    with st.expander("🧭 识别待确认队列（不删功能，只帮你先捞出高风险条目）", expanded=True):
+        low_conf_events = collect_low_confidence_standard_events(limit=80)
+        if not low_conf_events:
+            st.caption("当前没有低置信度统一事件，说明近期识别结果相对稳定。")
+        else:
+            st.caption("这些条目不会阻止系统运行；这里只是把容易识别错的记录提前列出来，方便你顺手修正和学习。")
+            review_rows = []
+            for evt in low_conf_events:
+                conf = evt.get("_confidence", {})
+                review_rows.append({
+                    "日期": str(evt.get("日期", "")).strip(),
+                    "项目": str(evt.get("项目", "")).strip(),
+                    "来源": str(evt.get("来源", "")).strip(),
+                    "部件": str(evt.get("部件", "")).strip() or "全局进度",
+                    "阶段": str(evt.get("阶段", "")).strip() or "-",
+                    "内容": str(evt.get("内容", "")).strip(),
+                    "置信度": conf.get("score", 0),
+                    "风险原因": "；".join(conf.get("reasons", [])[:3]) or "-",
+                })
+            st.dataframe(pd.DataFrame(review_rows), width="stretch", hide_index=True)
+
+            event_pick_map = {}
+            event_pick_options = []
+            for evt in low_conf_events[:50]:
+                evt_id = str(evt.get("_id", "")).strip()
+                label = " | ".join([
+                    str(evt.get("日期", "")).strip() or "-",
+                    str(evt.get("项目", "")).strip() or "-",
+                    str(evt.get("部件", "")).strip() or "全局进度",
+                    (str(evt.get("内容", "")).strip() or "-")[:28],
+                ])
+                if label in event_pick_map:
+                    label = f"{label} [{evt_id[:4]}]"
+                event_pick_map[label] = evt
+                event_pick_options.append(label)
+
+            picked_label = st.selectbox("选择一条待确认记录", event_pick_options, key="low_conf_pick")
+            picked_evt = event_pick_map.get(picked_label, {})
+
+            c_l1, c_l2, c_l3 = st.columns([1.2, 1.2, 1.2])
+            valid_proj_options = [p for p in db.keys() if p != "系统配置"]
+            with c_l1:
+                fix_proj = st.selectbox(
+                    "修正项目",
+                    valid_proj_options,
+                    index=valid_proj_options.index(str(picked_evt.get("项目", "")).strip()) if str(picked_evt.get("项目", "")).strip() in valid_proj_options else 0,
+                    key="low_conf_fix_proj",
+                )
+            with c_l2:
+                comp_options = list(dict.fromkeys(["全局进度"] + STD_COMPONENTS + list(db.get(fix_proj, {}).get("部件列表", {}).keys())))
+                cur_comp = str(picked_evt.get("部件", "")).strip() or "全局进度"
+                fix_comp = st.selectbox(
+                    "修正部件",
+                    comp_options,
+                    index=comp_options.index(cur_comp) if cur_comp in comp_options else 0,
+                    key="low_conf_fix_comp",
+                )
+            with c_l3:
+                learn_type = st.selectbox(
+                    "顺手学习到哪里",
+                    ["不学习，只修这条", "部件关键词", "部件分叉词", "人员别名"],
+                    key="low_conf_learn_type",
+                )
+
+            learn_phrase = st.text_input(
+                "学习短语（可选）",
+                key="low_conf_learn_phrase",
+                placeholder="例：头发 / 猫老师 / 包装刀线",
+            )
+            canonical_people = st.text_input(
+                "人员别名标准值（仅当学习到人员别名时填写）",
+                key="low_conf_people_canonical",
+                placeholder="例：设计-Venchar",
+            )
+
+            if st.button("💾 应用修正（保留原功能，只补识别）", type="primary", key="btn_low_conf_apply"):
+                if picked_evt:
+                    if str(picked_evt.get("项目", "")).strip() != fix_proj:
+                        picked_evt["项目"] = fix_proj
+                    if str(picked_evt.get("部件", "")).strip() != fix_comp:
+                        picked_evt["部件"] = fix_comp
+
+                    phrase = str(learn_phrase).strip()
+                    cfg = st.session_state.db.setdefault("系统配置", {})
+                    if phrase:
+                        if learn_type == "部件关键词":
+                            cfg.setdefault("AI_COMP_KW", {})[phrase] = fix_comp
+                        elif learn_type == "部件分叉词":
+                            cfg.setdefault("AI_SPLIT_COMP_KW", {})[phrase] = fix_comp
+                        elif learn_type == "人员别名":
+                            canonical = str(canonical_people).strip()
+                            if canonical:
+                                cfg.setdefault("人员别名", {})[phrase] = canonical
+                    sync_save_db("系统配置")
+                    st.success("待确认记录已修正，并按你的选择写入词典。")
+                    st.rerun()
 
     with st.expander("\u56e2\u961f\u6210\u5458\u7ef4\u62a4\uff08\u65b0\u589e / \u66ff\u6362 / \u5220\u9664 + \u540e\u6094\u836f\uff09", expanded=True):
         st.caption("\u7edf\u4e00\u5165\u53e3\uff1a\u652f\u6301\u65b0\u589e\u6210\u5458\u6c60\u3001\u6309\u6761\u4ef6\u66ff\u6362/\u5220\u9664\uff0c\u5e76\u53ef\u64a4\u9500\u4e0a\u4e00\u6b65\u8bef\u64cd\u4f5c\u3002")
