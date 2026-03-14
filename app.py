@@ -8272,6 +8272,82 @@ elif menu == MENU_HISTORY:
                 st.dataframe(pd.DataFrame(hist_rows), width="stretch", hide_index=True)
     else:
         st.caption("暂无关联此项目的待办历史。")
+
+    standard_events = [
+        evt for evt in db.get("系统配置", {}).get("标准事件流", [])
+        if str(evt.get("项目", "")).strip() == str(sel_proj).strip()
+    ]
+
+    st.divider()
+    st.subheader("🔗 统一事件时间线（跨入口互通视图）")
+    st.caption("这里会把 To-do、全局大盘、PM 工作台等不同入口的写入，收束成同一种事件结构，便于你回看系统是怎么理解和联动的。")
+    if standard_events:
+        event_source_opts = ["全部来源"] + sorted({
+            str(evt.get("来源", "")).strip() for evt in standard_events if str(evt.get("来源", "")).strip()
+        })
+        event_action_opts = ["全部动作"] + sorted({
+            str(evt.get("动作", "")).strip() for evt in standard_events if str(evt.get("动作", "")).strip()
+        })
+        event_comp_opts = ["全部部件"] + sorted({
+            str(evt.get("部件", "")).strip() for evt in standard_events if str(evt.get("部件", "")).strip()
+        })
+
+        e1, e2, e3 = st.columns([1, 1, 1.2])
+        with e1:
+            sel_event_source = st.selectbox("来源筛选", event_source_opts, key=f"std_evt_src_{norm_text(sel_proj)}")
+        with e2:
+            sel_event_action = st.selectbox("动作筛选", event_action_opts, key=f"std_evt_act_{norm_text(sel_proj)}")
+        with e3:
+            sel_event_comp = st.selectbox("部件筛选", event_comp_opts, key=f"std_evt_comp_{norm_text(sel_proj)}")
+
+        filtered_events = []
+        for evt in standard_events:
+            src = str(evt.get("来源", "")).strip()
+            act = str(evt.get("动作", "")).strip()
+            comp = str(evt.get("部件", "")).strip()
+            if sel_event_source != "全部来源" and src != sel_event_source:
+                continue
+            if sel_event_action != "全部动作" and act != sel_event_action:
+                continue
+            if sel_event_comp != "全部部件" and comp != sel_event_comp:
+                continue
+            filtered_events.append(evt)
+
+        filtered_events = sorted(
+            filtered_events,
+            key=lambda x: (
+                str(x.get("日期", "")),
+                str(x.get("写入时间", "")),
+                str(x.get("_id", "")),
+            ),
+            reverse=True,
+        )
+
+        st.caption(f"当前命中 {len(filtered_events)} 条统一事件。适合排查“这条信息从哪里写入、系统为什么生成待办/历史”。")
+        if filtered_events:
+            event_rows = []
+            for evt in filtered_events:
+                todo_links = [str(x).strip() for x in (evt.get("关联待办", []) or []) if str(x).strip()]
+                event_rows.append({
+                    "日期": str(evt.get("日期", "")),
+                    "来源": str(evt.get("来源", "")),
+                    "动作": str(evt.get("动作", "")),
+                    "部件": str(evt.get("部件", "")) or "-",
+                    "阶段": str(evt.get("阶段", "")) or "-",
+                    "内容": str(evt.get("内容", "")),
+                    "原始文本": str(evt.get("原始文本", "")),
+                    "关联人员": str(evt.get("关联人员", "")) or "-",
+                    "关联待办": " / ".join(todo_links) if todo_links else "-",
+                    "意图": str(evt.get("意图", "")) or "-",
+                    "操作者": str(evt.get("操作者", "")) or "-",
+                    "写入时间": str(evt.get("写入时间", "")) or "-",
+                })
+            st.dataframe(pd.DataFrame(event_rows), width="stretch", hide_index=True)
+        else:
+            st.caption("当前筛选条件下暂无统一事件。")
+    else:
+        st.caption("这个项目还没有统一事件记录。后续从 To-do / 全局大盘 / PM 工作台写入后，会自动在这里汇总。")
+
     if flat_data:
         df_logs = pd.DataFrame(flat_data).sort_values(by="日期", ascending=False).reset_index(drop=True)
         df_logs.insert(0, '序号', range(len(df_logs), 0, -1))
