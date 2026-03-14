@@ -387,6 +387,18 @@ DEFAULT_STAGE_KEYWORDS = {
     "大货": "大货",
     "完成": "✅ 已完成(结束)", "结束": "✅ 已完成(结束)",
 }
+DEFAULT_COMPONENT_SPLIT_KEYWORDS = {
+    "头雕": "头雕(表情)",
+    "表情": "头雕(表情)",
+    "脸": "头雕(表情)",
+    "植发": "植发",
+    "头发": "植发",
+    "手型": "手型",
+    "服装": "服装",
+    "包装": "包装",
+    "地台": "地台",
+    "配件": "配件",
+}
 DEFAULT_RECOGNITION_DICT = {
     "未来意图词": ["待", "待办", "需要", "需", "跟进", "跟催", "补", "安排", "todo", "to do", "ddl", "cp", "待审", "待反馈", "待版权", "预计", "预计出", "预计给出", "即将"],
     "过去意图词": ["已", "已经", "完成", "完毕", "通过", "收到", "确认了", "确认完成", "看过", "on-hand", "on hand", "done", "ok", "提交", "已提交", "已提审", "提审通过", "已发"],
@@ -404,6 +416,8 @@ DEFAULT_SYS_CFG = {
     "项目别名": {},
     "AI_COMP_KW":  {},
     "AI_STAGE_KW":  {},
+    "AI_SPLIT_COMP_KW": {},
+    "人员别名": {},
     "识别词典": json.loads(json.dumps(DEFAULT_RECOGNITION_DICT, ensure_ascii=False)),
     "打印追踪列表": [],
     "打印地点选项": PRINT_TRACK_LOCATION_DEFAULTS.copy()
@@ -440,6 +454,28 @@ def get_stage_keyword_map():
     out = dict(DEFAULT_STAGE_KEYWORDS)
     out.update({str(k).strip(): str(v).strip() for k, v in sys_map.items() if str(k).strip() and str(v).strip()})
     return out
+
+
+def get_component_split_keyword_map():
+    cfg = st.session_state.db.setdefault("系统配置", {}) if "db" in st.session_state else DEFAULT_DB.setdefault("系统配置", {})
+    sys_map = cfg.get("AI_SPLIT_COMP_KW", {}) if isinstance(cfg.get("AI_SPLIT_COMP_KW", {}), dict) else {}
+    out = dict(DEFAULT_COMPONENT_SPLIT_KEYWORDS)
+    out.update({str(k).strip(): str(v).strip() for k, v in sys_map.items() if str(k).strip() and str(v).strip()})
+    return out
+
+
+def get_people_alias_map():
+    cfg = st.session_state.db.setdefault("系统配置", {}) if "db" in st.session_state else DEFAULT_DB.setdefault("系统配置", {})
+    raw = cfg.get("人员别名", {}) if isinstance(cfg.get("人员别名", {}), dict) else {}
+    return {norm_text(k): str(v).strip() for k, v in raw.items() if str(k).strip() and str(v).strip()}
+
+
+def resolve_people_alias(raw_label):
+    token = str(raw_label or "").strip()
+    if not token:
+        return ""
+    alias_map = get_people_alias_map()
+    return alias_map.get(norm_text(token), token)
 
 
 def get_recognition_keywords(list_key):
@@ -2016,7 +2052,7 @@ def todo_link_status_text(td):
 
 
 def parse_role_person_label(raw_label):
-    token = str(raw_label or "").strip()
+    token = resolve_people_alias(raw_label)
     if not token:
         return "综合", ""
     if "-" in token:
@@ -2263,6 +2299,7 @@ def infer_todo_people_bundle(td):
             unknown.append(token)
 
     for token in split_people_text(td_obj.get("关联人员", "")):
+        token = resolve_people_alias(token)
         token_norm = norm_text(token)
         if token_norm in label_map:
             add_match(label_map[token_norm])
@@ -2278,6 +2315,12 @@ def infer_todo_people_bundle(td):
 
     free_text = f"{str(td_obj.get('任务', '')).strip()} {todo_cpddl_text(td_obj)}".strip()
     txt_norm = norm_text(free_text)
+    alias_map = get_people_alias_map()
+    for alias_norm, canonical_label in alias_map.items():
+        if alias_norm and alias_norm in txt_norm:
+            role, person = parse_role_person_label(canonical_label)
+            final_label = f"{role}-{person}" if role != "综合" else person
+            add_match(final_label)
     for label in labels:
         label_norm = norm_text(label)
         if label_norm and label_norm in txt_norm:
@@ -2581,6 +2624,7 @@ def get_latest_standard_event_binding(project_name):
 
     events = db.get("系统配置", {}).get("标准事件流", [])
     source_weight = {
+        "历史溯源": 5,
         "PM工作台": 4,
         "全局大盘": 3,
         "To-do": 2,
@@ -2680,6 +2724,29 @@ def build_project_current_explanation(project_name):
         "意图": "",
         "模式": "空",
     }
+
+
+def append_history_refresh_standard_event(project_name, actor="系统"):
+    proj = str(project_name or "").strip()
+    if (not proj) or proj not in db:
+        return False
+    binding = get_latest_project_log_binding(proj)
+    if not binding or not isinstance(binding.get("log"), dict):
+        return False
+    lg = binding["log"]
+    evt_date = parse_date_safe(str(lg.get("日期", "")).strip()) or datetime.date.today()
+    return append_standard_event_entry(
+        source_module="历史溯源",
+        action_type="同步当前解释",
+        project_name=proj,
+        event_date=evt_date,
+        component_name=str(binding.get("component", "")).strip(),
+        stage_name=str(lg.get("工序", "")).strip(),
+        content_text=str(lg.get("事件", "")).strip(),
+        raw_text=str(lg.get("事件", "")).strip(),
+        actor=actor,
+        extra_payload={"来源流转": str(lg.get("流转", "")).strip()},
+    )
 
 
 def append_todo_completion_history(td, action_date=None):
@@ -6555,6 +6622,11 @@ if menu == MENU_DASHBOARD:
                 ("\u670d\u88c5", "\u670d\u88c5"), ("\u5305\u88c5", "\u5305\u88c5"),
                 ("\u5168\u5c40", "\u5168\u5c40\u8fdb\u5ea6"), ("\u6574\u4f53", "\u5168\u5c40\u8fdb\u5ea6"),
             ]
+            for kw, target in get_component_split_keyword_map().items():
+                if kw and kw in txt:
+                    picked = _pick_component(target)
+                    if picked:
+                        return picked
             for kw, target in comp_hint_pairs:
                 if kw in txt:
                     picked = _pick_component(target)
@@ -9010,10 +9082,17 @@ elif menu == MENU_HISTORY:
                                     touched_projects.add(proj_name)
 
                     if touched_projects:
+                        history_event_dirty = False
                         for proj_name in sorted(touched_projects):
                             for c_info in db.get(proj_name, {}).get("部件列表", {}).values():
                                 c_info["日志流"] = sorted(c_info.get("日志流", []), key=lambda x: str((x or {}).get("日期", "")))
                             sync_save_db(proj_name)
+                            history_event_dirty = append_history_refresh_standard_event(
+                                proj_name,
+                                actor=current_pm if current_pm != "所有人" else "系统",
+                            ) or history_event_dirty
+                        if history_event_dirty:
+                            sync_save_db("系统配置")
 
                         msg = f"当日修正已保存：更新 {update_count} 条，删除 {delete_count} 条，影响 {len(touched_projects)} 个项目。"
                         if day_errors:
@@ -9080,6 +9159,8 @@ elif menu == MENU_HISTORY:
                         new_logs_by_comp.get(c, []), key=lambda x: x.get("日期", "")
                     )
             sync_save_db(sel_proj)
+            if append_history_refresh_standard_event(sel_proj, actor=current_pm if current_pm != "所有人" else "系统"):
+                sync_save_db("系统配置")
             st.success("✅ 历史记录已更新！")
             st.rerun()
 
@@ -9319,6 +9400,8 @@ elif menu == MENU_SETTINGS:
         current_rec = get_recognition_dict()
         current_comp_kw = get_component_keyword_map()
         current_stage_kw = get_stage_keyword_map()
+        current_split_kw = get_component_split_keyword_map()
+        current_people_alias = st.session_state.db.setdefault("系统配置", {}).get("人员别名", {})
 
         col_d1, col_d2 = st.columns(2)
         with col_d1:
@@ -9351,17 +9434,32 @@ elif menu == MENU_SETTINGS:
                 key="dict_past_kw_text",
             )
         with col_d4:
+            split_kw_text = st.text_area(
+                "部件分叉词（每行 `关键词=部件`）",
+                value=_format_keyword_map_text(current_split_kw),
+                height=170,
+                key="dict_split_kw_text",
+            )
             date_noise_text = st.text_area(
                 "日期噪音词（每行一个）",
                 value=_format_keyword_list_text(current_rec.get("日期噪音词", [])),
                 height=170,
                 key="dict_date_noise_text",
             )
+        col_d4b1, col_d4b2 = st.columns(2)
+        with col_d4b1:
             resume_kw_text = st.text_area(
                 "恢复推进词（每行一个）",
                 value=_format_keyword_list_text(current_rec.get("恢复推进词", [])),
                 height=170,
                 key="dict_resume_kw_text",
+            )
+        with col_d4b2:
+            people_alias_text = st.text_area(
+                "人员别名（每行 `别名=角色-姓名`）",
+                value=_format_keyword_map_text(current_people_alias),
+                height=170,
+                key="dict_people_alias_text",
             )
 
         col_d5, col_d6 = st.columns(2)
@@ -9384,6 +9482,8 @@ elif menu == MENU_SETTINGS:
             cfg = st.session_state.db.setdefault("系统配置", {})
             cfg["AI_COMP_KW"] = _parse_keyword_map_text(comp_kw_text)
             cfg["AI_STAGE_KW"] = _parse_keyword_map_text(stage_kw_text)
+            cfg["AI_SPLIT_COMP_KW"] = _parse_keyword_map_text(split_kw_text)
+            cfg["人员别名"] = _parse_keyword_map_text(people_alias_text)
             cfg["识别词典"] = {
                 "未来意图词": _parse_keyword_list_text(future_kw_text),
                 "过去意图词": _parse_keyword_list_text(past_kw_text),
