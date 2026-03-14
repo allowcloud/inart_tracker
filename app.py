@@ -1366,6 +1366,12 @@ def get_macro_phase(detail_stage, event_text="", comp_name="", proj_label="", pr
         return "结束"
     if "暂停" in s or "搁置" in s:
         return "暂停"
+    global_pause_signal = (
+        "全局" in str(comp_name or "")
+        and any(kw in evt for kw in ["确认取消", "项目取消", "暂停", "搁置", "叫停", "冻结", "停做", "先停"])
+    )
+    if global_pause_signal:
+        return "暂停"
     if any(x in s for x in ["大货", "复样", "量产", "开定"]):
         return "生产"
     if "模具" in s or "开模" in s:
@@ -6683,7 +6689,6 @@ if menu == MENU_DASHBOARD:
                     showlegend=False,
                     hoverinfo="skip",
                 ))
-        fig.update_yaxes(autorange="reversed")
         fig.update_layout(height=max(400, len(df_g['项目'].unique()) * 45))
         st.plotly_chart(fig, width='stretch')
 
