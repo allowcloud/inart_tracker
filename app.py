@@ -995,6 +995,27 @@ def normalize_review_round(v):
         return ""
 
 
+def has_copyright_review_context(txt):
+    s = str(txt or "").strip().lower()
+    if not s:
+        return False
+    strong_terms = ["提审", "过审", "打回", "驳回", "退回", "版权", "版权方", "版权审核", "待版权", "wf"]
+    if any(k in s for k in strong_terms):
+        return True
+    if "review" in s and any(k in s for k in ["wf", "版权", "copyright"]):
+        return True
+    return False
+
+
+def is_real_review_log(log_obj):
+    lg = log_obj or {}
+    review_type = str(lg.get("提审类型", "")).strip()
+    if review_type and review_type != "(无)":
+        return True
+    evt = str(lg.get("事件", "")).strip()
+    return has_copyright_review_context(evt)
+
+
 
 # --- End bootstrap fallback ---
 # ==========================================
@@ -1520,6 +1541,8 @@ def validate_transition_warning(curr_stage, next_stage, stages):
 
 def infer_review_type_from_text(txt):
     s = str(txt).lower()
+    if not has_copyright_review_context(txt):
+        return "(无)"
     if "2d" in s and "提审" in s:
         return "2D提审"
     if "3d" in s and "提审" in s:
@@ -1532,11 +1555,13 @@ def infer_review_type_from_text(txt):
 
 def infer_review_result_from_text(txt):
     s = str(txt).lower()
-    if any(k in s for k in ["通过", "ok", "pass"]):
-        return "通过"
+    if not has_copyright_review_context(txt):
+        return "(无)"
     if any(k in s for k in ["打回", "驳回", "退回"]):
         return "打回"
-    if "提审" in s:
+    if any(k in s for k in ["通过", "过审", "ok", "pass"]):
+        return "通过"
+    if any(k in s for k in ["提审", "版权", "review", "wf"]):
         return "待反馈"
     return "(无)"
 
@@ -2475,8 +2500,77 @@ def merge_project_into_target(merge_src, merge_dst, learned_aliases=None):
     return True
 
 
+def delete_project_and_refs(project_name):
+    pick = str(project_name or "").strip()
+    if not pick or pick == "系统配置" or pick not in db:
+        return False
+
+    cfg = db.setdefault("系统配置", {})
+    todo_all = cfg.setdefault("PM_TODO_LIST", [])
+    for td in todo_all:
+        proj_list = [p for p in normalize_todo_project_list(td.get("关联项目列表", [])) if p != pick]
+        legacy = [p for p in normalize_todo_project_list([td.get("关联项目", "")]) if p != pick]
+        merged = list(dict.fromkeys(proj_list + legacy))
+        td["关联项目列表"] = merged
+        td["关联项目"] = merged[0] if merged else ""
+        if str(td.get("最近联动项目", "")).strip() == pick:
+            td["最近联动项目"] = ""
+
+    events = cfg.get("标准事件流", [])
+    if isinstance(events, list):
+        new_events = []
+        for evt in events:
+            if not isinstance(evt, dict):
+                continue
+            proj_list = [p for p in normalize_todo_project_list(evt.get("项目列表", [])) if p != pick]
+            main_proj = canonicalize_project_name(evt.get("项目", ""))
+            if main_proj == pick:
+                main_proj = proj_list[0] if proj_list else ""
+            evt["项目列表"] = proj_list
+            evt["项目"] = main_proj
+            if evt["项目"] or evt["项目列表"]:
+                new_events.append(evt)
+        cfg["标准事件流"] = new_events
+
+    alias_map = cfg.get("项目别名", {})
+    if isinstance(alias_map, dict):
+        cfg["项目别名"] = {
+            k: v for k, v in alias_map.items()
+            if norm_text(k) != norm_text(pick) and str(v).strip() != pick
+        }
+
+    db.pop(pick, None)
+    return True
+
+
 def split_people_text(raw_text):
     return [x.strip() for x in re.split(r'[,，;；、/|\n]+', str(raw_text or "")) if x.strip()]
+
+
+def is_noise_people_candidate(token):
+    raw = str(token or "").strip()
+    if not raw:
+        return True
+    cleaned = re.sub(r"(确认|跟进|处理|回复|反馈|配置|对接|安排|同步|沟通)$", "", raw).strip()
+    if not cleaned:
+        return True
+    noise_terms = [
+        "头雕", "植发", "发髻", "眼镜", "服装", "配件", "地台", "包装", "刀线", "彩盒", "灰箱",
+        "说明书", "电影票", "合格证", "感谢信", "效果", "项目", "配置", "确认", "审核", "提审"
+    ]
+    if any(x in cleaned for x in noise_terms):
+        return True
+    return False
+
+
+def clean_people_candidate_token(token):
+    raw = str(token or "").strip()
+    if not raw:
+        return ""
+    cleaned = re.sub(r"(确认|跟进|处理|回复|反馈|配置|对接|安排|同步|沟通)$", "", raw).strip(" -:：")
+    if is_noise_people_candidate(cleaned):
+        return ""
+    return cleaned
 
 
 def normalize_people_text(raw_text):
@@ -2506,6 +2600,9 @@ def infer_todo_people_bundle(td):
             unknown.append(token)
 
     for token in split_people_text(td_obj.get("关联人员", "")):
+        token = clean_people_candidate_token(token)
+        if not token:
+            continue
         token = resolve_people_alias(token)
         token_norm = norm_text(token)
         if token_norm in label_map:
@@ -2548,7 +2645,9 @@ def infer_todo_people_bundle(td):
         r'([A-Za-z][A-Za-z0-9_\-]{1,20}|[\u4e00-\u9fa5]{2,4})\s*(?:确认|跟进|处理|回复|反馈)'
     ]:
         for m in re.finditer(pat, free_text):
-            candidate = str(m.group(1)).strip()
+            candidate = clean_people_candidate_token(m.group(1))
+            if not candidate:
+                continue
             candidate_norm = norm_text(candidate)
             if candidate_norm in label_map or candidate_norm in name_map:
                 continue
@@ -4889,7 +4988,10 @@ def _normalize_packing_board(pack_raw):
         })
 
     return {
-        "配置": {"需要大物流箱": bool(cfg.get("需要大物流箱", False))},
+        "配置": {
+            "需要大物流箱": bool(cfg.get("需要大物流箱", False)),
+            "重量信息": str(cfg.get("重量信息", "")).strip(),
+        },
         "阶段清单": checklist,
         "提审记录": norm_reviews,
     }
@@ -4904,11 +5006,21 @@ def render_packing_lightweight_board(sel_proj, ui_prefix="pack_board"):
     review_rounds = list(board.get("提审记录", []))
     cfg = dict(board.get("配置", {}))
 
-    need_large_box = st.checkbox(
-        "建档配置：是否需要大物流箱",
-        value=bool(cfg.get("需要大物流箱", False)),
-        key=f"{ui_prefix}_need_large_box",
-    )
+    cfg_c1, cfg_c2 = st.columns([1, 1.2])
+    with cfg_c1:
+        need_large_box = st.checkbox(
+            "建档配置：是否需要大物流箱",
+            value=bool(cfg.get("需要大物流箱", False)),
+            key=f"{ui_prefix}_need_large_box",
+        )
+    with cfg_c2:
+        weight_info = st.text_input(
+            "内部称重信息",
+            value=str(cfg.get("重量信息", "")).strip(),
+            key=f"{ui_prefix}_weight_info",
+            placeholder="例：内容物 2.3kg；彩盒+内容物 3.1kg",
+            help="和“内部已称重”联动保存，方便后续给包装设计师提供重量数据。",
+        )
 
     stage1_items = [
         ("前置_实物已寄包装厂", "实物已寄包装厂"),
@@ -4962,6 +5074,8 @@ def render_packing_lightweight_board(sel_proj, ui_prefix="pack_board"):
                 )
 
     _render_stage("阶段一：前置准备", stage1_items, cols_n=3)
+    if new_checklist.get("前置_内部已称重", False):
+        st.caption(f"当前重量信息：{weight_info or '未填写'}")
     _render_stage("阶段二：设计（并行）", stage2_items, cols_n=4)
 
     with st.expander("说明书子流程（中文版→2D图→翻译→排版→定稿）", expanded=any(bool(checklist.get(k, False)) for k, _ in manual_items)):
@@ -4998,7 +5112,7 @@ def render_packing_lightweight_board(sel_proj, ui_prefix="pack_board"):
                 "结果": rv_result,
                 "打回原因": str(rv_reason).strip() if rv_result == "打回" else "",
             })
-            board["配置"] = {"需要大物流箱": bool(need_large_box)}
+            board["配置"] = {"需要大物流箱": bool(need_large_box), "重量信息": str(weight_info).strip()}
             board["阶段清单"] = new_checklist
             board["提审记录"] = review_rounds
             db[sel_proj]["包装专项"] = board
@@ -5057,7 +5171,7 @@ def render_packing_lightweight_board(sel_proj, ui_prefix="pack_board"):
                     "打回原因": reason_txt,
                 })
 
-            board["配置"] = {"需要大物流箱": bool(need_large_box)}
+            board["配置"] = {"需要大物流箱": bool(need_large_box), "重量信息": str(weight_info).strip()}
             board["阶段清单"] = new_checklist
             board["提审记录"] = new_reviews
             db[sel_proj]["包装专项"] = board
@@ -5076,7 +5190,7 @@ def render_packing_lightweight_board(sel_proj, ui_prefix="pack_board"):
         new_checklist["设计_物流箱大"] = False
 
     if st.button("💾 保存包装看板", type="primary", key=f"{ui_prefix}_save"):
-        board["配置"] = {"需要大物流箱": bool(need_large_box)}
+        board["配置"] = {"需要大物流箱": bool(need_large_box), "重量信息": str(weight_info).strip()}
         board["阶段清单"] = new_checklist
         board["提审记录"] = review_rounds
         db[sel_proj]["包装专项"] = board
@@ -6879,12 +6993,10 @@ if menu == MENU_DASHBOARD:
                     dt = _parse_log_date(lg)
                     if not dt:
                         continue
+                    if not is_real_review_log(lg):
+                        continue
                     evt = str(lg.get("事件", "")).strip()
                     review_type = str(lg.get("提审类型", "")).strip()
-                    if review_type and review_type != "(无)":
-                        pass
-                    elif not any(x in evt.lower() for x in ["review", "提审", "审核", "过审", "打回", "退回"]):
-                        continue
                     key = (proj_label, dt, review_type, evt, comp_name)
                     if key in review_seen:
                         continue
@@ -8005,19 +8117,20 @@ elif menu == MENU_SPECIFIC:
                 for _lg in _ci.get("日志流", []):
                     if is_hidden_system_log(_lg):
                         continue
+                    if not is_real_review_log(_lg):
+                        continue
                     _rt = str(_lg.get("提审类型", "")).strip()
                     _rr = str(_lg.get("提审结果", "")).strip()
                     _rd = normalize_review_round(_lg.get("提审轮次", ""))
-                    if (_rt and _rt != "(无)") or (_rr and _rr != "(无)"):
-                        review_rows.append({
-                            "日期": str(_lg.get("日期", "")),
-                            "部件": _cn,
-                            "阶段": str(_lg.get("工序", "")),
-                            "提审类型": _rt if _rt else "(无)",
-                            "提审结果": _rr if _rr else "(无)",
-                            "轮次": _rd if _rd else "",
-                            "事件": str(_lg.get("事件", ""))
-                        })
+                    review_rows.append({
+                        "日期": str(_lg.get("日期", "")),
+                        "部件": _cn,
+                        "阶段": str(_lg.get("工序", "")),
+                        "提审类型": _rt if _rt else "(无)",
+                        "提审结果": _rr if _rr else "(无)",
+                        "轮次": _rd if _rd else "",
+                        "事件": str(_lg.get("事件", ""))
+                    })
             if review_rows:
                 df_rv = pd.DataFrame(review_rows).sort_values(by=["日期", "部件"], ascending=[False, True])
                 st.dataframe(df_rv, width='stretch', hide_index=True)
@@ -8181,32 +8294,38 @@ elif menu == MENU_SPECIFIC:
     timeline_logs = _collect_timeline_logs(sel_proj)
     log_attachments = db[sel_proj].setdefault("log_attachments", {})
 
-    with st.expander("📋 最近日志时间线（可挂图）", expanded=True):
+    with st.expander("📋 最近日志时间线（可挂图）", expanded=False):
         if not timeline_logs:
             st.caption("当前项目暂无可展示日志。")
         else:
-            for idx, lg in enumerate(timeline_logs[:30]):
+            show_all_logs = st.checkbox("显示更多日志", value=False, key=f"wb_show_more_{sel_proj}")
+            visible_logs = timeline_logs[:30] if show_all_logs else timeline_logs[:10]
+            for idx, lg in enumerate(visible_logs):
                 log_id = str(lg.get("_log_id", "")).strip()
                 log_key = hashlib.md5(log_id.encode("utf-8", "ignore")).hexdigest()[:10]
                 attach_pool = list(log_attachments.get(log_id, [])) + list(lg.get("imgs", []) or [])
                 attach_pool = list(dict.fromkeys([x for x in attach_pool if x]))
 
-                meta = " | ".join([x for x in [str(lg.get("date", "")), str(lg.get("comp", "")), str(lg.get("stage", "")), str(lg.get("source", ""))] if x])
-                st.caption(meta if meta else "-")
-                st.markdown(str(lg.get("text", "")).strip() or "_(无内容)_")
+                with st.container(border=True):
+                    meta = " | ".join([x for x in [str(lg.get("date", "")), str(lg.get("comp", "")), str(lg.get("stage", "")), str(lg.get("source", ""))] if x])
+                    head_c1, head_c2 = st.columns([6, 1.2])
+                    with head_c1:
+                        st.caption(meta if meta else "-")
+                    open_key = f"wb_attach_open_{sel_proj}"
+                    with head_c2:
+                        if st.button("📎 挂图", key=f"wb_attach_btn_{sel_proj}_{log_key}"):
+                            st.session_state[open_key] = log_id
 
-                if attach_pool:
-                    img_cols = st.columns(min(len(attach_pool), 4))
-                    for ii, img_ref in enumerate(attach_pool[:4]):
-                        with img_cols[ii % 4]:
-                            render_image(img_ref, width='stretch')
+                    st.markdown(str(lg.get("text", "")).strip() or "_(无内容)_")
 
-                open_key = f"wb_attach_open_{sel_proj}"
-                if st.button("📎 给这条挂图", key=f"wb_attach_btn_{sel_proj}_{log_key}"):
-                    st.session_state[open_key] = log_id
+                    if attach_pool:
+                        with st.expander(f"查看图片（{len(attach_pool)}）", expanded=False):
+                            img_cols = st.columns(min(len(attach_pool), 4))
+                            for ii, img_ref in enumerate(attach_pool[:4]):
+                                with img_cols[ii % 4]:
+                                    render_image(img_ref, width='stretch')
 
-                if st.session_state.get(open_key) == log_id:
-                    with st.container(border=True):
+                    if st.session_state.get(open_key) == log_id:
                         up_imgs = st.file_uploader(
                             "上传图片",
                             type=["png", "jpg", "jpeg"],
@@ -8261,7 +8380,6 @@ elif menu == MENU_SPECIFIC:
                             if st.button("取消", key=f"wb_attach_cancel_{sel_proj}_{log_key}"):
                                 st.session_state[open_key] = ""
                                 st.rerun()
-                st.divider()
 
     with st.container(border=True):
         st.markdown("**✍️ 新建一条流转记录**")
@@ -9903,18 +10021,35 @@ elif menu == MENU_SETTINGS:
                     elif pick not in db or pick == "系统配置":
                         st.warning("该项目不存在或不可删除。")
                     else:
-                        cfg = db.setdefault("系统配置", {})
-                        todo_all = cfg.setdefault("PM_TODO_LIST", [])
-                        for td in todo_all:
-                            proj_list = [p for p in normalize_todo_project_list(td.get("关联项目列表", [])) if p != pick]
-                            td["关联项目列表"] = proj_list
-                            td["关联项目"] = proj_list[0] if proj_list else ""
-                            if str(td.get("最近联动项目", "")).strip() == pick:
-                                td["最近联动项目"] = ""
-                        db.pop(pick, None)
+                        delete_project_and_refs(pick)
                         sync_save_db()
                         st.success(f"已删除可疑项目：{pick}")
                         st.rerun()
+
+            manual_delete_options = sorted([p for p in all_proj_names if p and p != "系统配置"])
+            with st.expander("🗑 手动选择要删除的项目", expanded=False):
+                st.caption("自动清理猜不中时，直接由你勾选。会同步清理 To-do 关联项目和标准事件流里的引用。")
+                manual_delete_pick = st.multiselect(
+                    "选择要删除的项目",
+                    manual_delete_options,
+                    key="manual_project_delete_pick",
+                    placeholder="可搜索，例如 6威龙、6早川秋",
+                )
+                if st.button("🧨 删除选中的项目", key="btn_delete_manual_projects"):
+                    picked = [str(x).strip() for x in manual_delete_pick if str(x).strip()]
+                    if not picked:
+                        st.warning("请先选择要删除的项目。")
+                    else:
+                        removed = []
+                        for pick in picked:
+                            if delete_project_and_refs(pick):
+                                removed.append(pick)
+                        if removed:
+                            sync_save_db()
+                            st.success(f"已删除 {len(removed)} 个项目：{'；'.join(removed[:8])}")
+                            st.rerun()
+                        else:
+                            st.info("没有可删除的项目。")
 
             alias_map = st.session_state.db["系统配置"].get("项目别名", {})
             if alias_map:
