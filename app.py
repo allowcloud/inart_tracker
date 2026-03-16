@@ -12,6 +12,7 @@ import io
 import tempfile
 import hashlib
 import zipfile
+from difflib import SequenceMatcher
 from collections import Counter
 from decimal import Decimal
 from functools import lru_cache
@@ -102,6 +103,66 @@ def detect_project_name_noise_pairs(project_names):
                     continue
                 seen.add(key)
                 rows.append({"异常项目": src, "建议并入": candidate, "原因": reason})
+    return rows
+
+
+def _split_project_ratio_and_body(name):
+    txt = str(name or "").strip()
+    m = re.match(r"^(1/\d+)\s*(.+)$", txt)
+    if m:
+        return str(m.group(1)).strip(), str(m.group(2)).strip()
+    return "", txt
+
+
+def _project_similarity_key(name):
+    _ratio, body = _split_project_ratio_and_body(name)
+    cleaned = str(body or "").strip()
+    cleaned = re.sub(r"[\s\-_—–·・/]+", "", cleaned)
+    cleaned = re.sub(r"[（(][^）)]*[）)]", "", cleaned)
+    return norm_text(cleaned)
+
+
+def detect_high_similarity_project_pairs(project_names):
+    names = [str(x).strip() for x in (project_names or []) if str(x).strip() and str(x).strip() != "系统配置"]
+    rows = []
+    seen = set()
+    for i in range(len(names)):
+        a = names[i]
+        ratio_a, body_a = _split_project_ratio_and_body(a)
+        key_a = _project_similarity_key(a)
+        if len(key_a) < 2:
+            continue
+        for j in range(i + 1, len(names)):
+            b = names[j]
+            ratio_b, body_b = _split_project_ratio_and_body(b)
+            if ratio_a and ratio_b and ratio_a != ratio_b:
+                continue
+            key_b = _project_similarity_key(b)
+            if len(key_b) < 2 or key_a == key_b:
+                continue
+
+            sim = SequenceMatcher(None, key_a, key_b).ratio()
+            contains = key_a in key_b or key_b in key_a
+            short_upper_pair = bool(re.fullmatch(r"[A-Za-z0-9]{2,5}", body_a or "")) and bool(re.fullmatch(r"[A-Za-z0-9]{2,5}", body_b or ""))
+            if short_upper_pair:
+                matched = sim >= 0.55
+            else:
+                matched = contains or sim >= 0.74
+            if not matched:
+                continue
+
+            preferred = a if (len(a) <= len(b)) else b
+            suspicious = b if preferred == a else a
+            key = tuple(sorted([preferred, suspicious]))
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append({
+                "异常项目": suspicious,
+                "建议并入": preferred,
+                "相似度": f"{sim:.0%}",
+                "原因": "高相似度待确认",
+            })
     return rows
 
 
@@ -10143,6 +10204,35 @@ elif menu == MENU_SETTINGS:
                             st.info("当前没有可执行的命名噪音清理。")
                 else:
                     st.caption("当前没有检测到明显的项目名噪音候选。")
+
+            sim_pairs = detect_high_similarity_project_pairs(all_proj_names)
+            with st.expander("🧪 高相似度项目名待确认", expanded=False):
+                st.caption("这里收的是可能录错、也可能真的是不同项目的名字。不会默认全选，由你人工决定是否合并。")
+                if sim_pairs:
+                    sim_df = pd.DataFrame(sim_pairs).sort_values(by=["相似度", "建议并入", "异常项目"], ascending=[False, True, True])
+                    st.dataframe(sim_df, width="stretch", hide_index=True)
+                    sim_labels = [f"{row['异常项目']} → {row['建议并入']}｜{row['相似度']}" for row in sim_pairs]
+                    picked_sim = st.multiselect(
+                        "选择确认要合并的高相似度项目",
+                        sim_labels,
+                        key="project_name_similarity_pick",
+                        placeholder="例如：1/12KDA、1/12TDK、Neo 大小写差异",
+                    )
+                    if st.button("🧩 合并这些高相似度项目", key="btn_merge_similarity_projects"):
+                        cleaned = []
+                        for label in picked_sim:
+                            src, rest = label.split(" → ", 1)
+                            dst, _score = rest.split("｜", 1)
+                            if merge_project_into_target(src.strip(), dst.strip(), learned_aliases=[src.strip()]):
+                                cleaned.append(f"{src.strip()} → {dst.strip()}")
+                        if cleaned:
+                            sync_save_db()
+                            st.success(f"已合并 {len(cleaned)} 个高相似度项目：{'；'.join(cleaned[:8])}")
+                            st.rerun()
+                        else:
+                            st.info("没有执行任何高相似度项目合并。")
+                else:
+                    st.caption("当前没有检测到需要人工确认的高相似度项目。")
 
             alias_map = st.session_state.db["系统配置"].get("项目别名", {})
             if alias_map:
