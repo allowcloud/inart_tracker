@@ -299,6 +299,16 @@ def collect_stage_activity(raw_logs, stages):
             active_stages.add(stg)
             if any(k in evt for k in ["彻底完成", "OK", "通过", "完结", "结束", "撒花"]):
                 active_stages.discard(stg); completed_stages.add(stg)
+        evt_txt = str(evt or "")
+        evt_norm = norm_text(evt_txt)
+        if any(sig in evt_norm for sig in [
+            "设计将文件转交给工程", "设计交接工程", "转交给工程", "下发工程",
+            "发给工程", "交给工程", "工程接收", "工程已接收", "工程开始"
+        ]):
+            if "设计" in stages:
+                active_stages.add("设计")
+            if "工程拆件" in stages:
+                active_stages.add("工程拆件")
     if active_stages or completed_stages:
         active_stages.discard("立项"); completed_stages.add("立项")
     return active_stages, completed_stages
@@ -4266,7 +4276,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
                 td["创建者视角"] = scope_val
 
             if new_done and not prev_done:
-                done_date = due_dt or datetime.date.today()
+                done_date = datetime.date.today()
                 td["完成时间"] = str(done_date)
                 if append_todo_completion_history(td, done_date):
                     for p in todo_project_list(td):
@@ -4279,7 +4289,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
                 event_day = datetime.date.today()
                 if new_done and not prev_done:
                     todo_action = "待办完成"
-                    event_day = due_dt or datetime.date.today()
+                    event_day = datetime.date.today()
                 elif prev_done and not new_done:
                     todo_action = "待办重开"
 
