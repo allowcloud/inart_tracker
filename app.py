@@ -50,6 +50,61 @@ def resolve_alias_project(name, project_alias_map):
     return project_alias_map.get(n, name)
 
 
+PROJECT_NAME_STATUS_SUFFIXES = [
+    "pending", "tbd", "wip", "todo", "draft", "test",
+    "待确认", "待补", "待定", "待审核", "待版权", "待review",
+]
+
+
+def _project_name_noise_variants(name):
+    raw = str(name or "").strip()
+    if not raw:
+        return []
+    variants = []
+    seen = set()
+
+    def add_variant(val, reason):
+        txt = str(val or "").strip()
+        if not txt or txt == raw:
+            return
+        key = (txt, reason)
+        if key in seen:
+            return
+        seen.add(key)
+        variants.append((txt, reason))
+
+    base = raw
+    add_variant(re.sub(r"\s+", " ", base), "空格归一")
+    add_variant(re.sub(r"\s*([\-_/])\s*", r"\1", base), "符号归一")
+
+    bracket_match = re.match(r"^(.*?)\s*[\(\（]([A-Za-z0-9 _\-]+)[\)\）]\s*$", base)
+    if bracket_match:
+        add_variant(bracket_match.group(1), "括号英文尾注")
+
+    for suffix in PROJECT_NAME_STATUS_SUFFIXES:
+        cleaned = re.sub(rf"(?i)[\s\-_（）()]*{re.escape(suffix)}$", "", base).strip(" -_（）()")
+        if cleaned and cleaned != base:
+            add_variant(cleaned, f"状态尾缀:{suffix}")
+
+    return variants
+
+
+def detect_project_name_noise_pairs(project_names):
+    names = [str(x).strip() for x in (project_names or []) if str(x).strip() and str(x).strip() != "系统配置"]
+    valid_set = set(names)
+    rows = []
+    seen = set()
+    for src in names:
+        for candidate, reason in _project_name_noise_variants(src):
+            if candidate in valid_set and candidate != src:
+                key = (src, candidate)
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append({"异常项目": src, "建议并入": candidate, "原因": reason})
+    return rows
+
+
 def canonicalize_project_name(name, valid_projs=None, alias_map=None):
     raw = str(name or "").strip()
     if not raw or raw == "系统配置":
@@ -64,6 +119,11 @@ def canonicalize_project_name(name, valid_projs=None, alias_map=None):
     direct = resolve_alias_project(raw, alias_map)
     if direct in valid_set and direct != "系统配置":
         return direct
+
+    for candidate, _ in _project_name_noise_variants(raw):
+        direct = resolve_alias_project(candidate, alias_map)
+        if direct in valid_set and direct != "系统配置":
+            return direct
 
     inferred = infer_malformed_ratio_project_target(raw)
     if inferred and inferred in valid_set and inferred != "系统配置":
@@ -2384,6 +2444,10 @@ def _normalize_autocreate_project_name(project_name):
         return ""
 
     alias_map = db.get("系统配置", {}).get("项目别名", {}) if isinstance(db, dict) else {}
+    valid_projs = [p for p in db.keys() if p != "系统配置"] if isinstance(db, dict) else []
+    canonical = canonicalize_project_name(name, valid_projs=valid_projs, alias_map=alias_map)
+    if canonical and canonical in valid_projs:
+        return canonical
     resolved = resolve_alias_project(name, alias_map)
     if isinstance(db, dict) and resolved in db:
         return resolved
@@ -10050,6 +10114,35 @@ elif menu == MENU_SETTINGS:
                             st.rerun()
                         else:
                             st.info("没有可删除的项目。")
+
+            noise_pairs = detect_project_name_noise_pairs(all_proj_names)
+            with st.expander("🧹 项目名噪音候选（尾缀 / 括号别名 / 空格符号）", expanded=False):
+                st.caption("这里只列明显像同一项目的命名噪音候选。像“Pending”尾缀、括号英文别名会优先被捞出来；真正不同项目不会自动合并。")
+                if noise_pairs:
+                    noise_df = pd.DataFrame(noise_pairs).sort_values(by=["建议并入", "异常项目"], ascending=[True, True])
+                    st.dataframe(noise_df, width="stretch", hide_index=True)
+                    noise_labels = [f"{row['异常项目']} → {row['建议并入']}｜{row['原因']}" for row in noise_pairs]
+                    picked_noise = st.multiselect(
+                        "选择要合并的命名噪音项目",
+                        noise_labels,
+                        default=noise_labels,
+                        key="project_name_noise_pick",
+                    )
+                    if st.button("✨ 清理这些命名噪音", key="btn_cleanup_project_noise", type="primary"):
+                        cleaned = []
+                        for label in picked_noise:
+                            src, rest = label.split(" → ", 1)
+                            dst, _reason = rest.split("｜", 1)
+                            if merge_project_into_target(src.strip(), dst.strip(), learned_aliases=[src.strip()]):
+                                cleaned.append(f"{src.strip()} → {dst.strip()}")
+                        if cleaned:
+                            sync_save_db()
+                            st.success(f"已清理 {len(cleaned)} 个命名噪音项目：{'；'.join(cleaned[:8])}")
+                            st.rerun()
+                        else:
+                            st.info("当前没有可执行的命名噪音清理。")
+                else:
+                    st.caption("当前没有检测到明显的项目名噪音候选。")
 
             alias_map = st.session_state.db["系统配置"].get("项目别名", {})
             if alias_map:
