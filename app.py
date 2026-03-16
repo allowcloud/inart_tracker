@@ -8006,11 +8006,14 @@ elif menu == MENU_SPECIFIC:
         st.stop()
 
     st.markdown("<div class='pm-section-title'>🎯 特定项目操作</div>", unsafe_allow_html=True)
-    if 'current_proj_context' not in st.session_state:
+    if ('current_proj_context' not in st.session_state) or (st.session_state.current_proj_context not in valid_projs):
         st.session_state.current_proj_context = valid_projs[0] if valid_projs else None
+    if ('pm_sel_proj' not in st.session_state) or (st.session_state.pm_sel_proj not in valid_projs):
+        st.session_state.pm_sel_proj = st.session_state.current_proj_context
     sel_proj = st.selectbox(
         "📌 选择要透视与操作的项目 (💡支持键盘打字模糊搜索)",
         valid_projs,
+        key="pm_sel_proj",
         format_func=lambda x: format_project_option_label(x, project_attention_map),
     )
     if sel_proj != st.session_state.current_proj_context:
