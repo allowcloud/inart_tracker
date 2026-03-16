@@ -166,6 +166,28 @@ def detect_high_similarity_project_pairs(project_names):
     return rows
 
 
+def build_project_attention_map(project_names):
+    names = [str(x).strip() for x in (project_names or []) if str(x).strip() and str(x).strip() != "系统配置"]
+    attention = {}
+    for row in detect_project_name_noise_pairs(names):
+        attention.setdefault(str(row["异常项目"]).strip(), []).append("命名噪音")
+    for row in detect_high_similarity_project_pairs(names):
+        attention.setdefault(str(row["异常项目"]).strip(), []).append("疑似重复")
+        attention.setdefault(str(row["建议并入"]).strip(), []).append("疑似重复")
+    return {k: list(dict.fromkeys(v)) for k, v in attention.items()}
+
+
+def format_project_option_label(project_name, attention_map=None):
+    proj = str(project_name or "").strip()
+    if not proj:
+        return proj
+    tags = list((attention_map or {}).get(proj, []))
+    if not tags:
+        return proj
+    tag_txt = " / ".join(tags[:2])
+    return f"{proj}  ·  ⚠️{tag_txt}"
+
+
 def canonicalize_project_name(name, valid_projs=None, alias_map=None):
     raw = str(name or "").strip()
     if not raw or raw == "系统配置":
@@ -3896,6 +3918,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
     overdue = [x for x in pending if todo_due_date(x) and (todo_due_date(x) - today).days < 0]
     near_due = [x for x in pending if todo_due_date(x) and 0 <= (todo_due_date(x) - today).days <= 3]
     linked_pending = [x for x in pending if todo_project_list(x)]
+    proj_attention = build_project_attention_map(valid_projs)
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("未完成", len(pending))
@@ -3913,7 +3936,13 @@ def render_pm_todo_manager(valid_projs, current_pm):
         with c2:
             todo_cpddl = st.text_input("CP/DDL(合并)", key="todo_cpddl_global", placeholder="例：3/7 结构件确认")
         with c3:
-            todo_ref_projs = st.multiselect("关联项目（可多选）", todo_proj_options_create, key="todo_ref_global_multi", placeholder="请选择关联项目")
+            todo_ref_projs = st.multiselect(
+                "关联项目（可多选）",
+                todo_proj_options_create,
+                key="todo_ref_global_multi",
+                placeholder="请选择关联项目",
+                format_func=lambda x: todo_new_proj_option if x == todo_new_proj_option else format_project_option_label(x, proj_attention),
+            )
         with c4:
             if current_pm == "所有人":
                 todo_scope = st.selectbox("所属视角", scope_options, key="todo_scope_global")
@@ -4056,7 +4085,12 @@ def render_pm_todo_manager(valid_projs, current_pm):
     with f1:
         status_filter = st.selectbox("状态筛选", ["全部", "未完成", "已完成"], key="todo_filter_status")
     with f2:
-        project_filter = st.selectbox("项目筛选", ["全部"] + all_proj_filter_opts, key="todo_filter_project")
+        project_filter = st.selectbox(
+            "项目筛选",
+            ["全部"] + all_proj_filter_opts,
+            key="todo_filter_project",
+            format_func=lambda x: x if x == "全部" else format_project_option_label(x, proj_attention),
+        )
     with f3:
         people_filter = st.selectbox("人员筛选", ["全部"] + all_people_filter_opts, key="todo_filter_people") if all_people_filter_opts else "全部"
     with f4:
@@ -6729,6 +6763,10 @@ st.sidebar.caption(f"{backend_icon} 当前存储：{backend_name} | 附件：{at
 
 db          = st.session_state.db
 valid_projs = get_visible_projects(db, current_pm)
+project_attention_map = build_project_attention_map(valid_projs)
+attention_count = len(project_attention_map)
+if attention_count:
+    st.sidebar.caption(f"⚠️ 命名待确认项目 {attention_count} 个，可在系统维护里清理。")
 render_sidebar_todo_panel(current_pm)
 
 
@@ -7970,7 +8008,11 @@ elif menu == MENU_SPECIFIC:
     st.markdown("<div class='pm-section-title'>🎯 特定项目操作</div>", unsafe_allow_html=True)
     if 'current_proj_context' not in st.session_state:
         st.session_state.current_proj_context = valid_projs[0] if valid_projs else None
-    sel_proj = st.selectbox("📌 选择要透视与操作的项目 (💡支持键盘打字模糊搜索)", valid_projs)
+    sel_proj = st.selectbox(
+        "📌 选择要透视与操作的项目 (💡支持键盘打字模糊搜索)",
+        valid_projs,
+        format_func=lambda x: format_project_option_label(x, project_attention_map),
+    )
     if sel_proj != st.session_state.current_proj_context:
         st.session_state.pasted_cache        = {}
         st.session_state.config_pasted_cache = {}
@@ -8984,7 +9026,8 @@ elif menu == MENU_FASTLOG:
                 sel_proj_ai = st.selectbox(
                     "归属项目", project_options,
                     index=project_options.index(item['识别项目']) if item['识别项目'] in project_options else 0,
-                    key=f"sel_p_{i}"
+                    key=f"sel_p_{i}",
+                    format_func=lambda x: x if x == MANUAL_PICK else format_project_option_label(x, project_attention_map),
                 )
                 # 识别失败时，显示快速新建项目入口
                 if is_unknown or is_manual_pick_project(sel_proj_ai):
@@ -9159,7 +9202,7 @@ elif menu == MENU_FASTLOG:
 elif menu == MENU_PACKING:
     st.title("📦 包装进度看板")
     if not valid_projs: st.stop()
-    sel_proj = st.selectbox("📌 追踪项目", valid_projs)
+    sel_proj = st.selectbox("📌 追踪项目", valid_projs, format_func=lambda x: format_project_option_label(x, project_attention_map))
     render_packing_lightweight_board(sel_proj, ui_prefix=f"pack_page_{norm_text(sel_proj)[:24]}")
     st.caption("项目备忘录请在 PM 工作台维护；入库/领用台账请在成本台账查看。")
 
@@ -9167,7 +9210,7 @@ elif menu == MENU_PACKING:
 elif menu == MENU_COST:
     st.title("💰 纯净动态成本控制台")
     if not valid_projs: st.stop()
-    sel_proj = st.selectbox("📌 核算项目", valid_projs)
+    sel_proj = st.selectbox("📌 核算项目", valid_projs, format_func=lambda x: format_project_option_label(x, project_attention_map))
     c_data   = db[sel_proj].get("成本数据", {})
 
     c1, c2, c3 = st.columns(3)
@@ -9390,7 +9433,8 @@ elif menu == MENU_HISTORY:
     st.title("🔍 图文交接溯源档案 (全局/可编辑)")
     valid_p = [p for p in db.keys() if p != "系统配置"]
     if not valid_p: st.stop()
-    sel_proj = st.selectbox("📌 选择溯源项目", valid_p)
+    history_attention_map = build_project_attention_map(valid_p)
+    sel_proj = st.selectbox("📌 选择溯源项目", valid_p, format_func=lambda x: format_project_option_label(x, history_attention_map))
     low_conf_events = [x for x in collect_low_confidence_standard_events(limit=80) if str(x.get("项目", "")).strip() == str(sel_proj).strip()]
     if low_conf_events:
         with st.expander(f"🧭 当前项目的识别待确认 ({len(low_conf_events)} 条)", expanded=False):
