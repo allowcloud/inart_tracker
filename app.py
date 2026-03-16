@@ -12,6 +12,7 @@ import io
 import tempfile
 import hashlib
 import zipfile
+from difflib import SequenceMatcher
 from collections import Counter
 from decimal import Decimal
 from functools import lru_cache
@@ -50,6 +51,143 @@ def resolve_alias_project(name, project_alias_map):
     return project_alias_map.get(n, name)
 
 
+PROJECT_NAME_STATUS_SUFFIXES = [
+    "pending", "tbd", "wip", "todo", "draft", "test",
+    "待确认", "待补", "待定", "待审核", "待版权", "待review",
+]
+
+
+def _project_name_noise_variants(name):
+    raw = str(name or "").strip()
+    if not raw:
+        return []
+    variants = []
+    seen = set()
+
+    def add_variant(val, reason):
+        txt = str(val or "").strip()
+        if not txt or txt == raw:
+            return
+        key = (txt, reason)
+        if key in seen:
+            return
+        seen.add(key)
+        variants.append((txt, reason))
+
+    base = raw
+    add_variant(re.sub(r"\s+", " ", base), "空格归一")
+    add_variant(re.sub(r"\s*([\-_/])\s*", r"\1", base), "符号归一")
+
+    bracket_match = re.match(r"^(.*?)\s*[\(\（]([A-Za-z0-9 _\-]+)[\)\）]\s*$", base)
+    if bracket_match:
+        add_variant(bracket_match.group(1), "括号英文尾注")
+
+    for suffix in PROJECT_NAME_STATUS_SUFFIXES:
+        cleaned = re.sub(rf"(?i)[\s\-_（）()]*{re.escape(suffix)}$", "", base).strip(" -_（）()")
+        if cleaned and cleaned != base:
+            add_variant(cleaned, f"状态尾缀:{suffix}")
+
+    return variants
+
+
+def detect_project_name_noise_pairs(project_names):
+    names = [str(x).strip() for x in (project_names or []) if str(x).strip() and str(x).strip() != "系统配置"]
+    valid_set = set(names)
+    rows = []
+    seen = set()
+    for src in names:
+        for candidate, reason in _project_name_noise_variants(src):
+            if candidate in valid_set and candidate != src:
+                key = (src, candidate)
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append({"异常项目": src, "建议并入": candidate, "原因": reason})
+    return rows
+
+
+def _split_project_ratio_and_body(name):
+    txt = str(name or "").strip()
+    m = re.match(r"^(1/\d+)\s*(.+)$", txt)
+    if m:
+        return str(m.group(1)).strip(), str(m.group(2)).strip()
+    return "", txt
+
+
+def _project_similarity_key(name):
+    _ratio, body = _split_project_ratio_and_body(name)
+    cleaned = str(body or "").strip()
+    cleaned = re.sub(r"[\s\-_—–·・/]+", "", cleaned)
+    cleaned = re.sub(r"[（(][^）)]*[）)]", "", cleaned)
+    return norm_text(cleaned)
+
+
+def detect_high_similarity_project_pairs(project_names):
+    names = [str(x).strip() for x in (project_names or []) if str(x).strip() and str(x).strip() != "系统配置"]
+    rows = []
+    seen = set()
+    for i in range(len(names)):
+        a = names[i]
+        ratio_a, body_a = _split_project_ratio_and_body(a)
+        key_a = _project_similarity_key(a)
+        if len(key_a) < 2:
+            continue
+        for j in range(i + 1, len(names)):
+            b = names[j]
+            ratio_b, body_b = _split_project_ratio_and_body(b)
+            if ratio_a and ratio_b and ratio_a != ratio_b:
+                continue
+            key_b = _project_similarity_key(b)
+            if len(key_b) < 2 or key_a == key_b:
+                continue
+
+            sim = SequenceMatcher(None, key_a, key_b).ratio()
+            contains = key_a in key_b or key_b in key_a
+            short_upper_pair = bool(re.fullmatch(r"[A-Za-z0-9]{2,5}", body_a or "")) and bool(re.fullmatch(r"[A-Za-z0-9]{2,5}", body_b or ""))
+            if short_upper_pair:
+                matched = sim >= 0.55
+            else:
+                matched = contains or sim >= 0.74
+            if not matched:
+                continue
+
+            preferred = a if (len(a) <= len(b)) else b
+            suspicious = b if preferred == a else a
+            key = tuple(sorted([preferred, suspicious]))
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append({
+                "异常项目": suspicious,
+                "建议并入": preferred,
+                "相似度": f"{sim:.0%}",
+                "原因": "高相似度待确认",
+            })
+    return rows
+
+
+def build_project_attention_map(project_names):
+    names = [str(x).strip() for x in (project_names or []) if str(x).strip() and str(x).strip() != "系统配置"]
+    attention = {}
+    for row in detect_project_name_noise_pairs(names):
+        attention.setdefault(str(row["异常项目"]).strip(), []).append("命名噪音")
+    for row in detect_high_similarity_project_pairs(names):
+        attention.setdefault(str(row["异常项目"]).strip(), []).append("疑似重复")
+        attention.setdefault(str(row["建议并入"]).strip(), []).append("疑似重复")
+    return {k: list(dict.fromkeys(v)) for k, v in attention.items()}
+
+
+def format_project_option_label(project_name, attention_map=None):
+    proj = str(project_name or "").strip()
+    if not proj:
+        return proj
+    tags = list((attention_map or {}).get(proj, []))
+    if not tags:
+        return proj
+    tag_txt = " / ".join(tags[:2])
+    return f"{proj}  ·  ⚠️{tag_txt}"
+
+
 def canonicalize_project_name(name, valid_projs=None, alias_map=None):
     raw = str(name or "").strip()
     if not raw or raw == "系统配置":
@@ -64,6 +202,11 @@ def canonicalize_project_name(name, valid_projs=None, alias_map=None):
     direct = resolve_alias_project(raw, alias_map)
     if direct in valid_set and direct != "系统配置":
         return direct
+
+    for candidate, _ in _project_name_noise_variants(raw):
+        direct = resolve_alias_project(candidate, alias_map)
+        if direct in valid_set and direct != "系统配置":
+            return direct
 
     inferred = infer_malformed_ratio_project_target(raw)
     if inferred and inferred in valid_set and inferred != "系统配置":
@@ -2384,6 +2527,10 @@ def _normalize_autocreate_project_name(project_name):
         return ""
 
     alias_map = db.get("系统配置", {}).get("项目别名", {}) if isinstance(db, dict) else {}
+    valid_projs = [p for p in db.keys() if p != "系统配置"] if isinstance(db, dict) else []
+    canonical = canonicalize_project_name(name, valid_projs=valid_projs, alias_map=alias_map)
+    if canonical and canonical in valid_projs:
+        return canonical
     resolved = resolve_alias_project(name, alias_map)
     if isinstance(db, dict) and resolved in db:
         return resolved
@@ -3771,6 +3918,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
     overdue = [x for x in pending if todo_due_date(x) and (todo_due_date(x) - today).days < 0]
     near_due = [x for x in pending if todo_due_date(x) and 0 <= (todo_due_date(x) - today).days <= 3]
     linked_pending = [x for x in pending if todo_project_list(x)]
+    proj_attention = build_project_attention_map(valid_projs)
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("未完成", len(pending))
@@ -3788,7 +3936,13 @@ def render_pm_todo_manager(valid_projs, current_pm):
         with c2:
             todo_cpddl = st.text_input("CP/DDL(合并)", key="todo_cpddl_global", placeholder="例：3/7 结构件确认")
         with c3:
-            todo_ref_projs = st.multiselect("关联项目（可多选）", todo_proj_options_create, key="todo_ref_global_multi", placeholder="请选择关联项目")
+            todo_ref_projs = st.multiselect(
+                "关联项目（可多选）",
+                todo_proj_options_create,
+                key="todo_ref_global_multi",
+                placeholder="请选择关联项目",
+                format_func=lambda x: todo_new_proj_option if x == todo_new_proj_option else format_project_option_label(x, proj_attention),
+            )
         with c4:
             if current_pm == "所有人":
                 todo_scope = st.selectbox("所属视角", scope_options, key="todo_scope_global")
@@ -3931,7 +4085,12 @@ def render_pm_todo_manager(valid_projs, current_pm):
     with f1:
         status_filter = st.selectbox("状态筛选", ["全部", "未完成", "已完成"], key="todo_filter_status")
     with f2:
-        project_filter = st.selectbox("项目筛选", ["全部"] + all_proj_filter_opts, key="todo_filter_project")
+        project_filter = st.selectbox(
+            "项目筛选",
+            ["全部"] + all_proj_filter_opts,
+            key="todo_filter_project",
+            format_func=lambda x: x if x == "全部" else format_project_option_label(x, proj_attention),
+        )
     with f3:
         people_filter = st.selectbox("人员筛选", ["全部"] + all_people_filter_opts, key="todo_filter_people") if all_people_filter_opts else "全部"
     with f4:
@@ -6604,6 +6763,10 @@ st.sidebar.caption(f"{backend_icon} 当前存储：{backend_name} | 附件：{at
 
 db          = st.session_state.db
 valid_projs = get_visible_projects(db, current_pm)
+project_attention_map = build_project_attention_map(valid_projs)
+attention_count = len(project_attention_map)
+if attention_count:
+    st.sidebar.caption(f"⚠️ 命名待确认项目 {attention_count} 个，可在系统维护里清理。")
 render_sidebar_todo_panel(current_pm)
 
 
@@ -7845,7 +8008,11 @@ elif menu == MENU_SPECIFIC:
     st.markdown("<div class='pm-section-title'>🎯 特定项目操作</div>", unsafe_allow_html=True)
     if 'current_proj_context' not in st.session_state:
         st.session_state.current_proj_context = valid_projs[0] if valid_projs else None
-    sel_proj = st.selectbox("📌 选择要透视与操作的项目 (💡支持键盘打字模糊搜索)", valid_projs)
+    sel_proj = st.selectbox(
+        "📌 选择要透视与操作的项目 (💡支持键盘打字模糊搜索)",
+        valid_projs,
+        format_func=lambda x: format_project_option_label(x, project_attention_map),
+    )
     if sel_proj != st.session_state.current_proj_context:
         st.session_state.pasted_cache        = {}
         st.session_state.config_pasted_cache = {}
@@ -8859,7 +9026,8 @@ elif menu == MENU_FASTLOG:
                 sel_proj_ai = st.selectbox(
                     "归属项目", project_options,
                     index=project_options.index(item['识别项目']) if item['识别项目'] in project_options else 0,
-                    key=f"sel_p_{i}"
+                    key=f"sel_p_{i}",
+                    format_func=lambda x: x if x == MANUAL_PICK else format_project_option_label(x, project_attention_map),
                 )
                 # 识别失败时，显示快速新建项目入口
                 if is_unknown or is_manual_pick_project(sel_proj_ai):
@@ -9034,7 +9202,7 @@ elif menu == MENU_FASTLOG:
 elif menu == MENU_PACKING:
     st.title("📦 包装进度看板")
     if not valid_projs: st.stop()
-    sel_proj = st.selectbox("📌 追踪项目", valid_projs)
+    sel_proj = st.selectbox("📌 追踪项目", valid_projs, format_func=lambda x: format_project_option_label(x, project_attention_map))
     render_packing_lightweight_board(sel_proj, ui_prefix=f"pack_page_{norm_text(sel_proj)[:24]}")
     st.caption("项目备忘录请在 PM 工作台维护；入库/领用台账请在成本台账查看。")
 
@@ -9042,7 +9210,7 @@ elif menu == MENU_PACKING:
 elif menu == MENU_COST:
     st.title("💰 纯净动态成本控制台")
     if not valid_projs: st.stop()
-    sel_proj = st.selectbox("📌 核算项目", valid_projs)
+    sel_proj = st.selectbox("📌 核算项目", valid_projs, format_func=lambda x: format_project_option_label(x, project_attention_map))
     c_data   = db[sel_proj].get("成本数据", {})
 
     c1, c2, c3 = st.columns(3)
@@ -9265,7 +9433,8 @@ elif menu == MENU_HISTORY:
     st.title("🔍 图文交接溯源档案 (全局/可编辑)")
     valid_p = [p for p in db.keys() if p != "系统配置"]
     if not valid_p: st.stop()
-    sel_proj = st.selectbox("📌 选择溯源项目", valid_p)
+    history_attention_map = build_project_attention_map(valid_p)
+    sel_proj = st.selectbox("📌 选择溯源项目", valid_p, format_func=lambda x: format_project_option_label(x, history_attention_map))
     low_conf_events = [x for x in collect_low_confidence_standard_events(limit=80) if str(x.get("项目", "")).strip() == str(sel_proj).strip()]
     if low_conf_events:
         with st.expander(f"🧭 当前项目的识别待确认 ({len(low_conf_events)} 条)", expanded=False):
@@ -10050,6 +10219,64 @@ elif menu == MENU_SETTINGS:
                             st.rerun()
                         else:
                             st.info("没有可删除的项目。")
+
+            noise_pairs = detect_project_name_noise_pairs(all_proj_names)
+            with st.expander("🧹 项目名噪音候选（尾缀 / 括号别名 / 空格符号）", expanded=False):
+                st.caption("这里只列明显像同一项目的命名噪音候选。像“Pending”尾缀、括号英文别名会优先被捞出来；真正不同项目不会自动合并。")
+                if noise_pairs:
+                    noise_df = pd.DataFrame(noise_pairs).sort_values(by=["建议并入", "异常项目"], ascending=[True, True])
+                    st.dataframe(noise_df, width="stretch", hide_index=True)
+                    noise_labels = [f"{row['异常项目']} → {row['建议并入']}｜{row['原因']}" for row in noise_pairs]
+                    picked_noise = st.multiselect(
+                        "选择要合并的命名噪音项目",
+                        noise_labels,
+                        default=noise_labels,
+                        key="project_name_noise_pick",
+                    )
+                    if st.button("✨ 清理这些命名噪音", key="btn_cleanup_project_noise", type="primary"):
+                        cleaned = []
+                        for label in picked_noise:
+                            src, rest = label.split(" → ", 1)
+                            dst, _reason = rest.split("｜", 1)
+                            if merge_project_into_target(src.strip(), dst.strip(), learned_aliases=[src.strip()]):
+                                cleaned.append(f"{src.strip()} → {dst.strip()}")
+                        if cleaned:
+                            sync_save_db()
+                            st.success(f"已清理 {len(cleaned)} 个命名噪音项目：{'；'.join(cleaned[:8])}")
+                            st.rerun()
+                        else:
+                            st.info("当前没有可执行的命名噪音清理。")
+                else:
+                    st.caption("当前没有检测到明显的项目名噪音候选。")
+
+            sim_pairs = detect_high_similarity_project_pairs(all_proj_names)
+            with st.expander("🧪 高相似度项目名待确认", expanded=False):
+                st.caption("这里收的是可能录错、也可能真的是不同项目的名字。不会默认全选，由你人工决定是否合并。")
+                if sim_pairs:
+                    sim_df = pd.DataFrame(sim_pairs).sort_values(by=["相似度", "建议并入", "异常项目"], ascending=[False, True, True])
+                    st.dataframe(sim_df, width="stretch", hide_index=True)
+                    sim_labels = [f"{row['异常项目']} → {row['建议并入']}｜{row['相似度']}" for row in sim_pairs]
+                    picked_sim = st.multiselect(
+                        "选择确认要合并的高相似度项目",
+                        sim_labels,
+                        key="project_name_similarity_pick",
+                        placeholder="例如：1/12KDA、1/12TDK、Neo 大小写差异",
+                    )
+                    if st.button("🧩 合并这些高相似度项目", key="btn_merge_similarity_projects"):
+                        cleaned = []
+                        for label in picked_sim:
+                            src, rest = label.split(" → ", 1)
+                            dst, _score = rest.split("｜", 1)
+                            if merge_project_into_target(src.strip(), dst.strip(), learned_aliases=[src.strip()]):
+                                cleaned.append(f"{src.strip()} → {dst.strip()}")
+                        if cleaned:
+                            sync_save_db()
+                            st.success(f"已合并 {len(cleaned)} 个高相似度项目：{'；'.join(cleaned[:8])}")
+                            st.rerun()
+                        else:
+                            st.info("没有执行任何高相似度项目合并。")
+                else:
+                    st.caption("当前没有检测到需要人工确认的高相似度项目。")
 
             alias_map = st.session_state.db["系统配置"].get("项目别名", {})
             if alias_map:
