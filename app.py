@@ -1761,8 +1761,7 @@ def _macro_phase_rule_matches(rule, stage_text, event_text, lower_evt, comp_name
     if when == "global_pause":
         return (
             "全局" in str(comp_name or "")
-            and any(kw in evt for kw in ["项目取消", "暂停研发", "暂停", "搁置", "叫停", "冻结", "停做", "先停", "先暂停"])
-            and ("确认取消" not in evt or any(kw in evt for kw in ["项目确认取消", "项目取消"]))
+            and any(kw in evt for kw in ["项目取消", "暂停研发", "项目暂停", "暂停项目", "停止研发", "冻结项目", "项目叫停"])
         )
     if when == "print_signal":
         return ("打印" in evt) or ("签样" in evt) or (s == "打印") or any(x in evt for x in ["效果下模", "确认效果下模", "待确认效果下模"])
@@ -3896,7 +3895,11 @@ def build_project_stage_segments(proj_label, proj_data):
 
     if not stage_records["建模"] and milestone not in ["暂停研发", "生产结束", "项目结束撒花🎉", "✅ 已完成(结束)"]:
         if len(unique_dates) > 1 or milestone in ["研发中", "待开定", "已开定", "下模中", "生产中"]:
-            build_seed = second_date or (first_date + datetime.timedelta(days=1))
+            higher_stage_exists = any(stage_records.get(s) for s in ["设计", "工程", "开模", "修模", "生产"])
+            if higher_stage_exists:
+                build_seed = launch_start or first_date
+            else:
+                build_seed = second_date or (first_date + datetime.timedelta(days=1))
             stage_records["建模"].append({
                 "date": build_seed,
                 "stage": "建模",
@@ -3976,7 +3979,7 @@ def build_project_stage_segments(proj_label, proj_data):
 
     def _pause_reason_score(rec):
         txt = f"{rec.get('raw_stage', '')} {rec.get('event', '')}".strip()
-        explicit_kws = ["暂停", "搁置", "冻结", "挂起", "等版权", "待版权", "等待", "叫停", "停止"]
+        explicit_kws = ["暂停", "搁置", "冻结", "挂起", "叫停", "停止", "暂停研发", "项目暂停", "项目取消"]
         return sum(1 for kw in explicit_kws if kw in txt)
 
     launch_records = stage_records["立项"]
@@ -4108,6 +4111,20 @@ def build_project_stage_segments(proj_label, proj_data):
             "Finish": (end_dt + datetime.timedelta(days=1)).strftime("%Y-%m-%d"),
             "详情": _detail_lines(end_records),
         })
+
+    if milestone not in ["暂停研发", "生产结束", "项目结束撒花🎉", "✅ 已完成(结束)"]:
+        main_segments = [seg for seg in segments if seg.get("工序阶段") not in ["立项", "暂停", "结束"]]
+        main_segments.sort(key=lambda x: (x.get("Start", ""), x.get("Finish", "")))
+        for idx in range(len(main_segments) - 1):
+            cur_seg = main_segments[idx]
+            next_seg = main_segments[idx + 1]
+            try:
+                cur_finish = datetime.datetime.strptime(str(cur_seg.get("Finish", "")), "%Y-%m-%d").date()
+                next_start = datetime.datetime.strptime(str(next_seg.get("Start", "")), "%Y-%m-%d").date()
+            except Exception:
+                continue
+            if cur_finish < next_start:
+                cur_seg["Finish"] = next_start.strftime("%Y-%m-%d")
 
     return segments
 
