@@ -4122,6 +4122,19 @@ def build_project_stage_segments(proj_label, proj_data):
                     "stage": "建模",
                 })
 
+    non_pause_dates = sorted({x["date"] for x in all_records if x["stage"] != "暂停"})
+    filtered_pause_dates = []
+    last_kept_pause = None
+    for pause_dt in pause_dates:
+        if last_kept_pause is None:
+            filtered_pause_dates.append(pause_dt)
+            last_kept_pause = pause_dt
+            continue
+        resumed_between = any(last_kept_pause < d <= pause_dt for d in non_pause_dates)
+        if resumed_between:
+            filtered_pause_dates.append(pause_dt)
+            last_kept_pause = pause_dt
+
     for stage in ["建模", "打印", "设计", "工程", "开模", "修模", "生产"]:
         records = stage_records.get(stage, [])
         if not records:
@@ -4134,7 +4147,7 @@ def build_project_stage_segments(proj_label, proj_data):
             paused_on_default_start = default_build_start in pause_dates
             if not paused_on_default_start:
                 start_dt = min(start_dt, default_build_start)
-        next_pause_dt = next((p for p in pause_dates if p >= last_stage_dt), None)
+        next_pause_dt = next((p for p in filtered_pause_dates if p >= last_stage_dt), None)
         if next_pause_dt:
             has_intervening_stage = any(
                 rec["date"] > last_stage_dt and rec["date"] < next_pause_dt and rec["stage"] not in [stage, "暂停"]
@@ -4158,26 +4171,27 @@ def build_project_stage_segments(proj_label, proj_data):
             finish_dt = today + datetime.timedelta(days=1)
         if finish_dt <= start_dt:
             finish_dt = start_dt + datetime.timedelta(days=1)
-        segments.append({
-            "项目": proj_label,
-            "工序阶段": stage,
-            "Start": start_dt.strftime("%Y-%m-%d"),
-            "Finish": finish_dt.strftime("%Y-%m-%d"),
-            "详情": _detail_lines(records),
-        })
 
-    non_pause_dates = sorted({x["date"] for x in all_records if x["stage"] != "暂停"})
-    filtered_pause_dates = []
-    last_kept_pause = None
-    for pause_dt in pause_dates:
-        if last_kept_pause is None:
-            filtered_pause_dates.append(pause_dt)
-            last_kept_pause = pause_dt
-            continue
-        resumed_between = any(last_kept_pause < d <= pause_dt for d in non_pause_dates)
-        if resumed_between:
-            filtered_pause_dates.append(pause_dt)
-            last_kept_pause = pause_dt
+        chunk_start = start_dt
+        pause_cuts = [p for p in filtered_pause_dates if start_dt < p < finish_dt]
+        for pause_dt in pause_cuts:
+            if pause_dt > chunk_start:
+                segments.append({
+                    "项目": proj_label,
+                    "工序阶段": stage,
+                    "Start": chunk_start.strftime("%Y-%m-%d"),
+                    "Finish": pause_dt.strftime("%Y-%m-%d"),
+                    "详情": _detail_lines(records),
+                })
+            chunk_start = pause_dt + datetime.timedelta(days=1)
+        if finish_dt > chunk_start:
+            segments.append({
+                "项目": proj_label,
+                "工序阶段": stage,
+                "Start": chunk_start.strftime("%Y-%m-%d"),
+                "Finish": finish_dt.strftime("%Y-%m-%d"),
+                "详情": _detail_lines(records),
+            })
 
     for pause_dt in filtered_pause_dates:
         records = [x for x in stage_records.get("暂停", []) if x["date"] == pause_dt]
