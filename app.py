@@ -1651,6 +1651,7 @@ def sync_save_db(changed_proj=None):
     changed_proj: save one project key when provided.
     otherwise save all projects.
     """
+    canonicalize_all_project_references()
     if changed_proj and changed_proj in st.session_state.db and changed_proj != "\u7cfb\u7edf\u914d\u7f6e":
         recompute_project_derived_state(changed_proj)
     else:
@@ -1681,6 +1682,7 @@ def ensure_project_component(proj_name, comp_name, default_stage=None):
     comp = str(comp_name or "").strip() or "全局进度"
     if (not proj) or proj == "系统配置":
         return {}
+    proj = canonicalize_project_name(proj, valid_projs=[p for p in db.keys() if p != "系统配置"]) or proj
     proj_data = db.setdefault(proj, build_project_shell())
     comp_map = proj_data.setdefault("部件列表", {})
     if comp not in comp_map:
@@ -2763,36 +2765,87 @@ def infer_malformed_ratio_project_target(project_name):
         return resolved
     if inferred in db:
         return inferred
-    return ""
+    return inferred
+
+
+def canonicalize_all_project_references():
+    cfg = db.setdefault("系统配置", {})
+    alias_map = cfg.get("项目别名", {}) if isinstance(cfg.get("项目别名", {}), dict) else {}
+    valid_projs = [p for p in db.keys() if p != "系统配置"]
+    changed = False
+
+    for td in cfg.setdefault("PM_TODO_LIST", []):
+        if not isinstance(td, dict):
+            continue
+        old_list = todo_project_list(td)
+        canon_list = []
+        for p in old_list:
+            cp = canonicalize_project_name(p, valid_projs=valid_projs, alias_map=alias_map)
+            if cp and cp not in canon_list:
+                canon_list.append(cp)
+        if canon_list != old_list:
+            td["关联项目列表"] = canon_list
+            td["关联项目"] = canon_list[0] if canon_list else ""
+            changed = True
+        linked = str(td.get("最近联动项目", "")).strip()
+        linked_canon = canonicalize_project_name(linked, valid_projs=valid_projs, alias_map=alias_map)
+        if linked_canon != linked:
+            td["最近联动项目"] = linked_canon
+            changed = True
+
+    events = cfg.get("标准事件流", [])
+    if isinstance(events, list):
+        new_events = []
+        for evt in events:
+            if not isinstance(evt, dict):
+                continue
+            main_proj = canonicalize_project_name(evt.get("项目", ""), valid_projs=valid_projs, alias_map=alias_map)
+            proj_list = []
+            for p in normalize_todo_project_list(evt.get("项目列表", [])):
+                cp = canonicalize_project_name(p, valid_projs=valid_projs, alias_map=alias_map)
+                if cp and cp not in proj_list:
+                    proj_list.append(cp)
+            if (main_proj != str(evt.get("项目", "")).strip()) or (proj_list != normalize_todo_project_list(evt.get("项目列表", []))):
+                changed = True
+            evt["项目"] = main_proj or (proj_list[0] if proj_list else "")
+            evt["项目列表"] = proj_list
+            if evt["项目"] or evt["项目列表"]:
+                new_events.append(evt)
+        cfg["标准事件流"] = new_events
+    return changed
 
 
 def merge_project_into_target(merge_src, merge_dst, learned_aliases=None):
     src = str(merge_src or "").strip()
     dst = str(merge_dst or "").strip()
-    if (not src) or (not dst) or src == dst or src not in db or dst not in db:
+    if (not src) or (not dst) or src == dst or src not in db:
         return False
 
     src_data = db.get(src, {})
-    dst_data = db.get(dst, {})
-    dst_data.setdefault("部件列表", {})
-    for comp_name, comp_data in src_data.get("部件列表", {}).items():
-        if comp_name not in dst_data["部件列表"]:
-            dst_data["部件列表"][comp_name] = comp_data
-        else:
-            dst_data["部件列表"][comp_name].setdefault("日志流", [])
-            dst_data["部件列表"][comp_name]["日志流"].extend(comp_data.get("日志流", []))
+    target_missing = dst not in db
+    if target_missing:
+        dst_data = json.loads(json.dumps(src_data, ensure_ascii=False))
+    else:
+        dst_data = db.get(dst, {})
+        dst_data.setdefault("部件列表", {})
+        for comp_name, comp_data in src_data.get("部件列表", {}).items():
+            if comp_name not in dst_data["部件列表"]:
+                dst_data["部件列表"][comp_name] = comp_data
+            else:
+                dst_data["部件列表"][comp_name].setdefault("日志流", [])
+                dst_data["部件列表"][comp_name]["日志流"].extend(comp_data.get("日志流", []))
 
-    for bucket in ["发货数据", "成本数据"]:
-        dst_data.setdefault(bucket, {})
-        for k, v in src_data.get(bucket, {}).items():
-            if k not in dst_data[bucket]:
-                dst_data[bucket][k] = v
+        for bucket in ["发货数据", "成本数据"]:
+            dst_data.setdefault(bucket, {})
+            for k, v in src_data.get(bucket, {}).items():
+                if k not in dst_data[bucket]:
+                    dst_data[bucket][k] = v
 
-    for extra_key in ["计划排期", "周会备注", "print_tracking", "workbench_logs"]:
-        if extra_key in src_data:
-            dst_data.setdefault(extra_key, [])
-            if isinstance(dst_data.get(extra_key), list) and isinstance(src_data.get(extra_key), list):
-                dst_data[extra_key].extend(src_data.get(extra_key, []))
+        for extra_key in ["计划排期", "周会备注", "print_tracking", "workbench_logs"]:
+            if extra_key in src_data:
+                dst_data.setdefault(extra_key, [])
+                if isinstance(dst_data.get(extra_key), list) and isinstance(src_data.get(extra_key), list):
+                    dst_data[extra_key].extend(src_data.get(extra_key, []))
 
     cfg = db.setdefault("系统配置", {})
     todo_all = cfg.setdefault("PM_TODO_LIST", [])
@@ -2821,6 +2874,7 @@ def merge_project_into_target(merge_src, merge_dst, learned_aliases=None):
     alias_map = db.setdefault("系统配置", {}).setdefault("项目别名", {})
     for a in set([src, dst] + [str(x).strip() for x in (learned_aliases or []) if str(x).strip()]):
         alias_map[norm_text(a)] = dst
+    canonicalize_all_project_references()
     return True
 
 
@@ -2864,6 +2918,7 @@ def delete_project_and_refs(project_name):
         }
 
     db.pop(pick, None)
+    canonicalize_all_project_references()
     return True
 
 
@@ -3027,6 +3082,19 @@ def infer_todo_handoff_prefill(td, proj_name):
     txt_norm = norm_text(txt)
     comp_hits = []
     proj_comps = list(db.get(proj, {}).get("部件列表", {}).keys())
+    comp_kw = get_component_keyword_map()
+    stage_kw_map = get_stage_keyword_map()
+
+    def _sorted_kw_items(mapping):
+        rows = []
+        for k, v in (mapping or {}).items():
+            kk = str(k).strip()
+            vv = str(v).strip()
+            if kk and vv:
+                rows.append((kk, vv))
+        rows.sort(key=lambda x: (-len(str(x[0])), str(x[0])))
+        return rows
+
     for comp in proj_comps:
         variants = {str(comp).strip()}
         if " - " in str(comp):
@@ -3051,6 +3119,7 @@ def infer_todo_handoff_prefill(td, proj_name):
             if (base and base in txt) or (norm_text(std_comp) in txt_norm):
                 comp_hits.append(std_comp)
                 break
+
     def _pick_component_from_hint(target_keyword):
         target_norm = norm_text(target_keyword)
         for comp_name in proj_comps:
@@ -3068,15 +3137,11 @@ def infer_todo_handoff_prefill(td, proj_name):
         return ""
 
     if not comp_hits:
-        todo_comp_hint = [
-            ("头发", "头雕"), ("发型", "头雕"), ("发丝", "头雕"), ("发际", "头雕"), ("刘海", "头雕"),
-            ("头", "头雕"), ("脸", "头雕"), ("眼", "头雕"),
-            ("手", "手型"), ("衣", "服装"), ("服", "服装"),
-            ("包", "包装"), ("地台", "地台"),
-        ]
-        for kw, target in todo_comp_hint:
-            if kw in txt:
+        for kw, target in _sorted_kw_items(comp_kw):
+            if kw in txt or norm_text(kw) in txt_norm:
                 picked_comp = _pick_component_from_hint(target)
+                if not picked_comp and str(target).strip():
+                    picked_comp = str(target).strip()
                 if picked_comp and picked_comp not in comp_hits:
                     comp_hits.append(picked_comp)
                 break
@@ -3085,19 +3150,32 @@ def infer_todo_handoff_prefill(td, proj_name):
         comp_hits = ["🌐 全局进度 (Overall)"]
 
     stage_guess = ""
-    stage_kw = [
-        ("开定", "立项"), ("立项", "立项"), ("资料", "建模(含打印/签样)"),
-        ("建模", "建模(含打印/签样)"), ("打印", "建模(含打印/签样)"), ("涂装", "涂装"),
-        ("设计", "设计"), ("官图", "官图"), ("拆件", "工程拆件"), ("工程", "工程拆件"),
-        ("结构件", "工程拆件"), ("手板", "手板/结构板"), ("结构板", "手板/结构板"),
-        ("开模", "开模"), ("模具", "开模"), ("试模", "开模"),
-        ("复样", "工厂复样(含胶件/上色等)"), ("上色", "工厂复样(含胶件/上色等)"),
-        ("大货", "大货"), ("暂停", "⏸️ 暂停/搁置"), ("完成", "✅ 已完成(结束)"), ("结束", "✅ 已完成(结束)")
-    ]
-    for kw, stage_name in stage_kw:
-        if kw in txt:
+    for kw, stage_name in _sorted_kw_items(stage_kw_map):
+        if kw in txt or norm_text(kw) in txt_norm:
             stage_guess = stage_name
             break
+    if not stage_guess:
+        design_allowed = _allows_design_phase(
+            proj,
+            db.get(proj, {}),
+            comp_hits[0] if comp_hits else "",
+            txt,
+            "",
+        )
+        macro_to_stage = {
+            "立项": "立项",
+            "建模": "建模(含打印/签样)",
+            "打印": "打印",
+            "设计": "设计",
+            "工程": "工程拆件",
+            "开模": "开模",
+            "修模": "工厂复样(含胶件/上色等)",
+            "生产": "大货",
+            "暂停": "⏸️ 暂停/搁置",
+            "结束": "✅ 已完成(结束)",
+        }
+        macro_guess = get_macro_phase("", txt, comp_name=comp_hits[0] if comp_hits else "", design_allowed=design_allowed)
+        stage_guess = macro_to_stage.get(str(macro_guess).strip(), "")
     if not stage_guess:
         for stg in STAGES_UNIFIED:
             stg_norm = norm_text(stg)
@@ -3897,6 +3975,13 @@ def build_project_stage_segments(proj_label, proj_data):
     launch_records = stage_records["立项"]
     launch_start = min([x["date"] for x in launch_records], default=None)
     pause_dates = sorted({x["date"] for x in stage_records.get("暂停", [])})
+    active_bucket = get_project_status_bucket(proj_data.get("Milestone", "")) if isinstance(proj_data, dict) else "unknown"
+    latest_non_pause_record = max(
+        [x for x in all_records if x["stage"] not in ["暂停", "结束"]],
+        key=lambda x: x["date"],
+        default=None,
+    )
+    latest_non_pause_stage = str(latest_non_pause_record.get("stage", "")).strip() if latest_non_pause_record else ""
     if launch_records:
         segments.append({
             "项目": proj_label,
@@ -3905,6 +3990,34 @@ def build_project_stage_segments(proj_label, proj_data):
             "Finish": (launch_start + datetime.timedelta(days=1)).strftime("%Y-%m-%d"),
             "详情": _detail_lines(launch_records, "• 立项固定按 1 天展示；后续补充资料已归入【建模】口径"),
         })
+
+    if launch_start and not stage_records.get("建模"):
+        synthetic_build_start = launch_start + datetime.timedelta(days=1)
+        paused_on_default_start = synthetic_build_start in pause_dates
+        if not paused_on_default_start:
+            next_real_stage_dt = min(
+                [rec["date"] for rec in all_records if rec["date"] > launch_start and rec["stage"] not in ["立项", "暂停", "结束"]],
+                default=None,
+            )
+            next_pause_dt = next((p for p in pause_dates if p >= synthetic_build_start), None)
+            synthetic_finish = None
+            if next_real_stage_dt:
+                synthetic_finish = next_real_stage_dt
+            elif next_pause_dt:
+                synthetic_finish = next_pause_dt
+            elif active_bucket not in ["pause", "done"]:
+                synthetic_finish = today + datetime.timedelta(days=1)
+            if synthetic_finish and synthetic_finish > synthetic_build_start:
+                stage_records.setdefault("建模", []).append({
+                    "date": synthetic_build_start,
+                    "component": "全局进度",
+                    "event": "【系统自动追踪】立项后默认进入建模（无中间阶段日志）",
+                    "raw_stage": "建模(自动衔接)",
+                    "review_type": "(无)",
+                    "review_result": "(无)",
+                    "review_round": "",
+                    "stage": "建模",
+                })
 
     for stage in ["建模", "打印", "设计", "工程", "开模", "修模", "生产"]:
         records = stage_records.get(stage, [])
@@ -3926,7 +4039,15 @@ def build_project_stage_segments(proj_label, proj_data):
             )
             if not has_intervening_stage:
                 finish_dt = max(finish_dt, next_pause_dt)
+        next_other_stage_dt = min(
+            [rec["date"] for rec in all_records if rec["date"] > last_stage_dt and rec["stage"] not in [stage, "暂停", "结束"]],
+            default=None,
+        )
+        if next_other_stage_dt:
+            finish_dt = max(finish_dt, next_other_stage_dt)
         if stage in current_macros:
+            finish_dt = max(finish_dt, today + datetime.timedelta(days=1))
+        elif stage == latest_non_pause_stage and active_bucket not in ["pause", "done"] and not next_other_stage_dt:
             finish_dt = max(finish_dt, today + datetime.timedelta(days=1))
         if stage in ["建模", "打印", "设计", "工程"] and mold_start and start_dt < mold_start:
             finish_dt = min(finish_dt, mold_start)
@@ -10563,14 +10684,22 @@ elif menu == MENU_SETTINGS:
                 )
                 if st.button("🧹 执行异常比例项目清理", type="primary", key="btn_cleanup_ratio"):
                     cleaned = []
+                    skipped = []
                     for label in picked_malformed:
                         src, dst = label.split(" → ", 1)
                         if merge_project_into_target(src, dst, learned_aliases=[src]):
                             cleaned.append(label)
+                        else:
+                            skipped.append(label)
                     if cleaned:
                         sync_save_db()
-                        st.success(f"已清理 {len(cleaned)} 个异常项目：{'；'.join(cleaned[:6])}")
+                        msg = f"已清理 {len(cleaned)} 个异常项目：{'；'.join(cleaned[:6])}"
+                        if skipped:
+                            msg += f"；另有 {len(skipped)} 个未处理，请检查目标项是否有效。"
+                        st.success(msg)
                         st.rerun()
+                    elif skipped:
+                        st.warning(f"本次没有清理成功。未处理项：{'；'.join(skipped[:6])}")
                     else:
                         st.info("没有可执行的异常项目清理。")
             else:
