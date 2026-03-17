@@ -122,6 +122,22 @@ def _project_similarity_key(name):
     return norm_text(cleaned)
 
 
+def _project_specificity_score(name):
+    txt = str(name or "").strip()
+    _ratio, body = _split_project_ratio_and_body(txt)
+    body = str(body or "").strip()
+    score = 0
+    score += len(body)
+    score += 8 * len(re.findall(r"[（(][^）)]*[）)]", txt))
+    score += 3 * len(re.findall(r"[-_/]", body))
+    score += 4 * len(re.findall(r"[A-Za-z0-9]+", body))
+    role_terms = ["阿卡丽", "卡莎", "新皮肤", "第二部", "战衣", "西服", "首领", "超女", "neo", "Neo"]
+    for term in role_terms:
+        if term in txt:
+            score += 6
+    return score
+
+
 def detect_high_similarity_project_pairs(project_names):
     names = [str(x).strip() for x in (project_names or []) if str(x).strip() and str(x).strip() != "系统配置"]
     rows = []
@@ -151,8 +167,19 @@ def detect_high_similarity_project_pairs(project_names):
             if not matched:
                 continue
 
-            preferred = a if (len(a) <= len(b)) else b
+            score_a = _project_specificity_score(a)
+            score_b = _project_specificity_score(b)
+            if score_a == score_b:
+                preferred = a if (len(a) >= len(b)) else b
+            else:
+                preferred = a if score_a > score_b else b
             suspicious = b if preferred == a else a
+
+            key_pref = _project_similarity_key(preferred)
+            key_susp = _project_similarity_key(suspicious)
+            if key_pref and key_susp and (key_pref in key_susp) and (len(key_pref) < len(key_susp)):
+                continue
+
             key = tuple(sorted([preferred, suspicious]))
             if key in seen:
                 continue
