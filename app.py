@@ -114,6 +114,22 @@ def _split_project_ratio_and_body(name):
     return "", txt
 
 
+def _is_supported_named_ratio(name):
+    txt = str(name or "").strip()
+    if txt.startswith("1/6"):
+        return True
+    if txt.startswith("1/12"):
+        return True
+    if "小比例" in txt:
+        return True
+    return False
+
+
+def _is_malformed_short_ratio_name(name):
+    txt = str(name or "").strip()
+    return bool(re.match(r"^(6|12)\s*[A-Za-z0-9\u4e00-\u9fa5].+", txt))
+
+
 def _project_similarity_key(name):
     _ratio, body = _split_project_ratio_and_body(name)
     cleaned = str(body or "").strip()
@@ -127,6 +143,10 @@ def _project_specificity_score(name):
     _ratio, body = _split_project_ratio_and_body(txt)
     body = str(body or "").strip()
     score = 0
+    if _is_supported_named_ratio(txt):
+        score += 20
+    if _is_malformed_short_ratio_name(txt):
+        score -= 20
     score += len(body)
     score += 8 * len(re.findall(r"[（(][^）)]*[）)]", txt))
     score += 3 * len(re.findall(r"[-_/]", body))
@@ -167,12 +187,21 @@ def detect_high_similarity_project_pairs(project_names):
             if not matched:
                 continue
 
-            score_a = _project_specificity_score(a)
-            score_b = _project_specificity_score(b)
-            if score_a == score_b:
-                preferred = a if (len(a) >= len(b)) else b
+            supported_a = _is_supported_named_ratio(a)
+            supported_b = _is_supported_named_ratio(b)
+            malformed_a = _is_malformed_short_ratio_name(a)
+            malformed_b = _is_malformed_short_ratio_name(b)
+            if supported_a and malformed_b:
+                preferred = a
+            elif supported_b and malformed_a:
+                preferred = b
             else:
-                preferred = a if score_a > score_b else b
+                score_a = _project_specificity_score(a)
+                score_b = _project_specificity_score(b)
+                if score_a == score_b:
+                    preferred = a if (len(a) >= len(b)) else b
+                else:
+                    preferred = a if score_a > score_b else b
             suspicious = b if preferred == a else a
 
             key_pref = _project_similarity_key(preferred)
