@@ -3893,11 +3893,25 @@ def build_project_stage_segments(proj_label, proj_data):
             "synthetic": True,
         })
 
+    launch_dates = sorted({x["date"] for x in stage_records["立项"]})
+    launch_start = launch_dates[0] if launch_dates else None
+
+    earliest_real_follow_stage_dt = min(
+        [
+            x["date"]
+            for stage_name, recs in stage_records.items()
+            if stage_name not in ["立项", "暂停", "结束"]
+            for x in recs
+            if not bool(x.get("synthetic"))
+        ],
+        default=None,
+    )
+
     if not stage_records["建模"] and milestone not in ["暂停研发", "生产结束", "项目结束撒花🎉", "✅ 已完成(结束)"]:
         if len(unique_dates) > 1 or milestone in ["研发中", "待开定", "已开定", "下模中", "生产中"]:
             higher_stage_exists = any(stage_records.get(s) for s in ["设计", "工程", "开模", "修模", "生产"])
             if higher_stage_exists:
-                build_seed = first_date
+                build_seed = (launch_start + datetime.timedelta(days=1)) if launch_start else first_date
             else:
                 build_seed = second_date or (first_date + datetime.timedelta(days=1))
             stage_records["建模"].append({
@@ -3905,6 +3919,21 @@ def build_project_stage_segments(proj_label, proj_data):
                 "stage": "建模",
                 "component": "全局进度",
                 "event": "立项后默认转入建模（甘特自动归类）",
+                "review_type": "",
+                "review_result": "",
+                "review_round": "",
+                "raw_stage": "建模(含打印/签样)",
+                "synthetic": True,
+            })
+    elif stage_records["建模"] and launch_start:
+        earliest_build_dt = min(x["date"] for x in stage_records["建模"])
+        expected_build_start = launch_start + datetime.timedelta(days=1)
+        if earliest_build_dt > expected_build_start:
+            stage_records["建模"].append({
+                "date": expected_build_start,
+                "stage": "建模",
+                "component": "全局进度",
+                "event": "立项后默认延续建模（甘特自动补足连续段）",
                 "review_type": "",
                 "review_result": "",
                 "review_round": "",
@@ -3983,7 +4012,6 @@ def build_project_stage_segments(proj_label, proj_data):
         return sum(1 for kw in explicit_kws if kw in txt)
 
     launch_records = stage_records["立项"]
-    launch_start = min([x["date"] for x in launch_records], default=None)
     pause_dates = sorted({x["date"] for x in stage_records.get("暂停", [])})
     active_bucket = get_project_status_bucket(proj_data.get("Milestone", "")) if isinstance(proj_data, dict) else "unknown"
     latest_non_pause_record = max(
@@ -4091,6 +4119,8 @@ def build_project_stage_segments(proj_label, proj_data):
         explicit_records = [x for x in records if _pause_reason_score(x) > 0]
         if explicit_records:
             records = explicit_records
+        elif milestone != "暂停研发":
+            continue
         elif records:
             records = [sorted(records, key=lambda x: (x["date"], -_pause_reason_score(x), x["event"]))[0]]
         segments.append({
