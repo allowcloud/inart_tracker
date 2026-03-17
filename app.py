@@ -1536,24 +1536,58 @@ def auto_sync_milestone(proj_name):
             proj_data["Milestone"] = "研发中"
 
 
+def recompute_project_derived_state(proj_name):
+    if not proj_name or proj_name == "系统配置":
+        return
+    if proj_name not in st.session_state.db:
+        return
+    auto_sync_milestone(proj_name)
+    refresh_project_todo_links(proj_name)
+
+
+def recompute_all_project_derived_states():
+    for p in st.session_state.db:
+        if p != "系统配置":
+            recompute_project_derived_state(p)
+
+
+def persist_db_scope(changed_proj=None):
+    if changed_proj:
+        if changed_proj != "系统配置" and changed_proj in st.session_state.db:
+            db_manager.save_one(changed_proj, st.session_state.db[changed_proj])
+        db_manager.save_one("系统配置", st.session_state.db["系统配置"])
+    else:
+        db_manager.save(st.session_state.db)
+
+
 def sync_save_db(changed_proj=None):
     """
     changed_proj: save one project key when provided.
     otherwise save all projects.
     """
     if changed_proj and changed_proj in st.session_state.db and changed_proj != "\u7cfb\u7edf\u914d\u7f6e":
-        auto_sync_milestone(changed_proj)
-        refresh_project_todo_links(changed_proj)
+        recompute_project_derived_state(changed_proj)
     else:
-        for p in st.session_state.db:
-            if p != "\u7cfb\u7edf\u914d\u7f6e":
-                auto_sync_milestone(p)
-                refresh_project_todo_links(p)
-    if changed_proj:
-        db_manager.save_one(changed_proj, st.session_state.db[changed_proj])
-        db_manager.save_one("\u7cfb\u7edf\u914d\u7f6e", st.session_state.db["\u7cfb\u7edf\u914d\u7f6e"])
-    else:
-        db_manager.save(st.session_state.db)
+        recompute_all_project_derived_states()
+    persist_db_scope(changed_proj)
+
+
+def normalize_project_name_for_write(raw_name, valid_projs=None, alias_map=None):
+    name = re.sub(r"\s*/\s*", "/", str(raw_name or "").strip())
+    if not name:
+        return ""
+    alias_map = alias_map or (db.get("系统配置", {}).get("项目别名", {}) if isinstance(db, dict) else {})
+    valid_list = list(valid_projs or [p for p in db.keys() if p != "系统配置"]) if isinstance(db, dict) else list(valid_projs or [])
+    canonical = canonicalize_project_name(name, valid_projs=valid_list, alias_map=alias_map)
+    if canonical and canonical in valid_list:
+        return canonical
+
+    cleaned = name
+    for candidate, reason in _project_name_noise_variants(name):
+        if reason.startswith("状态尾缀") or reason == "括号英文尾注":
+            cleaned = candidate
+            break
+    return cleaned.strip()
 def _is_small_scale_project(proj_label="", proj_data=None):
     proj_name = str(proj_label or "").strip()
     p = proj_data if isinstance(proj_data, dict) else {}
@@ -2532,7 +2566,7 @@ def build_project_shell(owner_name="", ratio_preset="", ip_owner=""):
 
 
 def _normalize_autocreate_project_name(project_name):
-    name = re.sub(r"\s*/\s*", "/", str(project_name or "").strip())
+    name = normalize_project_name_for_write(project_name)
     if not name:
         return ""
 
@@ -7997,14 +8031,15 @@ elif menu == MENU_SPECIFIC:
             with c_n5:
                 st.write("")
                 if st.button("创建", type="primary"):
-                    if new_p and new_p not in db:
-                        db[new_p] = build_project_shell(new_pm, new_ratio, new_ip_owner)
-                        sync_save_db(new_p)
+                    final_new_p = normalize_project_name_for_write(new_p)
+                    if final_new_p and final_new_p not in db:
+                        db[final_new_p] = build_project_shell(new_pm, new_ratio, new_ip_owner)
+                        sync_save_db(final_new_p)
                         st.success(f"已创建并分配给 {new_pm}")
-                        st.toast(f"✅ 已创建：{new_p}")
+                        st.toast(f"✅ 已创建：{final_new_p}")
                         st.session_state.new_proj_mode = False
                         st.rerun()
-                    elif new_p in db:
+                    elif final_new_p in db:
                         st.warning("项目已存在。")
                     else:
                         st.error("项目名称不能为空。")
@@ -9050,14 +9085,15 @@ elif menu == MENU_FASTLOG:
                                                     placeholder="如: 1/6 威龙")
                         new_p_pm   = st.selectbox("负责人", ["Mo", "越", "袁"], key=f"new_ppm_{i}")
                         if st.button("✅ 建档并选中", key=f"new_pbtn_{i}", type="primary"):
-                            if new_p_name and new_p_name not in db:
-                                db[new_p_name] = build_project_shell(owner_name=new_p_pm)
-                                sync_save_db(new_p_name)
+                            final_new_p = normalize_project_name_for_write(new_p_name)
+                            if final_new_p and final_new_p not in db:
+                                db[final_new_p] = build_project_shell(owner_name=new_p_pm)
+                                sync_save_db(final_new_p)
                                 # 更新识别结果为新建的项目
-                                st.session_state.parsed_logs[i]['识别项目'] = new_p_name
-                                st.success(f"✅ 已建档：{new_p_name}")
+                                st.session_state.parsed_logs[i]['识别项目'] = final_new_p
+                                st.success(f"✅ 已建档：{final_new_p}")
                                 st.rerun()
-                            elif new_p_name in db:
+                            elif final_new_p in db:
                                 st.warning("项目已存在，直接在上方下拉选择即可。")
             with c2:
                 sel_comp = st.selectbox(
@@ -9193,7 +9229,7 @@ elif menu == MENU_FASTLOG:
             ))
             for cp in changed_projs:
                 sync_save_db(cp)
-            db_manager.save_one("系统配置", st.session_state.db["系统配置"])
+            sync_save_db("系统配置")
             st.session_state.parsed_logs    = []
             st.session_state.ai_pasted_cache = {}
             msg = "🎉 入库成功！" if learned_count == 0 else f"🎉 入库成功！AI 已学会了 {learned_count} 个新词汇！"
@@ -10473,6 +10509,57 @@ elif menu == MENU_SETTINGS:
             sync_save_db("系统配置")
             st.success("识别词典中心已保存。后续 To-do / 大盘 / AI 速记 / 打印追踪 会共用这些规则。")
             st.rerun()
+
+    with st.expander("🧪 识别调试台（看系统怎么理解一段文本）", expanded=False):
+        debug_text = st.text_area(
+            "输入要排查的原文",
+            height=120,
+            key="recognition_debug_text",
+            placeholder="例：设计将文件转交给工程：尼奥下发工程；预计3/20左右植发初版可出",
+        )
+        debug_proj_hint = st.selectbox(
+            "项目提示（可选）",
+            ["(不指定项目)"] + [p for p in db.keys() if p != "系统配置"],
+            key="recognition_debug_proj_hint",
+        )
+        if debug_text.strip():
+            debug_proj_list = infer_todo_projects_from_text(
+                {
+                    "任务": debug_text.strip(),
+                    "CPDDL": debug_text.strip(),
+                    "关联项目": "" if debug_proj_hint == "(不指定项目)" else debug_proj_hint,
+                    "关联项目列表": [] if debug_proj_hint == "(不指定项目)" else [debug_proj_hint],
+                },
+                [p for p in db.keys() if p != "系统配置"],
+            )
+            comp_hits = []
+            for kw, comp in get_component_keyword_map().items():
+                if str(kw).strip() and str(kw) in debug_text and comp not in comp_hits:
+                    comp_hits.append(comp)
+            stage_hits = []
+            for kw, stage in get_stage_keyword_map().items():
+                if str(kw).strip() and str(kw) in debug_text and stage not in stage_hits:
+                    stage_hits.append(stage)
+            people_hint = format_todo_people_hint({"任务": debug_text.strip(), "CPDDL": "", "关联人员": ""})
+            handoff_hit = "是" if any(sig in norm_text(debug_text) for sig in ["设计将文件转交给工程", "设计交接工程", "转交给工程", "下发工程", "发给工程", "交给工程"]) else "否"
+
+            dcol1, dcol2 = st.columns(2)
+            with dcol1:
+                st.markdown("**项目猜测**")
+                st.write(" / ".join(debug_proj_list) if debug_proj_list else "(未命中)")
+                st.markdown("**部件猜测**")
+                st.write(" / ".join(comp_hits[:6]) if comp_hits else "全局进度 / 未命中")
+                st.markdown("**阶段猜测**")
+                st.write(" / ".join(stage_hits[:6]) if stage_hits else "(维持原阶段)")
+            with dcol2:
+                st.markdown("**审核语义**")
+                st.write(f"版权审核语境：{'是' if has_copyright_review_context(debug_text) else '否'}")
+                st.write(f"提审类型：{infer_review_type_from_text(debug_text)}")
+                st.write(f"提审结果：{infer_review_result_from_text(debug_text)}")
+                st.markdown("**人员识别**")
+                st.write(people_hint)
+                st.markdown("**交接信号**")
+                st.write(f"设计->工程：{handoff_hit}")
 
     with st.expander("🧭 识别待确认队列（不删功能，只帮你先捞出高风险条目）", expanded=False):
         low_conf_events = collect_low_confidence_standard_events(limit=80)
