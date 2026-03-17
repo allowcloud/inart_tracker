@@ -663,6 +663,7 @@ DEFAULT_RECOGNITION_DICT = {
     "未来意图词": ["待", "待办", "需要", "需", "跟进", "跟催", "补", "安排", "todo", "to do", "ddl", "cp", "待审", "待反馈", "待版权", "预计", "预计出", "预计给出", "即将"],
     "过去意图词": ["已", "已经", "完成", "完毕", "通过", "收到", "确认了", "确认完成", "看过", "on-hand", "on hand", "done", "ok", "提交", "已提交", "已提审", "提审通过", "已发"],
     "恢复推进词": ["resume", "恢复", "重启", "继续推进", "解除暂停", "复工"],
+    "暂停信号词": ["暂停", "搁置", "冻结", "挂起", "叫停", "停止", "暂停研发", "项目暂停", "项目取消", "确认取消", "先停", "先暂停", "停做", "停一下"],
     "打印正向词": ["打印", "开打", "安排打", "去打", "送打", "打件", "打印件", "打样件", "博泰", "逸博", "小样儿"],
     "打印排除词": ["打印件已收到"],
     "日期噪音词": ["预计", "左右", "大概", "约", "计划", "可", "能", "初版"],
@@ -740,6 +741,23 @@ def resolve_people_alias(raw_label):
 
 def get_recognition_keywords(list_key):
     return get_recognition_dict().get(list_key, [])
+
+
+def get_pause_signal_keywords():
+    kws = get_recognition_keywords("暂停信号词")
+    if not isinstance(kws, list) or not kws:
+        kws = DEFAULT_RECOGNITION_DICT.get("暂停信号词", [])
+    return [str(x).strip() for x in kws if str(x).strip()]
+
+
+def has_pause_signal(text):
+    txt = str(text or "").strip()
+    if not txt:
+        return False
+    resume_kws = get_recognition_keywords("恢复推进词")
+    if any(str(kw).strip() and str(kw).strip() in txt for kw in resume_kws):
+        return False
+    return any(kw in txt for kw in get_pause_signal_keywords())
 
 
 def _format_keyword_map_text(mapping):
@@ -1761,7 +1779,7 @@ def _macro_phase_rule_matches(rule, stage_text, event_text, lower_evt, comp_name
     if when == "global_pause":
         return (
             "全局" in str(comp_name or "")
-            and any(kw in evt for kw in ["项目取消", "暂停研发", "项目暂停", "暂停项目", "停止研发", "冻结项目", "项目叫停"])
+            and has_pause_signal(evt)
         )
     if when == "print_signal":
         return ("打印" in evt) or ("签样" in evt) or (s == "打印") or any(x in evt for x in ["效果下模", "确认效果下模", "待确认效果下模"])
@@ -2782,6 +2800,19 @@ def create_project_shell_if_missing(project_name, owner_name="", ratio_preset=""
         return False
     db[proj] = build_project_shell(owner_name=owner_name, ratio_preset=ratio_preset, ip_owner=ip_owner)
     return True
+
+
+def upsert_project_shell(project_name, owner_name="", ratio_preset="", ip_owner="", base_data=None):
+    proj = _normalize_autocreate_project_name(project_name)
+    if not proj or proj == "系统配置":
+        return "", False
+    if proj in db and isinstance(db.get(proj), dict):
+        return proj, False
+    if isinstance(base_data, dict):
+        db[proj] = json.loads(json.dumps(base_data, ensure_ascii=False))
+    else:
+        db[proj] = build_project_shell(owner_name=owner_name, ratio_preset=ratio_preset, ip_owner=ip_owner)
+    return proj, True
 
 
 def infer_malformed_ratio_project_target(project_name):
@@ -4043,8 +4074,7 @@ def build_project_stage_segments(proj_label, proj_data):
 
     def _pause_reason_score(rec):
         txt = f"{rec.get('raw_stage', '')} {rec.get('event', '')}".strip()
-        explicit_kws = ["暂停", "搁置", "冻结", "挂起", "叫停", "停止", "暂停研发", "项目暂停", "项目取消"]
-        return sum(1 for kw in explicit_kws if kw in txt)
+        return sum(1 for kw in get_pause_signal_keywords() if kw in txt)
 
     launch_records = stage_records["立项"]
     pause_dates = sorted({x["date"] for x in stage_records.get("暂停", [])})
@@ -11105,6 +11135,14 @@ elif menu == MENU_SETTINGS:
                 key="dict_resume_kw_text",
             )
         with col_d4b2:
+            pause_kw_text = st.text_area(
+                "暂停信号词（每行一个）",
+                value=_format_keyword_list_text(current_rec.get("暂停信号词", [])),
+                height=170,
+                key="dict_pause_kw_text",
+            )
+        col_d4b3, col_d4b4 = st.columns(2)
+        with col_d4b3:
             people_alias_text = st.text_area(
                 "人员别名（每行 `别名=角色-姓名`）",
                 value=_format_keyword_map_text(current_people_alias),
@@ -11138,6 +11176,7 @@ elif menu == MENU_SETTINGS:
                 "未来意图词": _parse_keyword_list_text(future_kw_text),
                 "过去意图词": _parse_keyword_list_text(past_kw_text),
                 "恢复推进词": _parse_keyword_list_text(resume_kw_text),
+                "暂停信号词": _parse_keyword_list_text(pause_kw_text),
                 "打印正向词": _parse_keyword_list_text(print_pos_text),
                 "打印排除词": _parse_keyword_list_text(print_neg_text),
                 "日期噪音词": _parse_keyword_list_text(date_noise_text),
