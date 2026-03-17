@@ -7902,6 +7902,33 @@ if menu == MENU_DASHBOARD:
                     customdata=df_review_marks[["说明"]],
                     hovertemplate="%{customdata[0]}<extra></extra>"
                 ))
+        pause_marks = []
+        for row in gantt_data:
+            if str(row.get("工序阶段", "")).strip() != "暂停":
+                continue
+            pause_marks.append({
+                "日期": str(row.get("Start", "")).strip(),
+                "项目": str(row.get("项目", "")).strip(),
+                "说明": str(row.get("详情", "")).strip() or "暂停",
+            })
+        if pause_marks:
+            df_pause_marks = pd.DataFrame(pause_marks)
+            df_pause_marks["日期_dt"] = pd.to_datetime(df_pause_marks["日期"], errors="coerce")
+            if not showing_full_gantt:
+                df_pause_marks = df_pause_marks[(df_pause_marks["日期_dt"] >= selected_start) & (df_pause_marks["日期_dt"] <= selected_end)].copy()
+            if not df_pause_marks.empty:
+                fig.add_trace(go.Scatter(
+                    x=df_pause_marks["日期"],
+                    y=df_pause_marks["项目"],
+                    mode="markers+text",
+                    marker=dict(symbol="square", size=12, color="#64748B", line=dict(width=1, color="white")),
+                    text=["停"] * len(df_pause_marks),
+                    textposition="middle center",
+                    textfont=dict(size=8, color="white"),
+                    name="暂停标记",
+                    customdata=df_pause_marks[["说明"]],
+                    hovertemplate="%{customdata[0]}<extra></extra>"
+                ))
         if timeline_marks:
             df_marks = pd.DataFrame(timeline_marks)
             df_marks["日期_dt"] = pd.to_datetime(df_marks["日期"], errors="coerce")
