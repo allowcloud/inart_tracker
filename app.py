@@ -122,6 +122,22 @@ def _project_similarity_key(name):
     return norm_text(cleaned)
 
 
+def _project_specificity_score(name):
+    txt = str(name or "").strip()
+    _ratio, body = _split_project_ratio_and_body(txt)
+    body = str(body or "").strip()
+    score = 0
+    score += len(body)
+    score += 8 * len(re.findall(r"[（(][^）)]*[）)]", txt))
+    score += 3 * len(re.findall(r"[-_/]", body))
+    score += 4 * len(re.findall(r"[A-Za-z0-9]+", body))
+    role_terms = ["阿卡丽", "卡莎", "新皮肤", "第二部", "战衣", "西服", "首领", "超女", "neo", "Neo"]
+    for term in role_terms:
+        if term in txt:
+            score += 6
+    return score
+
+
 def detect_high_similarity_project_pairs(project_names):
     names = [str(x).strip() for x in (project_names or []) if str(x).strip() and str(x).strip() != "系统配置"]
     rows = []
@@ -151,8 +167,19 @@ def detect_high_similarity_project_pairs(project_names):
             if not matched:
                 continue
 
-            preferred = a if (len(a) <= len(b)) else b
+            score_a = _project_specificity_score(a)
+            score_b = _project_specificity_score(b)
+            if score_a == score_b:
+                preferred = a if (len(a) >= len(b)) else b
+            else:
+                preferred = a if score_a > score_b else b
             suspicious = b if preferred == a else a
+
+            key_pref = _project_similarity_key(preferred)
+            key_susp = _project_similarity_key(suspicious)
+            if key_pref and key_susp and (key_pref in key_susp) and (len(key_pref) < len(key_susp)):
+                continue
+
             key = tuple(sorted([preferred, suspicious]))
             if key in seen:
                 continue
@@ -1536,24 +1563,58 @@ def auto_sync_milestone(proj_name):
             proj_data["Milestone"] = "研发中"
 
 
+def recompute_project_derived_state(proj_name):
+    if not proj_name or proj_name == "系统配置":
+        return
+    if proj_name not in st.session_state.db:
+        return
+    auto_sync_milestone(proj_name)
+    refresh_project_todo_links(proj_name)
+
+
+def recompute_all_project_derived_states():
+    for p in st.session_state.db:
+        if p != "系统配置":
+            recompute_project_derived_state(p)
+
+
+def persist_db_scope(changed_proj=None):
+    if changed_proj:
+        if changed_proj != "系统配置" and changed_proj in st.session_state.db:
+            db_manager.save_one(changed_proj, st.session_state.db[changed_proj])
+        db_manager.save_one("系统配置", st.session_state.db["系统配置"])
+    else:
+        db_manager.save(st.session_state.db)
+
+
 def sync_save_db(changed_proj=None):
     """
     changed_proj: save one project key when provided.
     otherwise save all projects.
     """
     if changed_proj and changed_proj in st.session_state.db and changed_proj != "\u7cfb\u7edf\u914d\u7f6e":
-        auto_sync_milestone(changed_proj)
-        refresh_project_todo_links(changed_proj)
+        recompute_project_derived_state(changed_proj)
     else:
-        for p in st.session_state.db:
-            if p != "\u7cfb\u7edf\u914d\u7f6e":
-                auto_sync_milestone(p)
-                refresh_project_todo_links(p)
-    if changed_proj:
-        db_manager.save_one(changed_proj, st.session_state.db[changed_proj])
-        db_manager.save_one("\u7cfb\u7edf\u914d\u7f6e", st.session_state.db["\u7cfb\u7edf\u914d\u7f6e"])
-    else:
-        db_manager.save(st.session_state.db)
+        recompute_all_project_derived_states()
+    persist_db_scope(changed_proj)
+
+
+def normalize_project_name_for_write(raw_name, valid_projs=None, alias_map=None):
+    name = re.sub(r"\s*/\s*", "/", str(raw_name or "").strip())
+    if not name:
+        return ""
+    alias_map = alias_map or (db.get("系统配置", {}).get("项目别名", {}) if isinstance(db, dict) else {})
+    valid_list = list(valid_projs or [p for p in db.keys() if p != "系统配置"]) if isinstance(db, dict) else list(valid_projs or [])
+    canonical = canonicalize_project_name(name, valid_projs=valid_list, alias_map=alias_map)
+    if canonical and canonical in valid_list:
+        return canonical
+
+    cleaned = name
+    for candidate, reason in _project_name_noise_variants(name):
+        if reason.startswith("状态尾缀") or reason == "括号英文尾注":
+            cleaned = candidate
+            break
+    return cleaned.strip()
 def _is_small_scale_project(proj_label="", proj_data=None):
     proj_name = str(proj_label or "").strip()
     p = proj_data if isinstance(proj_data, dict) else {}
@@ -2532,7 +2593,7 @@ def build_project_shell(owner_name="", ratio_preset="", ip_owner=""):
 
 
 def _normalize_autocreate_project_name(project_name):
-    name = re.sub(r"\s*/\s*", "/", str(project_name or "").strip())
+    name = normalize_project_name_for_write(project_name)
     if not name:
         return ""
 
@@ -4656,6 +4717,181 @@ def build_timeline_marker_info(proj_name, proj_label, milestone, target_text, sh
     return None
 
 
+def match_fastlog_project_name(raw_name, visible_projects, project_alias_map=None, manual_pick="⚠️请手动选择项目"):
+    raw = str(raw_name or "").strip()
+    if not raw:
+        return manual_pick
+    project_alias_map = project_alias_map or {}
+    direct = resolve_alias_project(raw, project_alias_map)
+    if direct in visible_projects:
+        return direct
+    q = norm_text(raw)
+    if not q:
+        return manual_pick
+    matched = []
+    for p in visible_projects:
+        p_full = norm_text(p)
+        p_core = norm_text(re.sub(r'(1/6|1/4|1/12|1/3|1/1)\s*', '', str(p)))
+        if q in p_full or (p_core and q in p_core):
+            matched.append(p)
+    matched = list(dict.fromkeys(matched))
+    return matched[0] if len(matched) == 1 else manual_pick
+
+
+def parse_fastlog_rows(raw_text, comp_kw, stage_kw, default_project="", visible_projects=None, project_alias_map=None,
+                       unresolved_comp="全局进度", manual_pick="⚠️请手动选择项目"):
+    parsed = []
+    visible_projects = list(visible_projects or [])
+    project_alias_map = project_alias_map or {}
+
+    if visible_projects:
+        for line in [x.strip() for x in str(raw_text).splitlines() if x.strip()]:
+            txt = line.replace("：", ":").strip().rstrip("；;")
+            if not txt:
+                continue
+            if ":" in txt:
+                proj_part, content_part = txt.split(":", 1)
+                proj_tokens = [x.strip() for x in re.split(r"&|和|,|，|、", proj_part) if x.strip()]
+            else:
+                proj_tokens = [default_project] if default_project else [manual_pick]
+                content_part = txt
+            content_segs = [x.strip() for x in re.split(r"[;；]+", content_part) if x.strip()]
+            if not content_segs:
+                content_segs = [content_part.strip()] if content_part.strip() else []
+            projects = [match_fastlog_project_name(p, visible_projects, project_alias_map, manual_pick) for p in proj_tokens] or [manual_pick]
+            for proj in projects:
+                for seg in content_segs:
+                    comp = next((v for k, v in comp_kw.items() if str(k).strip() and str(k) in seg), "全局进度")
+                    stage = next((v for k, v in stage_kw.items() if str(k).strip() and str(k) in seg), "(维持原阶段)")
+                    parsed.append({
+                        "项目": proj,
+                        "部件": comp,
+                        "阶段": stage,
+                        "事件": seg,
+                        "新词": "",
+                        "提审类型": infer_review_type_from_text(seg),
+                        "提审结果": infer_review_result_from_text(seg),
+                        "提审轮次": infer_review_round_from_text(seg)
+                    })
+        return parsed
+
+    segs = [s.strip() for s in re.split(r"[;；\n]+", str(raw_text)) if s.strip()]
+    for seg in segs:
+        comp = next((v for k, v in comp_kw.items() if str(k).strip() and str(k) in seg), unresolved_comp)
+        stage = next((v for k, v in stage_kw.items() if str(k).strip() and str(k) in seg), "(维持原阶段)")
+        parsed.append({
+            "部件": comp,
+            "阶段": stage,
+            "事件": seg,
+            "新词": "",
+            "提审类型": infer_review_type_from_text(seg),
+            "提审结果": infer_review_result_from_text(seg),
+            "提审轮次": infer_review_round_from_text(seg)
+        })
+    return parsed
+
+
+def build_uploaded_image_bindings(files, file_bind, prefix):
+    images_by_target = {}
+    for i, f in enumerate(files or []):
+        target = file_bind.get(i, "全部记录")
+        img_ref = save_uploaded_file_ref(f, prefix=prefix)
+        if img_ref:
+            images_by_target.setdefault(target, []).append(img_ref)
+    return images_by_target
+
+
+def save_fastlog_rows_to_db(edited_df, rec_date, source_name, image_bindings=None, auto_learn=True, auto_learn_chars=6,
+                            force_submit=False, target_project=None, project_alias_map=None, manual_pick="⚠️请手动选择项目",
+                            unresolved_comp=None):
+    image_bindings = image_bindings or {}
+    project_alias_map = project_alias_map or {}
+    saved_count = 0
+    skipped_count = 0
+    learned_count = 0
+    changed_projects = set()
+
+    for _, row in edited_df.iterrows():
+        proj = target_project
+        if not proj:
+            proj_raw = str(row.get("项目", "")).strip()
+            proj = resolve_alias_project(proj_raw, project_alias_map)
+            if proj not in db or proj == "系统配置" or manual_pick in proj_raw:
+                skipped_count += 1
+                continue
+
+        evt = str(row.get("事件", "")).strip()
+        if not evt:
+            skipped_count += 1
+            continue
+
+        comp = str(row.get("部件", unresolved_comp or "全局进度")).strip() or (unresolved_comp or "全局进度")
+        if unresolved_comp and comp == unresolved_comp:
+            st.warning(f"[{evt[:14]}] 未选择部件，已跳过。")
+            skipped_count += 1
+            continue
+        if comp == "其他配件(系统自动创建)":
+            comp = "自定义配件"
+        stage_in = str(row.get("阶段", "(维持原阶段)")).strip()
+        rv_type = str(row.get("提审类型", "(无)")) or "(无)"
+        rv_res = str(row.get("提审结果", "(无)")) or "(无)"
+        rv_round = normalize_review_round(row.get("提审轮次", ""))
+
+        if comp not in db[proj].setdefault("部件列表", {}):
+            db[proj]["部件列表"][comp] = {"主流程": STAGES_UNIFIED[0], "日志流": []}
+
+        curr_stage = db[proj]["部件列表"][comp].get("主流程", STAGES_UNIFIED[0])
+        final_stage = curr_stage if stage_in in ["", "(维持原阶段)"] else stage_in
+        stage_warn = validate_transition_warning(curr_stage, final_stage, STAGES_UNIFIED)
+        review_warn = validate_review_with_stage(rv_type, final_stage, comp, STAGES_UNIFIED)
+        if (stage_warn or review_warn) and not force_submit:
+            warn_txt = "；".join([w for w in [stage_warn, review_warn] if w])
+            label = f"{proj}/{comp}" if not target_project else comp
+            st.warning(f"[{label}] {warn_txt}（如确认无误可勾选强制提交）")
+            skipped_count += 1
+            continue
+
+        bind_key = comp if target_project else proj
+        imgs = image_bindings.get("全部记录", []) + image_bindings.get(bind_key, [])
+        db[proj]["部件列表"][comp].setdefault("日志流", []).append({
+            "日期": str(rec_date),
+            "流转": source_name,
+            "工序": final_stage,
+            "事件": evt,
+            "图片": imgs,
+            "提审类型": rv_type,
+            "提审结果": rv_res,
+            "提审轮次": rv_round
+        })
+        db[proj]["部件列表"][comp]["主流程"] = final_stage
+        saved_count += 1
+        changed_projects.add(proj)
+
+        kw = str(row.get("新词", "")).strip()
+        if (not kw) and auto_learn:
+            kw = evt[:auto_learn_chars] if len(evt) >= 2 else ""
+        if auto_learn and kw and len(kw) >= 2:
+            if comp != "全局进度":
+                SYS_CFG.setdefault("AI_COMP_KW", {})[kw] = comp
+                learned_count += 1
+            if stage_in not in ["", "(维持原阶段)"]:
+                SYS_CFG.setdefault("AI_STAGE_KW", {})[kw] = final_stage
+                learned_count += 1
+
+    if saved_count > 0:
+        if target_project:
+            sync_save_db(target_project)
+        else:
+            for p in sorted(changed_projects):
+                sync_save_db(p)
+    return {
+        "saved_count": saved_count,
+        "skipped_count": skipped_count,
+        "learned_count": learned_count,
+        "changed_projects": sorted(changed_projects),
+    }
+
+
 def render_pm_batch_fastlog_integrated(visible_projects, default_proj=""):
     st.subheader("📝 批量速记（多项目）")
     st.caption("用于晚间复盘：一次输入多项目进展，解析后统一校对并批量入库。")
@@ -4677,59 +4913,16 @@ def render_pm_batch_fastlog_integrated(visible_projects, default_proj=""):
             placeholder="例：1/6金克丝: 头雕提审通过；包装刀线待补\n1/6里夫西装 & 里夫战衣: 官图提审待反馈"
         )
 
-    def _norm(s):
-        return re.sub(r"\s+", "", str(s or "")).lower()
-
-    def _match_project(name):
-        raw = str(name or "").strip()
-        if not raw:
-            return MANUAL_PICK
-        direct = resolve_alias_project(raw, PROJECT_ALIAS_MAP)
-        if direct in visible_projects:
-            return direct
-        q = _norm(raw)
-        if not q:
-            return MANUAL_PICK
-        matched = []
-        for p in visible_projects:
-            p_full = _norm(p)
-            p_core = _norm(re.sub(r'(1/6|1/4|1/12|1/3|1/1)\s*', '', str(p)))
-            if q in p_full or (p_core and q in p_core):
-                matched.append(p)
-        matched = list(dict.fromkeys(matched))
-        return matched[0] if len(matched) == 1 else MANUAL_PICK
-
     if st.button("✨ 智能拆解", key="pm_batch_parse", type="primary"):
-        parsed = []
-        for line in [x.strip() for x in str(raw_text).splitlines() if x.strip()]:
-            txt = line.replace("：", ":").strip().rstrip("；;")
-            if not txt:
-                continue
-            if ":" in txt:
-                proj_part, content_part = txt.split(":", 1)
-                proj_tokens = [x.strip() for x in re.split(r"&|和|,|，|、", proj_part) if x.strip()]
-            else:
-                proj_tokens = [default_proj] if default_proj else [MANUAL_PICK]
-                content_part = txt
-            content_segs = [x.strip() for x in re.split(r"[;；]+", content_part) if x.strip()]
-            if not content_segs:
-                content_segs = [content_part.strip()] if content_part.strip() else []
-            projects = [_match_project(p) for p in proj_tokens] or [MANUAL_PICK]
-            for p in projects:
-                for seg in content_segs:
-                    comp = next((v for k, v in comp_kw.items() if str(k).strip() and str(k) in seg), "全局进度")
-                    stage = next((v for k, v in stage_kw.items() if str(k).strip() and str(k) in seg), "(维持原阶段)")
-                    parsed.append({
-                        "项目": p,
-                        "部件": comp,
-                        "阶段": stage,
-                        "事件": seg,
-                        "新词": "",
-                        "提审类型": infer_review_type_from_text(seg),
-                        "提审结果": infer_review_result_from_text(seg),
-                        "提审轮次": infer_review_round_from_text(seg)
-                    })
-        st.session_state[k_rows] = parsed
+        st.session_state[k_rows] = parse_fastlog_rows(
+            raw_text,
+            comp_kw,
+            stage_kw,
+            default_project=default_proj,
+            visible_projects=visible_projects,
+            project_alias_map=PROJECT_ALIAS_MAP,
+            manual_pick=MANUAL_PICK,
+        )
 
     rows = st.session_state.get(k_rows, [])
     if not rows:
@@ -4868,83 +5061,20 @@ def render_pm_batch_fastlog_integrated(visible_projects, default_proj=""):
     force_submit = st.checkbox("⚠️ 强制提交（忽略阶段/提审 warning）", value=False, key="pm_batch_force")
 
     if st.button("💾 批量入库", key="pm_batch_save", type="primary"):
-        images_by_target = {}
-        if files:
-            for i, f in enumerate(files):
-                target = file_bind.get(i, "全部记录")
-                img_ref = save_uploaded_file_ref(f, prefix="pm_batch")
-                if img_ref:
-                    images_by_target.setdefault(target, []).append(img_ref)
-
-
-        saved_count = 0
-        skipped_count = 0
-        learned_count = 0
-        changed_projects = set()
-
-        for _, row in edited_df.iterrows():
-            proj_raw = str(row.get("项目", "")).strip()
-            proj = resolve_alias_project(proj_raw, PROJECT_ALIAS_MAP)
-            if proj not in db or proj == "系统配置" or MANUAL_PICK in proj_raw:
-                skipped_count += 1
-                continue
-            evt = str(row.get("事件", "")).strip()
-            if not evt:
-                skipped_count += 1
-                continue
-
-            comp = str(row.get("部件", "全局进度")).strip() or "全局进度"
-            if comp == "其他配件(系统自动创建)":
-                comp = "自定义配件"
-            stage_in = str(row.get("阶段", "(维持原阶段)")).strip()
-            rv_type = str(row.get("提审类型", "(无)")) or "(无)"
-            rv_res = str(row.get("提审结果", "(无)")) or "(无)"
-            rv_round = normalize_review_round(row.get("提审轮次", ""))
-
-            if comp not in db[proj].setdefault("部件列表", {}):
-                db[proj]["部件列表"][comp] = {"主流程": STAGES_UNIFIED[0], "日志流": []}
-
-            curr_stage = db[proj]["部件列表"][comp].get("主流程", STAGES_UNIFIED[0])
-            final_stage = curr_stage if stage_in in ["", "(维持原阶段)"] else stage_in
-            stage_warn = validate_transition_warning(curr_stage, final_stage, STAGES_UNIFIED)
-            review_warn = validate_review_with_stage(rv_type, final_stage, comp, STAGES_UNIFIED)
-            if (stage_warn or review_warn) and not force_submit:
-                warn_txt = "；".join([w for w in [stage_warn, review_warn] if w])
-                st.warning(f"[{proj}/{comp}] {warn_txt}（如确认无误可勾选强制提交）")
-                skipped_count += 1
-                continue
-
-            imgs = images_by_target.get("全部记录", []) + images_by_target.get(proj, [])
-            db[proj]["部件列表"][comp].setdefault("日志流", []).append({
-                "日期": str(rec_date),
-                "流转": "PM批量速记",
-                "工序": final_stage,
-                "事件": evt,
-                "图片": imgs,
-                "提审类型": rv_type,
-                "提审结果": rv_res,
-                "提审轮次": rv_round
-            })
-            db[proj]["部件列表"][comp]["主流程"] = final_stage
-            saved_count += 1
-            changed_projects.add(proj)
-
-            kw = str(row.get("新词", "")).strip()
-            if (not kw) and auto_learn:
-                kw = evt[:8] if len(evt) >= 2 else ""
-            if auto_learn and kw and len(kw) >= 2:
-                if comp != "全局进度":
-                    SYS_CFG.setdefault("AI_COMP_KW", {})[kw] = comp
-                    learned_count += 1
-                if stage_in not in ["", "(维持原阶段)"]:
-                    SYS_CFG.setdefault("AI_STAGE_KW", {})[kw] = final_stage
-                    learned_count += 1
-
-        if saved_count > 0:
-            for p in sorted(changed_projects):
-                sync_save_db(p)
+        result = save_fastlog_rows_to_db(
+            edited_df,
+            rec_date,
+            source_name="PM批量速记",
+            image_bindings=build_uploaded_image_bindings(files, file_bind, prefix="pm_batch"),
+            auto_learn=auto_learn,
+            auto_learn_chars=8,
+            force_submit=force_submit,
+            project_alias_map=PROJECT_ALIAS_MAP,
+            manual_pick=MANUAL_PICK,
+        )
+        if result["saved_count"] > 0:
             st.session_state[k_rows] = []
-            st.success(f"已保存 {saved_count} 条，跳过 {skipped_count} 条。自动学习词条 {learned_count} 个。")
+            st.success(f"已保存 {result['saved_count']} 条，跳过 {result['skipped_count']} 条。自动学习词条 {result['learned_count']} 个。")
             st.rerun()
         else:
             st.warning("没有可保存的记录。")
@@ -4970,21 +5100,12 @@ def render_pm_fastlog_integrated(sel_proj):
         )
 
     if st.button("✨ 解析到部件/阶段", key=f"pm_fast_parse_{sel_proj}"):
-        segs = [s.strip() for s in re.split(r"[;；\n]+", str(raw_txt)) if s.strip()]
-        rows = []
-        for seg in segs:
-            comp = next((v for k, v in comp_kw.items() if str(k).strip() and str(k) in seg), unresolved_comp)
-            stage = next((v for k, v in stage_kw.items() if str(k).strip() and str(k) in seg), "(维持原阶段)")
-            rows.append({
-                "部件": comp,
-                "阶段": stage,
-                "事件": seg,
-                "新词": "",
-                "提审类型": infer_review_type_from_text(seg),
-                "提审结果": infer_review_result_from_text(seg),
-                "提审轮次": infer_review_round_from_text(seg)
-            })
-        st.session_state[rk] = rows
+        st.session_state[rk] = parse_fastlog_rows(
+            raw_txt,
+            comp_kw,
+            stage_kw,
+            unresolved_comp=unresolved_comp,
+        )
 
     rows = st.session_state.get(rk, [])
     if not rows:
@@ -5035,79 +5156,20 @@ def render_pm_fastlog_integrated(sel_proj):
     force_submit = st.checkbox("⚠️ 强制提交（忽略阶段/提审 warning）", value=False, key=f"pm_fast_force_{sel_proj}")
 
     if st.button("💾 保存速记到当前项目", type="primary", key=f"pm_fast_save_{sel_proj}"):
-        images_by_target = {}
-        if files:
-            for i, f in enumerate(files):
-                target = file_bind.get(i, "全部记录")
-                img_ref = save_uploaded_file_ref(f, prefix="pm_fast")
-                if img_ref:
-                    images_by_target.setdefault(target, []).append(img_ref)
-
-
-        saved_count = 0
-        skipped_count = 0
-        learned_count = 0
-        for _, row in edited_df.iterrows():
-            evt = str(row.get("事件", "")).strip()
-            if not evt:
-                skipped_count += 1
-                continue
-
-            comp = str(row.get("部件", unresolved_comp)).strip() or unresolved_comp
-            if comp == unresolved_comp:
-                st.warning(f"[{evt[:14]}] 未选择部件，已跳过。")
-                skipped_count += 1
-                continue
-            if comp == "其他配件(系统自动创建)":
-                comp = "自定义配件"
-            stage_in = str(row.get("阶段", "(维持原阶段)")).strip()
-            rv_type = str(row.get("提审类型", "(无)")) or "(无)"
-            rv_res = str(row.get("提审结果", "(无)")) or "(无)"
-            rv_round = normalize_review_round(row.get("提审轮次", ""))
-
-            if comp not in db[sel_proj].setdefault("部件列表", {}):
-                db[sel_proj]["部件列表"][comp] = {"主流程": STAGES_UNIFIED[0], "日志流": []}
-
-            curr_stage = db[sel_proj]["部件列表"][comp].get("主流程", STAGES_UNIFIED[0])
-            final_stage = curr_stage if stage_in in ["", "(维持原阶段)"] else stage_in
-
-            stage_warn = validate_transition_warning(curr_stage, final_stage, STAGES_UNIFIED)
-            review_warn = validate_review_with_stage(rv_type, final_stage, comp, STAGES_UNIFIED)
-            if (stage_warn or review_warn) and not force_submit:
-                warn_txt = "；".join([w for w in [stage_warn, review_warn] if w])
-                st.warning(f"[{comp}] {warn_txt}（如确认无误可勾选强制提交）")
-                skipped_count += 1
-                continue
-
-            imgs = images_by_target.get("全部记录", []) + images_by_target.get(comp, [])
-            db[sel_proj]["部件列表"][comp].setdefault("日志流", []).append({
-                "日期": str(rec_date),
-                "流转": "PM速记",
-                "工序": final_stage,
-                "事件": evt,
-                "图片": imgs,
-                "提审类型": rv_type,
-                "提审结果": rv_res,
-                "提审轮次": rv_round
-            })
-            db[sel_proj]["部件列表"][comp]["主流程"] = final_stage
-            saved_count += 1
-
-            kw = str(row.get("新词", "")).strip()
-            if (not kw) and auto_learn:
-                kw = evt[:6] if len(evt) >= 2 else ""
-            if auto_learn and kw and len(kw) >= 2:
-                if comp not in ["全局进度", unresolved_comp]:
-                    SYS_CFG.setdefault("AI_COMP_KW", {})[kw] = comp
-                    learned_count += 1
-                if stage_in not in ["", "(维持原阶段)"]:
-                    SYS_CFG.setdefault("AI_STAGE_KW", {})[kw] = final_stage
-                    learned_count += 1
-
-        if saved_count > 0:
-            sync_save_db(sel_proj)
+        result = save_fastlog_rows_to_db(
+            edited_df,
+            rec_date,
+            source_name="PM速记",
+            image_bindings=build_uploaded_image_bindings(files, file_bind, prefix="pm_fast"),
+            auto_learn=auto_learn,
+            auto_learn_chars=6,
+            force_submit=force_submit,
+            target_project=sel_proj,
+            unresolved_comp=unresolved_comp,
+        )
+        if result["saved_count"] > 0:
             st.session_state[rk] = []
-            st.success(f"已保存 {saved_count} 条速记，跳过 {skipped_count} 条。自动学习词条 {learned_count} 个。")
+            st.success(f"已保存 {result['saved_count']} 条速记，跳过 {result['skipped_count']} 条。自动学习词条 {result['learned_count']} 个。")
             st.rerun()
         else:
             st.warning("没有可保存的记录。")
@@ -7996,14 +8058,15 @@ elif menu == MENU_SPECIFIC:
             with c_n5:
                 st.write("")
                 if st.button("创建", type="primary"):
-                    if new_p and new_p not in db:
-                        db[new_p] = build_project_shell(new_pm, new_ratio, new_ip_owner)
-                        sync_save_db(new_p)
+                    final_new_p = normalize_project_name_for_write(new_p)
+                    if final_new_p and final_new_p not in db:
+                        db[final_new_p] = build_project_shell(new_pm, new_ratio, new_ip_owner)
+                        sync_save_db(final_new_p)
                         st.success(f"已创建并分配给 {new_pm}")
-                        st.toast(f"✅ 已创建：{new_p}")
+                        st.toast(f"✅ 已创建：{final_new_p}")
                         st.session_state.new_proj_mode = False
                         st.rerun()
-                    elif new_p in db:
+                    elif final_new_p in db:
                         st.warning("项目已存在。")
                     else:
                         st.error("项目名称不能为空。")
@@ -9049,14 +9112,15 @@ elif menu == MENU_FASTLOG:
                                                     placeholder="如: 1/6 威龙")
                         new_p_pm   = st.selectbox("负责人", ["Mo", "越", "袁"], key=f"new_ppm_{i}")
                         if st.button("✅ 建档并选中", key=f"new_pbtn_{i}", type="primary"):
-                            if new_p_name and new_p_name not in db:
-                                db[new_p_name] = build_project_shell(owner_name=new_p_pm)
-                                sync_save_db(new_p_name)
+                            final_new_p = normalize_project_name_for_write(new_p_name)
+                            if final_new_p and final_new_p not in db:
+                                db[final_new_p] = build_project_shell(owner_name=new_p_pm)
+                                sync_save_db(final_new_p)
                                 # 更新识别结果为新建的项目
-                                st.session_state.parsed_logs[i]['识别项目'] = new_p_name
-                                st.success(f"✅ 已建档：{new_p_name}")
+                                st.session_state.parsed_logs[i]['识别项目'] = final_new_p
+                                st.success(f"✅ 已建档：{final_new_p}")
                                 st.rerun()
-                            elif new_p_name in db:
+                            elif final_new_p in db:
                                 st.warning("项目已存在，直接在上方下拉选择即可。")
             with c2:
                 sel_comp = st.selectbox(
@@ -9192,7 +9256,7 @@ elif menu == MENU_FASTLOG:
             ))
             for cp in changed_projs:
                 sync_save_db(cp)
-            db_manager.save_one("系统配置", st.session_state.db["系统配置"])
+            sync_save_db("系统配置")
             st.session_state.parsed_logs    = []
             st.session_state.ai_pasted_cache = {}
             msg = "🎉 入库成功！" if learned_count == 0 else f"🎉 入库成功！AI 已学会了 {learned_count} 个新词汇！"
@@ -10472,6 +10536,57 @@ elif menu == MENU_SETTINGS:
             sync_save_db("系统配置")
             st.success("识别词典中心已保存。后续 To-do / 大盘 / AI 速记 / 打印追踪 会共用这些规则。")
             st.rerun()
+
+    with st.expander("🧪 识别调试台（看系统怎么理解一段文本）", expanded=False):
+        debug_text = st.text_area(
+            "输入要排查的原文",
+            height=120,
+            key="recognition_debug_text",
+            placeholder="例：设计将文件转交给工程：尼奥下发工程；预计3/20左右植发初版可出",
+        )
+        debug_proj_hint = st.selectbox(
+            "项目提示（可选）",
+            ["(不指定项目)"] + [p for p in db.keys() if p != "系统配置"],
+            key="recognition_debug_proj_hint",
+        )
+        if debug_text.strip():
+            debug_proj_list = infer_todo_projects_from_text(
+                {
+                    "任务": debug_text.strip(),
+                    "CPDDL": debug_text.strip(),
+                    "关联项目": "" if debug_proj_hint == "(不指定项目)" else debug_proj_hint,
+                    "关联项目列表": [] if debug_proj_hint == "(不指定项目)" else [debug_proj_hint],
+                },
+                [p for p in db.keys() if p != "系统配置"],
+            )
+            comp_hits = []
+            for kw, comp in get_component_keyword_map().items():
+                if str(kw).strip() and str(kw) in debug_text and comp not in comp_hits:
+                    comp_hits.append(comp)
+            stage_hits = []
+            for kw, stage in get_stage_keyword_map().items():
+                if str(kw).strip() and str(kw) in debug_text and stage not in stage_hits:
+                    stage_hits.append(stage)
+            people_hint = format_todo_people_hint({"任务": debug_text.strip(), "CPDDL": "", "关联人员": ""})
+            handoff_hit = "是" if any(sig in norm_text(debug_text) for sig in ["设计将文件转交给工程", "设计交接工程", "转交给工程", "下发工程", "发给工程", "交给工程"]) else "否"
+
+            dcol1, dcol2 = st.columns(2)
+            with dcol1:
+                st.markdown("**项目猜测**")
+                st.write(" / ".join(debug_proj_list) if debug_proj_list else "(未命中)")
+                st.markdown("**部件猜测**")
+                st.write(" / ".join(comp_hits[:6]) if comp_hits else "全局进度 / 未命中")
+                st.markdown("**阶段猜测**")
+                st.write(" / ".join(stage_hits[:6]) if stage_hits else "(维持原阶段)")
+            with dcol2:
+                st.markdown("**审核语义**")
+                st.write(f"版权审核语境：{'是' if has_copyright_review_context(debug_text) else '否'}")
+                st.write(f"提审类型：{infer_review_type_from_text(debug_text)}")
+                st.write(f"提审结果：{infer_review_result_from_text(debug_text)}")
+                st.markdown("**人员识别**")
+                st.write(people_hint)
+                st.markdown("**交接信号**")
+                st.write(f"设计->工程：{handoff_hit}")
 
     with st.expander("🧭 识别待确认队列（不删功能，只帮你先捞出高风险条目）", expanded=False):
         low_conf_events = collect_low_confidence_standard_events(limit=80)
