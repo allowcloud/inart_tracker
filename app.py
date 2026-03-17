@@ -324,15 +324,16 @@ def sanitize_project_alias_map(raw_alias_map=None, valid_projs=None):
     return cleaned
 
 def get_visible_projects(db_obj, current_pm):
-    """按负责人过滤 + 别名去重：若A被映射到已存在的B，则默认隐藏A。"""
-    alias_map = db_obj.get("系统配置", {}).get("项目别名", {})
+    """按负责人过滤 + 别名去重：只在目标项目同样可见时才隐藏源项目，避免跨视角误消失。"""
+    alias_map = sanitize_project_alias_map(db_obj.get("系统配置", {}).get("项目别名", {}), valid_projs=[p for p in db_obj.keys() if p != "系统配置"])
     raw = [p for p, d in db_obj.items()
            if p != "系统配置" and
            (current_pm == "所有人" or str(d.get('负责人', '')).strip() == current_pm)]
+    raw_set = set(raw)
     out = []
     for p in raw:
         canonical = resolve_alias_project(p, alias_map)
-        if canonical != p and canonical in db_obj:
+        if canonical != p and canonical in raw_set:
             continue
         out.append(p)
 
