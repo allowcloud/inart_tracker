@@ -3897,7 +3897,7 @@ def build_project_stage_segments(proj_label, proj_data):
         if len(unique_dates) > 1 or milestone in ["研发中", "待开定", "已开定", "下模中", "生产中"]:
             higher_stage_exists = any(stage_records.get(s) for s in ["设计", "工程", "开模", "修模", "生产"])
             if higher_stage_exists:
-                build_seed = launch_start or first_date
+                build_seed = first_date
             else:
                 build_seed = second_date or (first_date + datetime.timedelta(days=1))
             stage_records["建模"].append({
