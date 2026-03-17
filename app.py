@@ -324,15 +324,16 @@ def sanitize_project_alias_map(raw_alias_map=None, valid_projs=None):
     return cleaned
 
 def get_visible_projects(db_obj, current_pm):
-    """按负责人过滤 + 别名去重：若A被映射到已存在的B，则默认隐藏A。"""
-    alias_map = db_obj.get("系统配置", {}).get("项目别名", {})
+    """按负责人过滤 + 别名去重：只在目标项目同样可见时才隐藏源项目，避免跨视角误消失。"""
+    alias_map = sanitize_project_alias_map(db_obj.get("系统配置", {}).get("项目别名", {}), valid_projs=[p for p in db_obj.keys() if p != "系统配置"])
     raw = [p for p, d in db_obj.items()
            if p != "系统配置" and
            (current_pm == "所有人" or str(d.get('负责人', '')).strip() == current_pm)]
+    raw_set = set(raw)
     out = []
     for p in raw:
         canonical = resolve_alias_project(p, alias_map)
-        if canonical != p and canonical in db_obj:
+        if canonical != p and canonical in raw_set:
             continue
         out.append(p)
 
@@ -4153,6 +4154,9 @@ def build_project_stage_segments(proj_label, proj_data):
     launch_records = stage_records["立项"]
     pause_dates = sorted({x["date"] for x in stage_records.get("暂停", [])})
     active_bucket = get_project_status_bucket(proj_data.get("Milestone", "")) if isinstance(proj_data, dict) else "unknown"
+    latest_any_record = max(all_records, key=lambda x: x["date"], default=None)
+    pause_still_open = bool(latest_any_record and str(latest_any_record.get("stage", "")).strip() == "暂停")
+    effective_active_bucket = "pause" if (pause_still_open and active_bucket not in ["done"]) else active_bucket
     latest_non_pause_record = max(
         [x for x in all_records if x["stage"] not in ["暂停", "结束"]],
         key=lambda x: x["date"],
@@ -4182,7 +4186,7 @@ def build_project_stage_segments(proj_label, proj_data):
                 synthetic_finish = next_real_stage_dt
             elif next_pause_dt:
                 synthetic_finish = next_pause_dt
-            elif active_bucket not in ["pause", "done"]:
+            elif effective_active_bucket not in ["pause", "done"]:
                 synthetic_finish = today + datetime.timedelta(days=1)
             if synthetic_finish and synthetic_finish > synthetic_build_start:
                 stage_records.setdefault("建模", []).append({
@@ -4208,6 +4212,14 @@ def build_project_stage_segments(proj_label, proj_data):
         if resumed_between:
             filtered_pause_dates.append(pause_dt)
             last_kept_pause = pause_dt
+
+    open_pause_start_dt = None
+    if filtered_pause_dates:
+        for pause_dt in filtered_pause_dates:
+            resumed_after = any(d > pause_dt for d in non_pause_dates)
+            if not resumed_after:
+                open_pause_start_dt = pause_dt
+                break
 
     for stage in ["建模", "打印", "设计", "工程", "开模", "修模", "生产"]:
         records = stage_records.get(stage, [])
@@ -4235,13 +4247,15 @@ def build_project_stage_segments(proj_label, proj_data):
         )
         if next_other_stage_dt:
             finish_dt = max(finish_dt, next_other_stage_dt)
-        if stage in current_macros:
+        if stage in current_macros and effective_active_bucket not in ["pause", "done"]:
             finish_dt = max(finish_dt, today + datetime.timedelta(days=1))
-        elif stage == latest_non_pause_stage and active_bucket not in ["pause", "done"] and not next_other_stage_dt:
+        elif stage == latest_non_pause_stage and effective_active_bucket not in ["pause", "done"] and not next_other_stage_dt:
             finish_dt = max(finish_dt, today + datetime.timedelta(days=1))
+        if effective_active_bucket == "pause" and open_pause_start_dt:
+            finish_dt = min(finish_dt, open_pause_start_dt)
         if stage in ["建模", "打印", "设计", "工程"] and mold_start and start_dt < mold_start:
             finish_dt = min(finish_dt, mold_start)
-        if active_bucket not in ["done"] and finish_dt > today + datetime.timedelta(days=1):
+        if effective_active_bucket not in ["done"] and finish_dt > today + datetime.timedelta(days=1):
             finish_dt = today + datetime.timedelta(days=1)
         if finish_dt <= start_dt:
             finish_dt = start_dt + datetime.timedelta(days=1)
@@ -7899,6 +7913,33 @@ if menu == MENU_DASHBOARD:
                     textfont=dict(size=8, color="white"),
                     name="提审标记",
                     customdata=df_review_marks[["说明"]],
+                    hovertemplate="%{customdata[0]}<extra></extra>"
+                ))
+        pause_marks = []
+        for row in gantt_data:
+            if str(row.get("工序阶段", "")).strip() != "暂停":
+                continue
+            pause_marks.append({
+                "日期": str(row.get("Start", "")).strip(),
+                "项目": str(row.get("项目", "")).strip(),
+                "说明": str(row.get("详情", "")).strip() or "暂停",
+            })
+        if pause_marks:
+            df_pause_marks = pd.DataFrame(pause_marks)
+            df_pause_marks["日期_dt"] = pd.to_datetime(df_pause_marks["日期"], errors="coerce")
+            if not showing_full_gantt:
+                df_pause_marks = df_pause_marks[(df_pause_marks["日期_dt"] >= selected_start) & (df_pause_marks["日期_dt"] <= selected_end)].copy()
+            if not df_pause_marks.empty:
+                fig.add_trace(go.Scatter(
+                    x=df_pause_marks["日期"],
+                    y=df_pause_marks["项目"],
+                    mode="markers+text",
+                    marker=dict(symbol="square", size=12, color="#64748B", line=dict(width=1, color="white")),
+                    text=["停"] * len(df_pause_marks),
+                    textposition="middle center",
+                    textfont=dict(size=8, color="white"),
+                    name="暂停标记",
+                    customdata=df_pause_marks[["说明"]],
                     hovertemplate="%{customdata[0]}<extra></extra>"
                 ))
         if timeline_marks:
