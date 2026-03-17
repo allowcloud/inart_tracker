@@ -5908,9 +5908,157 @@ def _build_auto_print_rows_from_logs(visible_projects, locations, days=30):
     return list(uniq.values())
 
 
+def _normalize_print_desc_for_merge(text):
+    txt = str(text or "").strip()
+    if not txt:
+        return ""
+    txt = re.sub(r"^(?:\[[^\]]+\]\s*){1,6}", "", txt).strip()
+    txt = txt.replace("【", " ").replace("】", " ")
+    txt = re.sub(r"https?://\S+", " ", txt)
+    txt = re.sub(r"提取码[:：]?\s*[A-Za-z0-9]+", " ", txt, flags=re.I)
+    for noise in [
+        "打印件已出", "打印件", "已安排打印", "安排打印", "已打印", "去打印", "送打印", "开打",
+        "确认效果", "给主美确认", "给老板确认", "已给", "确认", "当前效果", "全局进度",
+        "内部进展", "正常流转", "内部正常推进",
+    ]:
+        txt = txt.replace(noise, " ")
+    txt = re.sub(r"[，,;；:：|/\\\-_=+（）()【】\[\]<>《》“”\"'`~!@#$%^&*]+", " ", txt)
+    txt = re.sub(r"\s+", " ", txt).strip().lower()
+    return txt
+
+
+def _extract_print_followup_person(text):
+    txt = str(text or "").strip()
+    if not txt:
+        return ""
+    for pattern in [
+        r"给([\u4e00-\u9fa5A-Za-z]{2,8})确认",
+        r"给([\u4e00-\u9fa5A-Za-z]{2,8})看",
+        r"给([\u4e00-\u9fa5A-Za-z]{2,8})",
+        r"([\u4e00-\u9fa5A-Za-z]{2,8})确认",
+    ]:
+        m = re.search(pattern, txt)
+        if m:
+            return str(m.group(1)).strip()
+    return ""
+
+
+def _extract_print_version_marker(text):
+    txt = str(text or "").strip().lower()
+    if not txt:
+        return ""
+    for pattern in [r"\bv\d+\b", r"\bt\d+\b", r"\bm\d+\b", r"第?[一二三四五六七八九十\d]+版"]:
+        m = re.search(pattern, txt, flags=re.I)
+        if m:
+            return str(m.group(0)).strip().lower()
+    return ""
+
+
+def _print_row_date(row):
+    dt = parse_date_safe((row or {}).get("日期", ""))
+    return dt if isinstance(dt, datetime.date) else None
+
+
+def _print_row_merge_signature(row):
+    row = row if isinstance(row, dict) else {}
+    proj = str(row.get("项目", "")).strip()
+    comp = str(row.get("部件", "")).strip() or "全局进度"
+    loc = str(row.get("打印地点", "")).strip()
+    desc = str(row.get("描述", "")).strip()
+    norm_desc = _normalize_print_desc_for_merge(desc)
+    reviewer = _extract_print_followup_person(desc)
+    version = _extract_print_version_marker(desc)
+    return {
+        "project": proj,
+        "component": comp,
+        "location": loc,
+        "raw_desc": desc,
+        "norm_desc": norm_desc,
+        "reviewer": reviewer,
+        "version": version,
+        "date": _print_row_date(row),
+    }
+
+
+def _print_rows_should_merge(existing_row, new_row):
+    a = _print_row_merge_signature(existing_row)
+    b = _print_row_merge_signature(new_row)
+    if not a["project"] or a["project"] != b["project"]:
+        return False
+    if a["component"] != b["component"]:
+        return False
+    if a["location"] and b["location"] and a["location"] != b["location"]:
+        return False
+
+    a_date, b_date = a["date"], b["date"]
+    if a_date and b_date and abs((a_date - b_date).days) > 14:
+        return False
+
+    if a["norm_desc"] and a["norm_desc"] == b["norm_desc"]:
+        return True
+
+    if a["norm_desc"] and b["norm_desc"]:
+        if SequenceMatcher(None, a["norm_desc"], b["norm_desc"]).ratio() >= 0.86:
+            return True
+
+    same_reviewer = bool(a["reviewer"]) and a["reviewer"] == b["reviewer"]
+    same_version = (not a["version"] and not b["version"]) or (a["version"] and a["version"] == b["version"])
+    if same_reviewer and same_version and a_date and b_date and abs((a_date - b_date).days) <= 7:
+        return True
+
+    return False
+
+
+def _choose_better_print_row(existing_row, new_row):
+    a = existing_row if isinstance(existing_row, dict) else {}
+    b = new_row if isinstance(new_row, dict) else {}
+    a_src = str(a.get("来源", "")).strip()
+    b_src = str(b.get("来源", "")).strip()
+    a_manual = a_src == "手动录入"
+    b_manual = b_src == "手动录入"
+    a_date = _print_row_date(a) or datetime.date.min
+    b_date = _print_row_date(b) or datetime.date.min
+    if a_manual and not b_manual:
+        better, other = dict(a), b
+    elif b_manual and not a_manual:
+        better, other = dict(b), a
+    elif b_date > a_date:
+        better, other = dict(b), a
+    elif a_date > b_date:
+        better, other = dict(a), b
+    else:
+        a_len = len(str(a.get("描述", "")).strip())
+        b_len = len(str(b.get("描述", "")).strip())
+        better, other = (dict(b), a) if b_len >= a_len else (dict(a), b)
+
+    if not str(better.get("打印地点", "")).strip():
+        better["打印地点"] = str(other.get("打印地点", "")).strip()
+    if not str(better.get("部件", "")).strip():
+        better["部件"] = str(other.get("部件", "")).strip() or "全局进度"
+    better["已收到"] = bool(a.get("已收到", False) or b.get("已收到", False))
+    if not str(better.get("收到日期", "")).strip():
+        better["收到日期"] = str(other.get("收到日期", "")).strip()
+    return better
+
+
+def _dedupe_print_rows_semantically(rows):
+    normalized = _normalize_print_tracking_rows(rows)
+    kept = []
+    for row in normalized:
+        merged = False
+        for idx, existing in enumerate(kept):
+            if _print_rows_should_merge(existing, row):
+                kept[idx] = _choose_better_print_row(existing, row)
+                merged = True
+                break
+        if not merged:
+            kept.append(dict(row))
+    return _normalize_print_tracking_rows(kept)
+
+
 def _merge_print_tracking_rows(stored_rows, auto_rows):
     stored = _normalize_print_tracking_rows(stored_rows)
-    auto_map = {str(x.get("_id", "")).strip(): x for x in _normalize_print_tracking_rows(auto_rows)}
+    auto_map = {str(x.get("_id", "")).strip(): x for x in _dedupe_print_rows_semantically(auto_rows)}
     stored_map = {str(x.get("_id", "")).strip(): x for x in stored}
 
     merged = []
@@ -5937,7 +6085,7 @@ def _merge_print_tracking_rows(stored_rows, auto_rows):
             continue
         merged.append(row)
 
-    return _normalize_print_tracking_rows(merged)
+    return _dedupe_print_rows_semantically(merged)
 
 
 def _append_print_received_log(row_obj):
