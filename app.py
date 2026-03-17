@@ -293,6 +293,36 @@ def canonicalize_project_name(name, valid_projs=None, alias_map=None):
             return p_txt
     return raw
 
+
+def _is_blank_project_value(val):
+    txt = str(val or "").strip()
+    return txt in ["", "-", "TBD", "待立项", "未分配", "(无)"]
+
+
+def sanitize_project_alias_map(raw_alias_map=None, valid_projs=None):
+    alias_src = raw_alias_map if isinstance(raw_alias_map, dict) else {}
+    valid_list = [str(x).strip() for x in (valid_projs or [p for p in db.keys() if p != "系统配置"]) if str(x).strip()]
+    valid_set = set(valid_list)
+    cleaned = {}
+    for raw_alias, raw_target in alias_src.items():
+        alias_txt = str(raw_alias or "").strip()
+        target_txt = str(raw_target or "").strip()
+        if (not alias_txt) or (not target_txt):
+            continue
+        resolved_target = target_txt
+        if resolved_target not in valid_set:
+            resolved_target = canonicalize_project_name(resolved_target, valid_projs=valid_list, alias_map={})
+        if resolved_target not in valid_set:
+            inferred = infer_malformed_ratio_project_target(target_txt)
+            if inferred in valid_set:
+                resolved_target = inferred
+        if resolved_target not in valid_set:
+            continue
+        if norm_text(alias_txt) == norm_text(resolved_target):
+            continue
+        cleaned[norm_text(alias_txt)] = resolved_target
+    return cleaned
+
 def get_visible_projects(db_obj, current_pm):
     """按负责人过滤 + 别名去重：若A被映射到已存在的B，则默认隐藏A。"""
     alias_map = db_obj.get("系统配置", {}).get("项目别名", {})
@@ -1675,6 +1705,8 @@ def sync_save_db(changed_proj=None):
     changed_proj: save one project key when provided.
     otherwise save all projects.
     """
+    cfg = st.session_state.db.setdefault("系统配置", {})
+    cfg["项目别名"] = sanitize_project_alias_map(cfg.get("项目别名", {}))
     canonicalize_all_project_references()
     if changed_proj and changed_proj in st.session_state.db and changed_proj != "\u7cfb\u7edf\u914d\u7f6e":
         recompute_project_derived_state(changed_proj)
@@ -2842,7 +2874,8 @@ def infer_malformed_ratio_project_target(project_name):
 
 def canonicalize_all_project_references():
     cfg = db.setdefault("系统配置", {})
-    alias_map = cfg.get("项目别名", {}) if isinstance(cfg.get("项目别名", {}), dict) else {}
+    alias_map = sanitize_project_alias_map(cfg.get("项目别名", {}) if isinstance(cfg.get("项目别名", {}), dict) else {})
+    cfg["项目别名"] = alias_map
     valid_projs = [p for p in db.keys() if p != "系统配置"]
     changed = False
 
@@ -2887,9 +2920,35 @@ def canonicalize_all_project_references():
     return changed
 
 
+def rename_project_to_target(src_name, dst_name):
+    src = str(src_name or "").strip()
+    dst_raw = str(dst_name or "").strip()
+    if (not src) or (not dst_raw) or src == "系统配置" or dst_raw == "系统配置" or src not in db:
+        return "", False
+    dst = normalize_project_name_for_write(dst_raw, valid_projs=[p for p in db.keys() if p not in ["系统配置", src]])
+    if (not dst) or dst == src:
+        return dst, False
+    if dst in db:
+        return dst, False
+    db[dst] = db.pop(src)
+    if isinstance(db.get(dst), dict):
+        db[dst]["项目名称"] = dst
+    alias_map = db.setdefault("系统配置", {}).setdefault("项目别名", {})
+    updated_alias = {}
+    for k, v in alias_map.items():
+        vv = dst if str(v).strip() == src else str(v).strip()
+        kk = str(k).strip()
+        if kk:
+            updated_alias[kk] = vv
+    updated_alias[norm_text(src)] = dst
+    db["系统配置"]["项目别名"] = sanitize_project_alias_map(updated_alias)
+    canonicalize_all_project_references()
+    return dst, True
+
+
 def merge_project_into_target(merge_src, merge_dst, learned_aliases=None):
     src = str(merge_src or "").strip()
-    dst = str(merge_dst or "").strip()
+    dst = normalize_project_name_for_write(merge_dst, valid_projs=[p for p in db.keys() if p not in ["系统配置", src]])
     if (not src) or (not dst) or src == dst or src not in db:
         return False
 
@@ -2919,6 +2978,19 @@ def merge_project_into_target(merge_src, merge_dst, learned_aliases=None):
                 if isinstance(dst_data.get(extra_key), list) and isinstance(src_data.get(extra_key), list):
                     dst_data[extra_key].extend(src_data.get(extra_key, []))
 
+        for scalar_key in ["负责人", "跟单", "Target", "发货区间", "ratio_preset", "ip_owner", "Milestone"]:
+            src_val = src_data.get(scalar_key, "")
+            dst_val = dst_data.get(scalar_key, "")
+            if _is_blank_project_value(dst_val) and not _is_blank_project_value(src_val):
+                dst_data[scalar_key] = src_val
+        for misc_key, misc_val in src_data.items():
+            if misc_key in ["部件列表", "发货数据", "成本数据", "计划排期", "周会备注", "print_tracking", "workbench_logs"]:
+                continue
+            if misc_key not in dst_data:
+                dst_data[misc_key] = json.loads(json.dumps(misc_val, ensure_ascii=False))
+
+    dst_data["项目名称"] = dst
+
     cfg = db.setdefault("系统配置", {})
     todo_all = cfg.setdefault("PM_TODO_LIST", [])
     for td in todo_all:
@@ -2945,7 +3017,9 @@ def merge_project_into_target(merge_src, merge_dst, learned_aliases=None):
 
     alias_map = db.setdefault("系统配置", {}).setdefault("项目别名", {})
     for a in set([src, dst] + [str(x).strip() for x in (learned_aliases or []) if str(x).strip()]):
-        alias_map[norm_text(a)] = dst
+        if norm_text(a) != norm_text(dst):
+            alias_map[norm_text(a)] = dst
+    cfg["项目别名"] = sanitize_project_alias_map(alias_map)
     canonicalize_all_project_references()
     return True
 
@@ -7497,13 +7571,15 @@ def render_rd_csv_import_panel(expanded=False):
                             count_new = 0
                             count_update = 0
                             for p_name, tgt_val in target_map.items():
-                                if p_name not in db:
-                                    db[p_name] = build_project_shell(owner_name="Mo")
-                                    db[p_name]["Target"] = tgt_val
+                                final_p_name, created = upsert_project_shell(p_name, owner_name="Mo")
+                                if not final_p_name:
+                                    continue
+                                if created:
+                                    db[final_p_name]["Target"] = tgt_val
                                     count_new += 1
                                 else:
-                                    if str(db[p_name].get("Target", "")).strip() != tgt_val:
-                                        db[p_name]["Target"] = tgt_val
+                                    if str(db[final_p_name].get("Target", "")).strip() != tgt_val:
+                                        db[final_p_name]["Target"] = tgt_val
                                         count_update += 1
                             sync_save_db()
                             st.success(f"🎉 导入完毕（矩阵抽取）！新建项目: {count_new} 个，更新开定: {count_update} 个。")
@@ -7523,7 +7599,7 @@ def render_rd_csv_import_panel(expanded=False):
                     count_update = 0
                     for _, row in df_rd.iterrows():
                         p_name_raw = _csv_cell_text(row[col_proj])
-                        p_name = resolve_alias_project(p_name_raw, alias_map)
+                        p_name = normalize_project_name_for_write(p_name_raw, valid_projs=[p for p in db.keys() if p != "系统配置"], alias_map=alias_map)
                         if not p_name:
                             continue
                         pm_val   = str(row[col_pm]).strip()   if col_pm   and not pd.isna(row[col_pm])   else ""
@@ -7539,24 +7615,26 @@ def render_rd_csv_import_panel(expanded=False):
                         m_q = re.match(r'^(\d{4})\s*Q([1-4])$', ship_val)
                         ship_val = f"{m_q.group(1)} Q{m_q.group(2)}" if m_q else ""
                         if gd_val.lower()   == 'nan': gd_val   = ""
-                        if p_name not in db:
-                            db[p_name] = {
+                        final_p_name, created = upsert_project_shell(p_name, owner_name=pm_val or "Mo")
+                        if not final_p_name:
+                            continue
+                        if created:
+                            db[final_p_name].update({
                                 "负责人": pm_val, "跟单": gd_val, "Milestone": ms_val,
                                 "Target": tgt_val, "发货区间": ship_val,
-                                "部件列表": {}, "发货数据": {}, "成本数据": {}
-                            }
+                            })
                             count_new += 1
                         else:
                             if col_pm and pm_val:
-                                db[p_name]["负责人"] = pm_val
+                                db[final_p_name]["负责人"] = pm_val
                             if col_ms and ms_val:
-                                db[p_name]["Milestone"] = ms_val
+                                db[final_p_name]["Milestone"] = ms_val
                             if col_tgt and tgt_val:
-                                db[p_name]["Target"] = tgt_val
+                                db[final_p_name]["Target"] = tgt_val
                             if col_ship:
-                                db[p_name]["发货区间"] = ship_val
+                                db[final_p_name]["发货区间"] = ship_val
                             if col_gd:
-                                db[p_name]["跟单"] = gd_val
+                                db[final_p_name]["跟单"] = gd_val
                             count_update += 1
 
                     sync_save_db()
@@ -8623,11 +8701,11 @@ elif menu == MENU_SPECIFIC:
                 st.write("")
                 if st.button("创建", type="primary"):
                     final_new_p = normalize_project_name_for_write(new_p)
-                    if final_new_p and final_new_p not in db:
-                        db[final_new_p] = build_project_shell(new_pm, new_ratio, new_ip_owner)
-                        save_project_scope(final_new_p)
+                    created_name, created = upsert_project_shell(final_new_p, new_pm, new_ratio, new_ip_owner)
+                    if created_name and created:
+                        save_project_scope(created_name)
                         st.success(f"已创建并分配给 {new_pm}")
-                        st.toast(f"✅ 已创建：{final_new_p}")
+                        st.toast(f"✅ 已创建：{created_name}")
                         st.session_state.new_proj_mode = False
                         st.rerun()
                     elif final_new_p in db:
@@ -9753,12 +9831,12 @@ elif menu == MENU_FASTLOG:
                         new_p_pm   = st.selectbox("负责人", ["Mo", "越", "袁"], key=f"new_ppm_{i}")
                         if st.button("✅ 建档并选中", key=f"new_pbtn_{i}", type="primary"):
                             final_new_p = normalize_project_name_for_write(new_p_name)
-                            if final_new_p and final_new_p not in db:
-                                db[final_new_p] = build_project_shell(owner_name=new_p_pm)
-                                save_project_scope(final_new_p)
+                            created_name, created = upsert_project_shell(final_new_p, owner_name=new_p_pm)
+                            if created_name and created:
+                                save_project_scope(created_name)
                                 # 更新识别结果为新建的项目
-                                st.session_state.parsed_logs[i]['识别项目'] = final_new_p
-                                st.success(f"✅ 已建档：{final_new_p}")
+                                st.session_state.parsed_logs[i]['识别项目'] = created_name
+                                st.success(f"✅ 已建档：{created_name}")
                                 st.rerun()
                             elif final_new_p in db:
                                 st.warning("项目已存在，直接在上方下拉选择即可。")
@@ -10784,15 +10862,16 @@ elif menu == MENU_SETTINGS:
                         st.error("新名称不能为空。")
                     elif new_proj_name == src_proj:
                         st.warning("名称未变化，无需重命名。")
-                    elif new_proj_name in db:
+                    elif normalize_project_name_for_write(new_proj_name, valid_projs=[p for p in all_proj_names if p != src_proj]) in db:
                         st.error("目标名称已存在，请先使用“合并同类项目”。")
                     else:
-                        db[new_proj_name] = db.pop(src_proj)
-                        alias_map = st.session_state.db["系统配置"].setdefault("项目别名", {})
-                        alias_map[norm_text(src_proj)] = new_proj_name
-                        sync_save_db()
-                        st.success(f"✅ 已重命名：{src_proj} → {new_proj_name}")
-                        st.rerun()
+                        final_name, renamed = rename_project_to_target(src_proj, new_proj_name)
+                        if renamed:
+                            sync_save_db()
+                            st.success(f"✅ 已重命名：{src_proj} → {final_name}")
+                            st.rerun()
+                        else:
+                            st.warning("重命名未执行，请检查目标名称是否有效。")
 
             st.markdown("---")
             st.markdown("**B. 合并同类项目 + 自动学习别名**")
@@ -10822,33 +10901,15 @@ elif menu == MENU_SETTINGS:
                     }
                     st.session_state.db["系统配置"]["最近合并回滚"] = rollback_payload
                     st.session_state.db["系统配置"].setdefault("合并回滚历史", []).append(rollback_payload)
-                    dst_data.setdefault("部件列表", {})
-                    for comp_name, comp_data in src_data.get("部件列表", {}).items():
-                        if comp_name not in dst_data["部件列表"]:
-                            dst_data["部件列表"][comp_name] = comp_data
-                        else:
-                            dst_data["部件列表"][comp_name].setdefault("日志流", [])
-                            dst_data["部件列表"][comp_name]["日志流"].extend(comp_data.get("日志流", []))
-                    for bucket in ["发货数据", "成本数据"]:
-                        dst_data.setdefault(bucket, {})
-                        for k, v in src_data.get(bucket, {}).items():
-                            if k not in dst_data[bucket]:
-                                dst_data[bucket][k] = v
-
-                    db[merge_dst] = dst_data
-                    if merge_src in db:
-                        del db[merge_src]
-
-                    alias_map = st.session_state.db["系统配置"].setdefault("项目别名", {})
                     learned_aliases = {merge_src, merge_dst}
                     if alias_input.strip():
                         learned_aliases.update(x.strip() for x in re.split(r'[,，]', alias_input) if x.strip())
-                    for a in learned_aliases:
-                        alias_map[norm_text(a)] = merge_dst
-
-                    sync_save_db()
-                    st.success(f"✅ 合并完成：{merge_src} → {merge_dst}，并已学习 {len(learned_aliases)} 个别名。")
-                    st.rerun()
+                    if merge_project_into_target(merge_src, merge_dst, learned_aliases=list(learned_aliases)):
+                        sync_save_db()
+                        st.success(f"✅ 合并完成：{merge_src} → {normalize_project_name_for_write(merge_dst)}，并已学习 {len(learned_aliases)} 个别名。")
+                        st.rerun()
+                    else:
+                        st.warning("合并未执行，请检查来源/目标项目是否有效。")
 
             st.markdown("---")
             st.markdown("**C. 异常比例项目清理（如 6威龙 → 1/6威龙）**")
@@ -11008,7 +11069,8 @@ elif menu == MENU_SETTINGS:
                 else:
                     st.caption("当前没有检测到需要人工确认的高相似度项目。")
 
-            alias_map = st.session_state.db["系统配置"].get("项目别名", {})
+            alias_map = sanitize_project_alias_map(st.session_state.db["系统配置"].get("项目别名", {}))
+            st.session_state.db["系统配置"]["项目别名"] = alias_map
             if alias_map:
                 alias_df = pd.DataFrame([
                     {"别名(归一化)": k, "映射项目": v} for k, v in sorted(alias_map.items(), key=lambda x: x[0])
