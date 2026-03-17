@@ -6557,30 +6557,10 @@ def render_print_tracking_board(pm_view, visible_projects, ui_prefix="print_trac
                 st.success("\u5df2\u65b0\u589e\u6253\u5370\u8ffd\u8e2a\u8bb0\u5f55\u3002")
                 st.rerun()
 
-    f1, f2, f3 = st.columns([1.1, 1.8, 1.2])
-    with f1:
-        status_filter = st.selectbox("\u72b6\u6001\u7b5b\u9009", ["\u672a\u6536\u5230", "\u5df2\u6536\u5230", "\u5168\u90e8"], index=0, key=f"{ui_prefix}_flt_status")
-    with f2:
-        proj_filter_opts = ["\u5168\u90e8"] + sorted(list(dict.fromkeys([str(x.get("\u9879\u76ee", "")).strip() for x in merged_rows if str(x.get("\u9879\u76ee", "")).strip()])))
-        proj_filter = st.selectbox("\u9879\u76ee\u7b5b\u9009", proj_filter_opts, key=f"{ui_prefix}_flt_proj")
-    with f3:
-        loc_filter = st.selectbox("\u5730\u70b9\u7b5b\u9009", ["\u5168\u90e8"] + locations, key=f"{ui_prefix}_flt_loc")
-
-    filtered = []
-    for row in merged_rows:
-        recvd = bool(row.get("\u5df2\u6536\u5230", False))
-        if status_filter == "\u672a\u6536\u5230" and recvd:
-            continue
-        if status_filter == "\u5df2\u6536\u5230" and not recvd:
-            continue
-        if proj_filter != "\u5168\u90e8" and str(row.get("\u9879\u76ee", "")).strip() != proj_filter:
-            continue
-        if loc_filter != "\u5168\u90e8" and str(row.get("\u6253\u5370\u5730\u70b9", "")).strip() != loc_filter:
-            continue
-        filtered.append(row)
+    filtered = list(merged_rows)
 
     if not filtered:
-        st.info("\u5f53\u524d\u7b5b\u9009\u4e0b\u6682\u65e0\u6253\u5370\u8ffd\u8e2a\u8bb0\u5f55\u3002")
+        st.info("\u6682\u65e0\u6253\u5370\u8ffd\u8e2a\u8bb0\u5f55\u3002")
         return
 
     show_rows = []
@@ -6610,7 +6590,11 @@ def render_print_tracking_board(pm_view, visible_projects, ui_prefix="print_trac
             "\u9879\u76ee": st.column_config.TextColumn("\u9879\u76ee", width="medium"),
             "\u90e8\u4ef6": st.column_config.TextColumn("\u90e8\u4ef6", width="small"),
             "\u63cf\u8ff0": st.column_config.TextColumn("\u63cf\u8ff0", width="large"),
-            "\u6253\u5370\u5730\u70b9": st.column_config.TextColumn("\u6253\u5370\u5730\u70b9", width="small"),
+            "\u6253\u5370\u5730\u70b9": st.column_config.SelectboxColumn(
+                "\u6253\u5370\u5730\u70b9",
+                width="small",
+                options=list(dict.fromkeys([str(x).strip() for x in locations if str(x).strip()])),
+            ),
             "\u5df2\u6536\u5230": st.column_config.CheckboxColumn("\u5df2\u6536\u5230", width="small"),
             "\u6536\u5230\u65e5\u671f": st.column_config.TextColumn("\u6536\u5230\u65e5\u671f", width="small", help="\u52fe\u9009\u5df2\u6536\u5230\u540e\u4f1a\u81ea\u52a8\u8865\u5f53\u5929\uff0c\u53ef\u624b\u52a8\u6539\u4e3a\u5b9e\u9645\u65e5\u671f"),
             "\u6765\u6e90": st.column_config.TextColumn("\u6765\u6e90", disabled=True, width="small"),
