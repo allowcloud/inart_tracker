@@ -365,6 +365,12 @@ def collect_stage_activity(raw_logs, stages):
                 active_stages.add("设计")
             if "工程拆件" in stages:
                 active_stages.add("工程拆件")
+    guantu_related = {"官图", "工厂复样(含胶件/上色等)", "大货", "✅ 已完成(结束)"}
+    if any(stg in active_stages or stg in completed_stages for stg in guantu_related):
+        for pre_stage in ["建模(含打印/签样)", "涂装", "设计", "工程拆件", "手板/结构板"]:
+            if pre_stage in stages:
+                completed_stages.add(pre_stage)
+                active_stages.discard(pre_stage)
     if active_stages or completed_stages:
         active_stages.discard("立项"); completed_stages.add("立项")
     return active_stages, completed_stages
@@ -1755,7 +1761,8 @@ def _macro_phase_rule_matches(rule, stage_text, event_text, lower_evt, comp_name
     if when == "global_pause":
         return (
             "全局" in str(comp_name or "")
-            and any(kw in evt for kw in ["确认取消", "项目取消", "暂停", "搁置", "叫停", "冻结", "停做", "先停"])
+            and any(kw in evt for kw in ["项目取消", "暂停研发", "暂停", "搁置", "叫停", "冻结", "停做", "先停", "先暂停"])
+            and ("确认取消" not in evt or any(kw in evt for kw in ["项目确认取消", "项目取消"]))
         )
     if when == "print_signal":
         return ("打印" in evt) or ("签样" in evt) or (s == "打印") or any(x in evt for x in ["效果下模", "确认效果下模", "待确认效果下模"])
@@ -4051,6 +4058,8 @@ def build_project_stage_segments(proj_label, proj_data):
             finish_dt = max(finish_dt, today + datetime.timedelta(days=1))
         if stage in ["建模", "打印", "设计", "工程"] and mold_start and start_dt < mold_start:
             finish_dt = min(finish_dt, mold_start)
+        if active_bucket not in ["done"] and finish_dt > today + datetime.timedelta(days=1):
+            finish_dt = today + datetime.timedelta(days=1)
         if finish_dt <= start_dt:
             finish_dt = start_dt + datetime.timedelta(days=1)
         segments.append({
@@ -8628,13 +8637,27 @@ elif menu == MENU_SPECIFIC:
                         pause_anchor_idx = max(active_idxs) if active_idxs else c_idx
                     real_c_idx = pause_anchor_idx
                 else:
-                    real_c_idx = c_idx
+                    reached_idxs = [c_idx]
+                    reached_idxs.extend(
+                        STAGES_UNIFIED.index(s) for s in active_stages
+                        if s in STAGES_UNIFIED and not is_pause_stage(s) and s != "✅ 已完成(结束)"
+                    )
+                    reached_idxs.extend(
+                        STAGES_UNIFIED.index(s) for s in completed_stages
+                        if s in STAGES_UNIFIED and not is_pause_stage(s) and s != "✅ 已完成(结束)"
+                    )
+                    real_c_idx = max(reached_idxs) if reached_idxs else c_idx
                 row_vals = []
                 row_hover = []
                 late_added_component = (
                     project_in_production and factory_idx is not None and
                     is_late_added_component(comp_name, comps.get(comp_name, {}), production_start_date, factory_idx, STAGES_UNIFIED)
                 )
+                guantu_or_later_reached = any(
+                    stg in active_stages or stg in completed_stages or cur_stage == stg
+                    for stg in ["官图", "工厂复样(含胶件/上色等)", "大货", "✅ 已完成(结束)"]
+                )
+                guantu_complete_stages = {"建模(含打印/签样)", "涂装", "设计", "工程拆件", "手板/结构板"}
                 for i in range(len(STAGES_UNIFIED)):
                     stg = STAGES_UNIFIED[i]
                     hover_base = f"部件: {comp_name}<br>负责人: {owner_str or '未分配'}<br>工序: {stg}"
@@ -8656,6 +8679,9 @@ elif menu == MENU_SPECIFIC:
                         if i == factory_idx:
                             row_vals.append(2); row_hover.append(f"{hover_base}<br>状态: 🚀 <b>生产中（工厂复样）</b>")
                             continue
+                    if guantu_or_later_reached and stg in guantu_complete_stages:
+                        row_vals.append(1); row_hover.append(f"{hover_base}<br>状态: ✅ 官图阶段后前序工序默认视作完成")
+                        continue
                     if cur_stage == "✅ 已完成(结束)" and stg == "✅ 已完成(结束)":
                         row_vals.append(1); row_hover.append(f"{hover_base}<br>状态: ✅ 全部结束")
                     elif (stg in completed_stages) and not is_pause_stage(stg):
