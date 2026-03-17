@@ -1139,6 +1139,7 @@ def _ensure_runtime_state_defaults():
         "pasted_cache": {},
         "config_pasted_cache": {},
         "ai_pasted_cache": {},
+        "clipboard_image_cache": {},
         "exclude_imgs": set(),
         "config_consumed_hashes": set(),
         "ai_consumed_hashes": set(),
@@ -1150,6 +1151,35 @@ def _ensure_runtime_state_defaults():
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
+
+
+def capture_paste_image(cache_key, button_key, label="📋 粘贴截图", background_color="#f1f5f9", hover_background_color="#e2e8f0"):
+    cache_bucket = st.session_state.setdefault("clipboard_image_cache", {})
+    current_img = cache_bucket.get(cache_key)
+    paste_error = ""
+    try:
+        from streamlit_paste_button import paste_image_button
+        paste_result = paste_image_button(
+            label,
+            key=button_key,
+            background_color=background_color,
+            hover_background_color=hover_background_color,
+        )
+        if paste_result is not None and hasattr(paste_result, "image_data") and paste_result.image_data is not None:
+            buffered = io.BytesIO()
+            paste_result.image_data.save(buffered, format="PNG")
+            img_hash = hashlib.md5(buffered.getvalue()).hexdigest()
+            existing_hash = ""
+            if current_img is not None:
+                old_buffer = io.BytesIO()
+                current_img.save(old_buffer, format="PNG")
+                existing_hash = hashlib.md5(old_buffer.getvalue()).hexdigest()
+            if img_hash != existing_hash:
+                cache_bucket[cache_key] = paste_result.image_data
+                current_img = paste_result.image_data
+    except Exception as exc:
+        paste_error = str(exc)
+    return current_img, paste_error
 
 
 _ensure_runtime_state_defaults()
@@ -8552,134 +8582,134 @@ elif menu == MENU_SPECIFIC:
     with pm_tab_update:
         st.caption("这里集中做最常用的写入动作：改基础信息、记一条速记、补一条交接记录、联动待办。")
         st.divider()
-        st.subheader("🔧 进度明细与流转交接工作台")
+        quick_tab, handoff_tab = st.tabs(["快速更新", "文件流转"])
 
-        with st.expander("📝 单项目速记", expanded=False):
-            render_pm_fastlog_integrated(sel_proj)
-        cur_pm     = db[sel_proj].get('负责人', 'Mo')
-        cur_ms     = db[sel_proj].get('Milestone', '')
-        cur_target = db[sel_proj].get('Target', 'TBD')
-        cur_ship   = db[sel_proj].get('发货区间', '')
-    
-        st.markdown("**1. 全局大盘与发货目标设定**")
-        col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-        with col_m1:
-            new_pm = st.selectbox("👤 负责人分配", ["Mo", "越", "袁"],
-                                  index=["Mo", "越", "袁"].index(cur_pm) if cur_pm in ["Mo", "越", "袁"] else 0)
-        with col_m2:
-            new_ms = st.selectbox("项目当前阶段", STD_MILESTONES,
-                                  index=STD_MILESTONES.index(cur_ms) if cur_ms in STD_MILESTONES else 0)
-        with col_m3:
-            new_target = st.text_input("📅 预计开定时间", value=cur_target)
-        with col_m4:
-            new_ship = st.text_input("📦 预计发货区间 (例: 2026 Q2)", value=cur_ship)
-    
-        if st.button("💾 更新大盘基础信息", type="primary", key="btn_global"):
-            old_pm = str(db[sel_proj].get("负责人", "")).strip()
-            old_ms = str(db[sel_proj].get("Milestone", "")).strip()
-            old_target_raw = str(db[sel_proj].get("Target", "")).strip()
-            old_ship_raw = str(db[sel_proj].get("发货区间", "")).strip()
+        with quick_tab:
+            with st.expander("📝 单项目速记", expanded=False):
+                render_pm_fastlog_integrated(sel_proj)
+            cur_pm     = db[sel_proj].get('负责人', 'Mo')
+            cur_ms     = db[sel_proj].get('Milestone', '')
+            cur_target = db[sel_proj].get('Target', 'TBD')
+            cur_ship   = db[sel_proj].get('发货区间', '')
 
-            def _normalize_target_text(v):
-                s = str(v or "").strip()
-                if s.upper() == "TBD" or s in ["-", "—", "无", "暂无"]:
-                    return ""
-                return s
+            st.markdown("**1. 全局大盘与发货目标设定**")
+            col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+            with col_m1:
+                new_pm = st.selectbox("👤 负责人分配", ["Mo", "越", "袁"],
+                                      index=["Mo", "越", "袁"].index(cur_pm) if cur_pm in ["Mo", "越", "袁"] else 0)
+            with col_m2:
+                new_ms = st.selectbox("项目当前阶段", STD_MILESTONES,
+                                      index=STD_MILESTONES.index(cur_ms) if cur_ms in STD_MILESTONES else 0)
+            with col_m3:
+                new_target = st.text_input("📅 预计开定时间", value=cur_target)
+            with col_m4:
+                new_ship = st.text_input("📦 预计发货区间 (例: 2026 Q2)", value=cur_ship)
 
-            def _normalize_ship_text(v):
-                s = str(v or "").strip()
-                if s.upper() == "TBD" or s in ["-", "—", "无", "暂无"]:
-                    return ""
-                return s
+            if st.button("💾 更新大盘基础信息", type="primary", key="btn_global"):
+                old_pm = str(db[sel_proj].get("负责人", "")).strip()
+                old_ms = str(db[sel_proj].get("Milestone", "")).strip()
+                old_target_raw = str(db[sel_proj].get("Target", "")).strip()
+                old_ship_raw = str(db[sel_proj].get("发货区间", "")).strip()
 
-            new_pm_norm = str(new_pm).strip()
-            new_ms_norm = str(new_ms).strip()
-            new_target_norm = _normalize_target_text(new_target)
-            new_ship_norm = _normalize_ship_text(new_ship)
-            old_target_norm = _normalize_target_text(old_target_raw)
-            old_ship_norm = _normalize_ship_text(old_ship_raw)
+                def _normalize_target_text(v):
+                    s = str(v or "").strip()
+                    if s.upper() == "TBD" or s in ["-", "—", "无", "暂无"]:
+                        return ""
+                    return s
 
-            change_items = []
-            if old_pm != new_pm_norm:
-                change_items.append(("负责人", old_pm or "未分配", new_pm_norm or "未分配"))
-            if old_ms != new_ms_norm:
-                change_items.append(("阶段", old_ms or "-", new_ms_norm or "-"))
-            if old_target_norm != new_target_norm:
-                change_items.append(("开定", old_target_norm or "TBD", new_target_norm or "TBD"))
-            if old_ship_norm != new_ship_norm:
-                change_items.append(("发货", old_ship_norm or "-", new_ship_norm or "-"))
+                def _normalize_ship_text(v):
+                    s = str(v or "").strip()
+                    if s.upper() == "TBD" or s in ["-", "—", "无", "暂无"]:
+                        return ""
+                    return s
 
-            if not change_items:
-                st.info("未检测到基础信息变化，未写入更新日志。")
-            else:
-                db[sel_proj]["负责人"] = new_pm_norm
-                db[sel_proj]["Milestone"] = new_ms_norm
-                db[sel_proj]["Target"] = new_target_norm or "TBD"
-                db[sel_proj]["发货区间"] = new_ship_norm
+                new_pm_norm = str(new_pm).strip()
+                new_ms_norm = str(new_ms).strip()
+                new_target_norm = _normalize_target_text(new_target)
+                new_ship_norm = _normalize_ship_text(new_ship)
+                old_target_norm = _normalize_target_text(old_target_raw)
+                old_ship_norm = _normalize_ship_text(old_ship_raw)
 
-                td = str(datetime.date.today())
-                comps_list = list(db[sel_proj].get("部件列表", {}).keys())
-                t_c = "全局进度" if "全局进度" in comps_list else (comps_list[0] if comps_list else "全局进度")
-                event_text = " | ".join([f"{k}:{ov}→{nv}" for k, ov, nv in change_items])
-                append_component_log_entry(sel_proj, t_c, {
-                    "日期": td,
-                    "流转": "系统更新",
-                    "工序": ensure_project_component(sel_proj, t_c).get("主流程", STAGES_UNIFIED[0]),
-                    "事件": f"[属性更新] {event_text}"
-                })
-                save_project_scope(sel_proj)
-                st.success("大盘基础信息已更新。")
-                st.rerun()
-    
+                change_items = []
+                if old_pm != new_pm_norm:
+                    change_items.append(("负责人", old_pm or "未分配", new_pm_norm or "未分配"))
+                if old_ms != new_ms_norm:
+                    change_items.append(("阶段", old_ms or "-", new_ms_norm or "-"))
+                if old_target_norm != new_target_norm:
+                    change_items.append(("开定", old_target_norm or "TBD", new_target_norm or "TBD"))
+                if old_ship_norm != new_ship_norm:
+                    change_items.append(("发货", old_ship_norm or "-", new_ship_norm or "-"))
 
-        st.caption("计划排期、版权审核、配置清单、包装、成本等重模块已挪到右侧【专项模块】页签。")
+                if not change_items:
+                    st.info("未检测到基础信息变化，未写入更新日志。")
+                else:
+                    db[sel_proj]["负责人"] = new_pm_norm
+                    db[sel_proj]["Milestone"] = new_ms_norm
+                    db[sel_proj]["Target"] = new_target_norm or "TBD"
+                    db[sel_proj]["发货区间"] = new_ship_norm
 
-    project_pending_todos = [
-        x for x in todo_list
-        if (not x.get("完成")) and todo_matches_project(x, sel_proj)
-    ]
-    project_pending_todos = sorted(project_pending_todos, key=lambda x: (todo_due_date(x) or datetime.date.max, str(x.get("创建", ""))))
-
-    with st.container(border=True):
-        st.markdown("**🔗 当前项目待办联动**")
-        if project_pending_todos:
-            todo_option_ids = [str(x.get("_id", "")).strip() for x in project_pending_todos]
-            todo_option_map = {str(x.get("_id", "")).strip(): x for x in project_pending_todos}
-            todo_option_labels = []
-            todo_label_to_id = {}
-            for todo_id in todo_option_ids:
-                td = todo_option_map.get(todo_id, {})
-                due = todo_due_date(td)
-                due_txt = due.strftime("%m/%d") if due else "无DDL"
-                label = f"{str(td.get('任务', '')).strip()} ｜ {due_txt}"
-                if not label.strip(" ｜"):
-                    label = f"待办 [{todo_id[:4]}]"
-                if label in todo_label_to_id:
-                    label = f"{label} [{todo_id[:4]}]"
-                todo_option_labels.append(label)
-                todo_label_to_id[label] = todo_id
-            pick_todo_label = st.selectbox(
-                "选择一条待办带入交接表单",
-                todo_option_labels,
-                key=f"todo_prefill_pick_{sel_proj}"
-            )
-            pick_todo_id = todo_label_to_id.get(pick_todo_label, "")
-            pick_todo = todo_option_map.get(pick_todo_id, {})
-            c_l1, c_l2 = st.columns([1.2, 3.8])
-            with c_l1:
-                if st.button("↘ 带入交接表单", key=f"todo_prefill_btn_{sel_proj}", type="secondary"):
-                    st.session_state.todo_handoff_prefill = infer_todo_handoff_prefill(pick_todo, sel_proj)
+                    td = str(datetime.date.today())
+                    comps_list = list(db[sel_proj].get("部件列表", {}).keys())
+                    t_c = "全局进度" if "全局进度" in comps_list else (comps_list[0] if comps_list else "全局进度")
+                    event_text = " | ".join([f"{k}:{ov}→{nv}" for k, ov, nv in change_items])
+                    append_component_log_entry(sel_proj, t_c, {
+                        "日期": td,
+                        "流转": "系统更新",
+                        "工序": ensure_project_component(sel_proj, t_c).get("主流程", STAGES_UNIFIED[0]),
+                        "事件": f"[属性更新] {event_text}"
+                    })
+                    save_project_scope(sel_proj)
+                    st.success("大盘基础信息已更新。")
                     st.rerun()
-            with c_l2:
-                st.caption("开定识别：" + infer_todo_target_hint(pick_todo, valid_projs))
-                st.caption("最近落地：" + todo_link_status_text(pick_todo))
-        else:
-            st.caption("当前项目暂无关联待办；你也可以先在左侧待办新建后再带入。")
 
-    st.divider()
+            st.caption("计划排期、版权审核、配置清单、包装、成本等重模块已挪到右侧【专项模块】页签。")
 
-    st.markdown("**2. 细分配件交接工作台**")
-    st.caption("定位：文件流转看板。默认只保留核心字段；提审与强制提交放在高级选项里。")
+        with handoff_tab:
+            project_pending_todos = [
+                x for x in todo_list
+                if (not x.get("完成")) and todo_matches_project(x, sel_proj)
+            ]
+            project_pending_todos = sorted(project_pending_todos, key=lambda x: (todo_due_date(x) or datetime.date.max, str(x.get("创建", ""))))
+
+            with st.container(border=True):
+                st.markdown("**🔗 当前项目待办联动**")
+                if project_pending_todos:
+                    todo_option_ids = [str(x.get("_id", "")).strip() for x in project_pending_todos]
+                    todo_option_map = {str(x.get("_id", "")).strip(): x for x in project_pending_todos}
+                    todo_option_labels = []
+                    todo_label_to_id = {}
+                    for todo_id in todo_option_ids:
+                        td = todo_option_map.get(todo_id, {})
+                        due = todo_due_date(td)
+                        due_txt = due.strftime("%m/%d") if due else "无DDL"
+                        label = f"{str(td.get('任务', '')).strip()} ｜ {due_txt}"
+                        if not label.strip(" ｜"):
+                            label = f"待办 [{todo_id[:4]}]"
+                        if label in todo_label_to_id:
+                            label = f"{label} [{todo_id[:4]}]"
+                        todo_option_labels.append(label)
+                        todo_label_to_id[label] = todo_id
+                    pick_todo_label = st.selectbox(
+                        "选择一条待办带入交接表单",
+                        todo_option_labels,
+                        key=f"todo_prefill_pick_{sel_proj}"
+                    )
+                    pick_todo_id = todo_label_to_id.get(pick_todo_label, "")
+                    pick_todo = todo_option_map.get(pick_todo_id, {})
+                    c_l1, c_l2 = st.columns([1.2, 3.8])
+                    with c_l1:
+                        if st.button("↘ 带入交接表单", key=f"todo_prefill_btn_{sel_proj}", type="secondary"):
+                            st.session_state.todo_handoff_prefill = infer_todo_handoff_prefill(pick_todo, sel_proj)
+                            st.rerun()
+                    with c_l2:
+                        st.caption("开定识别：" + infer_todo_target_hint(pick_todo, valid_projs))
+                        st.caption("最近落地：" + todo_link_status_text(pick_todo))
+                else:
+                    st.caption("当前项目暂无关联待办；你也可以先在左侧待办新建后再带入。")
+
+            st.divider()
+            st.markdown("**2. 细分配件交接工作台**")
+            st.caption("定位：文件流转看板。默认只保留核心字段；提审与强制提交放在高级选项里。")
 
     fk = st.session_state.form_key
     handoff_todos = [
@@ -8808,15 +8838,21 @@ elif menu == MENU_SPECIFIC:
                             accept_multiple_files=True,
                             key=f"wb_attach_up_{sel_proj}_{log_key}",
                         )
-                        try:
-                            from streamlit_paste_button import paste_image_button
-                            paste_res = paste_image_button(
-                                "📋 粘贴截图",
-                                key=f"wb_attach_paste_{sel_proj}_{log_key}",
-                                background_color="#f1f5f9",
-                            )
-                        except ImportError:
-                            paste_res = None
+                        paste_cache_key = f"wb_attach::{sel_proj}::{log_key}"
+                        pasted_img, paste_err = capture_paste_image(
+                            paste_cache_key,
+                            button_key=f"wb_attach_paste_{sel_proj}_{log_key}",
+                            label="📋 粘贴截图",
+                            background_color="#f1f5f9",
+                            hover_background_color="#e2e8f0",
+                        )
+                        if pasted_img is not None:
+                            st.image(pasted_img, width=180)
+                            if st.button("🗑️ 清空剪贴板图", key=f"wb_attach_clear_{sel_proj}_{log_key}"):
+                                st.session_state.setdefault("clipboard_image_cache", {}).pop(paste_cache_key, None)
+                                st.rerun()
+                        elif paste_err:
+                            st.caption("粘贴组件暂时不可用，请先走上传。")
 
                         csa, csb = st.columns(2)
                         with csa:
@@ -8826,8 +8862,8 @@ elif menu == MENU_SPECIFIC:
                                     ref = save_uploaded_file_ref(f, prefix="wb_attach")
                                     if ref:
                                         new_refs.append(ref)
-                                if paste_res is not None and hasattr(paste_res, "image_data") and paste_res.image_data is not None:
-                                    ref = save_image_ref_data(paste_res.image_data, filename="paste.png", prefix="wb_attach")
+                                if pasted_img is not None:
+                                    ref = save_image_ref_data(pasted_img, filename="paste.png", prefix="wb_attach")
                                     if ref:
                                         new_refs.append(ref)
 
@@ -8850,6 +8886,7 @@ elif menu == MENU_SPECIFIC:
 
                                     save_project_scope(sel_proj)
                                     st.success(f"已挂图 {len(new_refs)} 张。")
+                                    st.session_state.setdefault("clipboard_image_cache", {}).pop(paste_cache_key, None)
                                     st.session_state[open_key] = ""
                                     st.rerun()
                         with csb:
@@ -8944,16 +8981,21 @@ elif menu == MENU_SPECIFIC:
             accept_multiple_files=True,
             key=f"wb_up_{sel_proj}_{fk}",
         )
-        try:
-            from streamlit_paste_button import paste_image_button
-            wb_paste = paste_image_button(
-                "📋 粘贴截图",
-                background_color="#f1f5f9",
-                hover_background_color="#e2e8f0",
-                key=f"wb_paste_{sel_proj}_{fk}",
-            )
-        except ImportError:
-            wb_paste = None
+        wb_paste_cache_key = f"wb_main::{sel_proj}::{fk}"
+        wb_pasted_img, wb_paste_err = capture_paste_image(
+            wb_paste_cache_key,
+            button_key=f"wb_paste_{sel_proj}_{fk}",
+            label="📋 粘贴截图",
+            background_color="#f1f5f9",
+            hover_background_color="#e2e8f0",
+        )
+        if wb_pasted_img is not None:
+            st.image(wb_pasted_img, width=220)
+            if st.button("🗑️ 清空已粘贴图片", key=f"wb_paste_clear_{sel_proj}_{fk}"):
+                st.session_state.setdefault("clipboard_image_cache", {}).pop(wb_paste_cache_key, None)
+                st.rerun()
+        elif wb_paste_err:
+            st.caption("粘贴组件暂时不可用，请先走上传。")
 
         with st.expander("高级选项（可选）", expanded=False):
             c_adv1, c_adv2, c_adv3 = st.columns([1.1, 1.1, 0.8])
@@ -8992,8 +9034,8 @@ elif menu == MENU_SPECIFIC:
                         ref = save_uploaded_file_ref(f, prefix="detail")
                         if ref:
                             img_ref_list.append(ref)
-                    if wb_paste is not None and hasattr(wb_paste, "image_data") and wb_paste.image_data is not None:
-                        ref = save_image_ref_data(wb_paste.image_data, filename="detail_paste.png", prefix="detail")
+                    if wb_pasted_img is not None:
+                        ref = save_image_ref_data(wb_pasted_img, filename="detail_paste.png", prefix="detail")
                         if ref:
                             img_ref_list.append(ref)
 
@@ -9109,6 +9151,7 @@ elif menu == MENU_SPECIFIC:
                         save_project_scope("系统配置")
                     todo_msg = f"；联动待办 {len(linked_todo_titles)} 条" if linked_todo_titles else ""
                     st.success(f"记录已保存{todo_msg}。")
+                    st.session_state.setdefault("clipboard_image_cache", {}).pop(wb_paste_cache_key, None)
                     st.caption("识别结果：" + format_event_recognition_hint(
                         project_name=sel_proj,
                         component_name=actual_c,
@@ -9429,23 +9472,21 @@ elif menu == MENU_FASTLOG:
 
         st.markdown("**🖼️ 附件图片**")
         st.caption("附件会跟随每条入库记录自动关联到其对应项目/部件，后续可在【历史溯源】按项目追溯。")
-        try:
-            from streamlit_paste_button import paste_image_button
-            ai_paste_result = paste_image_button(
-                "📋 专属剪贴板捕获区",
-                background_color="#f1f5f9", hover_background_color="#e2e8f0",
-                key="ai_paste_btn"
-            )
-            if ai_paste_result is not None and hasattr(ai_paste_result, 'image_data') \
-                    and ai_paste_result.image_data is not None:
-                buffered = io.BytesIO()
-                ai_paste_result.image_data.save(buffered, format="PNG")
-                h_key = hashlib.md5(buffered.getvalue()).hexdigest()
-                if h_key not in st.session_state.ai_pasted_cache \
-                        and h_key not in st.session_state.ai_consumed_hashes:
-                    st.session_state.ai_pasted_cache[h_key] = ai_paste_result.image_data
-        except ImportError:
-            pass
+        ai_pasted_img, ai_paste_err = capture_paste_image(
+            "ai_batch_main",
+            button_key="ai_paste_btn",
+            label="📋 专属剪贴板捕获区",
+            background_color="#f1f5f9",
+            hover_background_color="#e2e8f0",
+        )
+        if ai_pasted_img is not None:
+            buffered = io.BytesIO()
+            ai_pasted_img.save(buffered, format="PNG")
+            h_key = hashlib.md5(buffered.getvalue()).hexdigest()
+            if h_key not in st.session_state.ai_pasted_cache and h_key not in st.session_state.ai_consumed_hashes:
+                st.session_state.ai_pasted_cache[h_key] = ai_pasted_img
+        elif ai_paste_err:
+            st.caption("剪贴板捕获暂时不可用，可先走拖拽上传。")
 
         ai_files = st.file_uploader("或直接拖拽图片", type=['png', 'jpg', 'jpeg'],
                                     accept_multiple_files=True, key="ai_up_files")
@@ -9478,6 +9519,7 @@ elif menu == MENU_FASTLOG:
                 if img_ref:
                     ai_ref_list.append(img_ref)
                 st.session_state.ai_consumed_hashes.add(k)
+            st.session_state.setdefault("clipboard_image_cache", {}).pop("ai_batch_main", None)
 
 
             learned_count = 0
