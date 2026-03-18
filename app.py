@@ -3305,13 +3305,6 @@ def infer_todo_handoff_prefill(td, proj_name):
             stage_guess = stage_name
             break
     if not stage_guess:
-        design_allowed = _allows_design_phase(
-            proj,
-            db.get(proj, {}),
-            comp_hits[0] if comp_hits else "",
-            txt,
-            "",
-        )
         macro_to_stage = {
             "立项": "立项",
             "建模": "建模(含打印/签样)",
@@ -3324,7 +3317,13 @@ def infer_todo_handoff_prefill(td, proj_name):
             "暂停": "⏸️ 暂停/搁置",
             "结束": "✅ 已完成(结束)",
         }
-        macro_guess = get_macro_phase("", txt, comp_name=comp_hits[0] if comp_hits else "", design_allowed=design_allowed)
+        macro_guess = get_macro_phase(
+            "",
+            txt,
+            comp_name=comp_hits[0] if comp_hits else "",
+            proj_label=proj,
+            proj_data=db.get(proj, {}),
+        )
         stage_guess = macro_to_stage.get(str(macro_guess).strip(), "")
     if not stage_guess:
         for stg in STAGES_UNIFIED:
