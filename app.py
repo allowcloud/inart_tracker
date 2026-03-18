@@ -606,6 +606,48 @@ div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlockBorderWrapp
     font-weight: 700;
     margin-bottom: 0.5rem;
 }
+.pm-workspace-banner {
+    margin: 0.15rem 0 1.15rem 0;
+    padding: 1rem 1.15rem 1.05rem 1.15rem;
+    border-radius: 18px;
+    border: 1px solid var(--pm-border);
+    background:
+        radial-gradient(circle at top left, var(--pm-accent-soft) 0%, transparent 28%),
+        linear-gradient(135deg, var(--pm-card) 0%, var(--pm-card-soft) 100%);
+    box-shadow: var(--pm-shadow);
+}
+.pm-workspace-banner strong {
+    color: var(--pm-text-main);
+}
+.pm-workspace-note {
+    color: var(--pm-text-soft);
+    font-size: 0.92rem;
+    line-height: 1.55;
+    margin-top: 0.25rem;
+}
+.pm-workspace-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.55rem;
+    margin-top: 0.85rem;
+}
+.pm-workspace-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.38rem;
+    padding: 0.45rem 0.8rem;
+    border-radius: 999px;
+    border: 1px solid var(--pm-border);
+    background: var(--pm-card);
+    color: var(--pm-text-main);
+    font-size: 0.86rem;
+    font-weight: 600;
+}
+.pm-workspace-helper {
+    margin-top: 0.7rem;
+    color: var(--pm-text-soft);
+    font-size: 0.86rem;
+}
 /* localize streamlit uploader default English copy */
 [data-testid="stFileUploaderDropzoneInstructions"] span { display: none !important; }
 [data-testid="stFileUploaderDropzoneInstructions"]::before { content: "拖拽文件到这里"; font-size: 14px; color: var(--pm-text-soft); }
@@ -4561,8 +4603,8 @@ def build_project_stage_segments(proj_label, proj_data):
 
 
 def render_pm_todo_manager(valid_projs, current_pm):
-    st.subheader("🗂️ 待办清单（CP/DDL 合并）")
-    st.caption("过去日期会自动按已完成入历史；未来日期保留为待办。")
+    st.markdown("**待办清单（CP/DDL 合并）**")
+    st.caption("这里专注提醒、DDL 和人员协作；过去日期会自动按已完成入历史，未来日期保留为待办。")
     cfg = db.setdefault("系统配置", {})
     todo_all = cfg.setdefault("PM_TODO_LIST", [])
 
@@ -9060,11 +9102,37 @@ if menu == MENU_DASHBOARD:
 # ==========================================
 elif menu == MENU_SPECIFIC:
     st.title("🎯 PM 工作台")
+    st.markdown(
+        """
+        <div class='pm-workspace-banner'>
+            <div class='pm-kicker'>PM 工作台只分两块</div>
+            <div><strong>1. To do 中心</strong> 处理提醒、DDL、协作清单；<strong>2. 特定项目操作</strong> 处理选项目后的明细、流转、包装、成本等动作。</div>
+            <div class='pm-workspace-note'>默认心智：先在待办里梳理今天要推进什么，再进入具体项目做更新和落地。</div>
+            <div class='pm-workspace-pills'>
+                <span class='pm-workspace-pill'>🗂️ 待办中心：提醒 / DDL / 负责人</span>
+                <span class='pm-workspace-pill'>🎯 特定项目操作：选项目 / 看状态 / 做记录</span>
+            </div>
+            <div class='pm-workspace-helper'>如果你只想快速推进日常工作，这页优先看这两块就够了，专项模块放在更后面。</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown("<div class='pm-section-title'>🗂️ To do 中心</div>", unsafe_allow_html=True)
+    todo_list = render_pm_todo_manager(valid_projs, current_pm)
+    st.divider()
+    st.markdown("<div class='pm-section-title'>🎯 特定项目操作</div>", unsafe_allow_html=True)
+    st.caption("这里专注某一个项目：先选项目，再看当前状态，最后做更新和流转。")
 
-    if st.button("➕ 手动建档新项目"):
-        st.session_state.new_proj_mode = not st.session_state.get('new_proj_mode', False)
+    c_proj_top1, c_proj_top2 = st.columns([4.2, 1.2])
+    with c_proj_top1:
+        st.caption("推荐路径：选中项目后，先看【项目概览】，再去【项目更新】，专项能力都收在【专项模块】。")
+    with c_proj_top2:
+        if st.button("➕ 手动建档新项目"):
+            st.session_state.new_proj_mode = not st.session_state.get('new_proj_mode', False)
+
     if st.session_state.get('new_proj_mode', False):
         with st.container(border=True):
+            st.markdown("**快速建档**")
             tpl_cfg = db.get("系统配置", {}).get("PROJECT_TEMPLATE", {}) if isinstance(db.get("系统配置", {}), dict) else {}
             ratio_opts = tpl_cfg.get("ratio_options", PROJECT_RATIO_OPTIONS)
             if not isinstance(ratio_opts, list) or not ratio_opts:
@@ -9098,20 +9166,16 @@ elif menu == MENU_SPECIFIC:
                     else:
                         st.error("项目名称不能为空。")
 
-    todo_list = render_pm_todo_manager(valid_projs, current_pm)
-    st.divider()
-
     if not valid_projs:
-        st.warning("当前视角下暂无项目，可先维护待办清单。")
+        st.warning("当前视角下暂无项目；可以先在上方手动建档，或先在 To do 中心维护提醒。")
         st.stop()
 
-    st.markdown("<div class='pm-section-title'>🎯 特定项目操作</div>", unsafe_allow_html=True)
     if ('current_proj_context' not in st.session_state) or (st.session_state.current_proj_context not in valid_projs):
         st.session_state.current_proj_context = valid_projs[0] if valid_projs else None
     if ('pm_sel_proj' not in st.session_state) or (st.session_state.pm_sel_proj not in valid_projs):
         st.session_state.pm_sel_proj = st.session_state.current_proj_context
     sel_proj = st.selectbox(
-        "📌 选择要透视与操作的项目 (💡支持键盘打字模糊搜索)",
+        "📌 选择当前要操作的项目（支持键盘打字模糊搜索）",
         valid_projs,
         key="pm_sel_proj",
         format_func=lambda x: format_project_option_label(x, project_attention_map),
@@ -9214,7 +9278,7 @@ elif menu == MENU_SPECIFIC:
             st.rerun()
 
     st.divider()
-    pm_tab_overview, pm_tab_update, pm_tab_special = st.tabs(["概览", "更新", "专项模块"])
+    pm_tab_overview, pm_tab_update, pm_tab_special = st.tabs(["项目概览", "项目更新", "专项模块"])
 
     with pm_tab_overview:
         st.subheader("🔬 项目进度透视矩阵 (并行连消追踪)")
