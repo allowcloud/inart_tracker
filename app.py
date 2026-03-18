@@ -2064,6 +2064,199 @@ def normalize_todo_cpddl_for_storage(cpddl_text, task_text="", due_dt=None):
         return f"{due.month}/{due.day}"
     return f"{due.month}/{due.day} {body}".strip()
 
+
+def extract_event_date_and_body(text, ref_date=None, prefer_past=False):
+    s = str(text or "").strip()
+    if not s:
+        return None, s
+    ref = ref_date or datetime.date.today()
+
+    def _clean_event_body(raw):
+        body = str(raw or "").strip()
+        body = re.sub(r"^(?:\[[^\]]+\]\s*){1,6}", "", body).strip()
+        body = re.sub(r"\s+", " ", body).strip(" ，,;；|")
+        for noise in get_recognition_keywords("日期噪音词"):
+            if not noise:
+                continue
+            body = re.sub(rf"(^|\s){re.escape(str(noise))}(?=\s|$)", " ", body)
+        body = re.sub(r"\s*(左右|前后)\s*", " ", body)
+        body = re.sub(r"^(大约|约)\s*", "", body)
+        body = re.sub(r"\s+", " ", body).strip(" ，,;；|")
+        return body
+
+    full_patterns = [
+        r"(20\d{2})[-/／\.](\d{1,2})[-/／\.](\d{1,2})",
+        r"(20\d{2})年\s*(\d{1,2})月\s*(\d{1,2})日?",
+    ]
+    for pat in full_patterns:
+        m = re.search(pat, s)
+        if not m:
+            continue
+        try:
+            y = int(m.group(1)); mm = int(m.group(2)); dd = int(m.group(3))
+            dt = datetime.date(y, mm, dd)
+            cleaned = _clean_event_body((s[:m.start()] + " " + s[m.end():]))
+            return dt, (cleaned or s)
+        except Exception:
+            pass
+
+    md_patterns = [
+        r"(?<!\d)(\d{1,2})[\/／](\d{1,2})(?!\d)",
+        r"(?<!\d)(\d{1,2})-(\d{1,2})(?!\d)",
+        r"(?<!\d)(\d{1,2})\.(\d{1,2})(?!\d)",
+        r"(?<!\d)(\d{1,2})月(\d{1,2})日?",
+    ]
+    for pat in md_patterns:
+        m = re.search(pat, s)
+        if not m:
+            continue
+        try:
+            mm = int(m.group(1)); dd = int(m.group(2))
+            y = ref.year
+            cand = datetime.date(y, mm, dd)
+            if prefer_past and cand > ref + datetime.timedelta(days=30):
+                cand = datetime.date(y - 1, mm, dd)
+            if (not prefer_past) and cand < ref - datetime.timedelta(days=30):
+                cand = datetime.date(y + 1, mm, dd)
+            cleaned = _clean_event_body((s[:m.start()] + " " + s[m.end():]))
+            return cand, (cleaned or s)
+        except Exception:
+            pass
+
+    return None, (_clean_event_body(s) or s)
+
+
+def classify_text_intent(text):
+    txt = str(text or "")
+    txt_norm = norm_text(txt)
+    todo_keys = get_recognition_keywords("未来意图词")
+    past_keys = get_recognition_keywords("过去意图词")
+    todo_score = sum(1 for k in todo_keys if (k in txt) or (norm_text(k) in txt_norm))
+    past_score = sum(1 for k in past_keys if (k in txt) or (norm_text(k) in txt_norm))
+    if todo_score > past_score and todo_score > 0:
+        return "todo"
+    if past_score > todo_score and past_score > 0:
+        return "past"
+    if todo_score > 0 and past_score > 0:
+        if any(k in txt for k in ["待版权", "待审核", "待审", "待反馈", "待确认", "待回复", "待"]):
+            return "todo"
+        if any(k in txt for k in ["已", "已经", "完成", "通过", "提交", "收到", "看过", "on-hand", "done", "ok"]):
+            return "past"
+        return "past"
+    return "neutral"
+
+
+def classify_temporal_event_route(text, ref_date=None, prefer_past=False):
+    ref = ref_date or datetime.date.today()
+    evt_date, cleaned_body = extract_event_date_and_body(text, ref_date=ref, prefer_past=prefer_past)
+    intent = classify_text_intent(text)
+    date_bucket = ""
+    if isinstance(evt_date, datetime.date):
+        if evt_date > ref:
+            date_bucket = "future"
+        elif evt_date < ref:
+            date_bucket = "past"
+        else:
+            date_bucket = "today"
+    if date_bucket == "future":
+        route = "todo"
+    elif date_bucket == "past":
+        route = "past"
+    elif date_bucket == "today":
+        route = "past" if intent == "past" else "todo"
+    else:
+        route = "past" if intent == "past" else ("todo" if intent == "todo" else "neutral")
+    return {
+        "date": evt_date,
+        "body": cleaned_body,
+        "intent": intent,
+        "date_bucket": date_bucket,
+        "route": route,
+    }
+
+
+def upsert_todo_from_event_text(project_name, event_text, forced_due_dt=None, forced_task_body="", people_text="", actor="系统", scope_override=""):
+    proj = str(project_name or "").strip()
+    if (not proj) or proj not in db or proj == "系统配置":
+        return ""
+    due_dt = forced_due_dt if isinstance(forced_due_dt, datetime.date) else None
+    task_body = str(forced_task_body or "").strip()
+    if due_dt is None:
+        due_dt, task_body = extract_event_date_and_body(event_text, ref_date=datetime.date.today(), prefer_past=False)
+    if not due_dt:
+        return ""
+    task = clean_auto_todo_task_text(task_body or event_text)
+    if not task:
+        return ""
+
+    proj_data = db.get(proj, {}) if proj in db else {}
+    owner = str(proj_data.get("负责人", "")).strip()
+    scope = str(scope_override or "").strip() or (owner if owner and owner != "所有人" else "未分配")
+    people = normalize_people_text(people_text or str(proj_data.get("跟单", "")).strip())
+    cpddl_txt = normalize_todo_cpddl_for_storage(f"{due_dt.month}/{due_dt.day} {task}", task, due_dt=due_dt)
+
+    cfg = db.setdefault("系统配置", {})
+    todo_all = cfg.setdefault("PM_TODO_LIST", [])
+    task_norm = norm_text(task)
+    hit = None
+    for td in todo_all:
+        if bool((td or {}).get("完成")):
+            continue
+        if not todo_matches_project(td, proj):
+            continue
+        if norm_text(str((td or {}).get("任务", ""))) == task_norm:
+            hit = td
+            break
+
+    if hit:
+        changed = False
+        old_proj_list = todo_project_list(hit)
+        new_proj_list = list(dict.fromkeys(old_proj_list + [proj]))
+        need_history = False
+        if str(hit.get("DDL", "")).strip() != str(due_dt):
+            need_history = True
+        if str(hit.get("CPDDL", "")).strip() != cpddl_txt:
+            need_history = True
+        if people and not str(hit.get("关联人员", "")).strip():
+            need_history = True
+        if new_proj_list != old_proj_list:
+            need_history = True
+        if need_history:
+            todo_append_history_version(hit, actor=actor or "系统")
+        if str(hit.get("DDL", "")).strip() != str(due_dt):
+            hit["DDL"] = str(due_dt)
+            changed = True
+        if str(hit.get("CPDDL", "")).strip() != cpddl_txt:
+            hit["CPDDL"] = cpddl_txt
+            hit["CP"] = cpddl_txt
+            changed = True
+        if people and not str(hit.get("关联人员", "")).strip():
+            hit["关联人员"] = people
+            changed = True
+        if new_proj_list != old_proj_list:
+            hit["关联项目列表"] = new_proj_list
+            hit["关联项目"] = new_proj_list[0] if new_proj_list else ""
+            changed = True
+        return "updated" if changed else "exists"
+
+    todo_all.append({
+        "_id": str(uuid.uuid4()),
+        "任务": task,
+        "CPDDL": cpddl_txt,
+        "CP": cpddl_txt,
+        "DDL": str(due_dt),
+        "完成": False,
+        "关联项目": proj,
+        "关联项目列表": [proj],
+        "关联人员": people,
+        "所属视角": scope,
+        "创建者视角": scope,
+        "创建": str(datetime.date.today()),
+        "完成时间": "",
+        "历史版本": [],
+    })
+    return "created"
+
 def todo_cpddl_text(td):
     merged = str((td or {}).get("CPDDL", "")).strip()
     if merged:
@@ -2630,8 +2823,9 @@ def infer_todo_form_defaults(task_text, cpddl_text, valid_projs, current_people_
     task_raw = str(task_text or "").strip()
     cpddl_raw = str(cpddl_text or "").strip()
     merged_text = f"{task_raw} {cpddl_raw}".strip()
-    due_dt = extract_deadline_from_text(merged_text)
-    cleaned_task = clean_auto_todo_task_text(task_raw)
+    temporal = classify_temporal_event_route(merged_text, ref_date=datetime.date.today(), prefer_past=False)
+    due_dt = temporal.get("date") if isinstance(temporal.get("date"), datetime.date) else extract_deadline_from_text(merged_text)
+    cleaned_task = clean_auto_todo_task_text(task_raw) or str(temporal.get("body", "")).strip()
 
     cpddl_seed = cpddl_raw or task_raw
     suggested_cpddl = ""
@@ -4612,8 +4806,9 @@ def render_pm_todo_manager(valid_projs, current_pm):
             else:
                 inferred_defaults = infer_todo_form_defaults(todo_title, todo_cpddl, valid_projs, current_people_text=people_input)
                 cleaned_task_title = inferred_defaults.get("cleaned_task") or clean_auto_todo_task_text(todo_title) or todo_title.strip()
+                temporal = classify_temporal_event_route(f"{todo_title} {todo_cpddl}".strip(), ref_date=datetime.date.today(), prefer_past=False)
+                due_dt = inferred_defaults.get("due_dt") or (temporal.get("date") if isinstance(temporal.get("date"), datetime.date) else None) or extract_deadline_from_text(f"{todo_title} {todo_cpddl}".strip())
                 normalized_cpddl = inferred_defaults.get("cpddl") or normalize_todo_cpddl_for_storage(todo_cpddl, cleaned_task_title, due_dt=due_dt)
-                due_dt = inferred_defaults.get("due_dt") or extract_deadline_from_text(f"{todo_title} {todo_cpddl}".strip())
                 if (not resolved_ref_proj_list) and inferred_defaults.get("projects"):
                     resolved_ref_proj_list = list(inferred_defaults.get("projects") or [])
                 final_people = people_input or ", ".join(inferred_defaults.get("people") or []) or ", ".join(inferred_defaults.get("people_bundle", {}).get("labels", []))
@@ -4629,7 +4824,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
                         created_projects.append(linked_proj)
 
                 added_people = register_extra_role_people(split_people_text(final_people))
-                todo_all.append({
+                new_td = {
                     "_id": uuid.uuid4().hex[:10],
                     "任务": cleaned_task_title,
                     "CPDDL": normalized_cpddl,
@@ -4644,7 +4839,13 @@ def render_pm_todo_manager(valid_projs, current_pm):
                     "完成时间": "",
                     "创建": str(today),
                     "历史版本": [],
-                })
+                }
+                if str(temporal.get("route", "")).strip() == "past":
+                    done_day = due_dt or datetime.date.today()
+                    new_td["完成"] = True
+                    new_td["完成时间"] = str(done_day)
+                    append_todo_completion_history(new_td, done_day)
+                todo_all.append(new_td)
                 cfg["PM_TODO_LIST"] = todo_all
                 if created_projects:
                     sync_save_db()
@@ -4838,6 +5039,10 @@ def render_pm_todo_manager(valid_projs, current_pm):
 
             prev_done = bool(td.get("完成", False))
             new_done = bool(row.get("完成", False))
+            temporal = classify_temporal_event_route(f"{title} {cpddl}".strip(), ref_date=datetime.date.today(), prefer_past=False)
+            temporal_date = temporal.get("date") if isinstance(temporal.get("date"), datetime.date) else None
+            if (not new_done) and str(temporal.get("route", "")).strip() == "past":
+                new_done = True
 
             td["任务"] = title
             td["CPDDL"] = cpddl
@@ -4859,7 +5064,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
                 td["创建者视角"] = scope_val
 
             if new_done and not prev_done:
-                done_date = datetime.date.today()
+                done_date = temporal_date or datetime.date.today()
                 td["完成时间"] = str(done_date)
                 if append_todo_completion_history(td, done_date):
                     for p in todo_project_list(td):
@@ -5332,6 +5537,9 @@ def save_fastlog_rows_to_db(edited_df, rec_date, source_name, image_bindings=Non
     skipped_count = 0
     learned_count = 0
     changed_projects = set()
+    todo_created = 0
+    todo_updated = 0
+    todo_dirty = False
 
     for _, row in edited_df.iterrows():
         proj = target_project
@@ -5345,6 +5553,28 @@ def save_fastlog_rows_to_db(edited_df, rec_date, source_name, image_bindings=Non
         evt = str(row.get("事件", "")).strip()
         if not evt:
             skipped_count += 1
+            continue
+
+        temporal = classify_temporal_event_route(evt, ref_date=rec_date, prefer_past=False)
+        temporal_route = str(temporal.get("route", "")).strip()
+        temporal_date = temporal.get("date") if isinstance(temporal.get("date"), datetime.date) else None
+        temporal_body = str(temporal.get("body", "")).strip()
+        if temporal_route == "todo" and isinstance(temporal_date, datetime.date):
+            todo_state = upsert_todo_from_event_text(
+                proj,
+                evt,
+                forced_due_dt=temporal_date,
+                forced_task_body=temporal_body,
+                actor=source_name,
+            )
+            if todo_state == "created":
+                todo_created += 1
+                todo_dirty = True
+            elif todo_state == "updated":
+                todo_updated += 1
+                todo_dirty = True
+            elif todo_state == "exists":
+                todo_dirty = True
             continue
 
         comp = str(row.get("部件", unresolved_comp or "全局进度")).strip() or (unresolved_comp or "全局进度")
@@ -5375,8 +5605,9 @@ def save_fastlog_rows_to_db(edited_df, rec_date, source_name, image_bindings=Non
 
         bind_key = comp if target_project else proj
         imgs = image_bindings.get("全部记录", []) + image_bindings.get(bind_key, [])
+        event_day = temporal_date if (temporal_route == "past" and isinstance(temporal_date, datetime.date)) else rec_date
         db[proj]["部件列表"][comp].setdefault("日志流", []).append({
-            "日期": str(rec_date),
+            "日期": str(event_day),
             "流转": source_name,
             "工序": final_stage,
             "事件": evt,
@@ -5406,11 +5637,15 @@ def save_fastlog_rows_to_db(edited_df, rec_date, source_name, image_bindings=Non
         else:
             for p in sorted(changed_projects):
                 sync_save_db(p)
+    if todo_dirty:
+        sync_save_db("系统配置")
     return {
         "saved_count": saved_count,
         "skipped_count": skipped_count,
         "learned_count": learned_count,
         "changed_projects": sorted(changed_projects),
+        "todo_created": todo_created,
+        "todo_updated": todo_updated,
     }
 
 
@@ -9504,9 +9739,49 @@ elif menu == MENU_SPECIFIC:
                     if is_completed:
                         base_log += " [系统]彻底完成"
 
+                    temporal = classify_temporal_event_route(str(wb_text).strip(), ref_date=wb_date, prefer_past=False) if str(wb_text).strip() else {"route": "neutral", "date": None, "body": ""}
+                    temporal_route = str(temporal.get("route", "")).strip()
+                    temporal_date = temporal.get("date") if isinstance(temporal.get("date"), datetime.date) else None
+                    temporal_body = str(temporal.get("body", "")).strip()
+
+                    if temporal_route == "todo" and isinstance(temporal_date, datetime.date):
+                        todo_state = upsert_todo_from_event_text(
+                            sel_proj,
+                            str(wb_text).strip(),
+                            forced_due_dt=temporal_date,
+                            forced_task_body=temporal_body,
+                            people_text=str(comp_data.get("负责人", "")).strip(),
+                            actor=current_pm if current_pm != "所有人" else "系统",
+                        )
+                        append_standard_event_entry(
+                            source_module="PM工作台",
+                            action_type="工作台联动待办",
+                            project_name=sel_proj,
+                            event_date=temporal_date,
+                            component_name=actual_c,
+                            stage_name=wb_stage,
+                            content_text=temporal_body or str(wb_text).strip(),
+                            raw_text=str(wb_text).strip(),
+                            todo_ids=linked_todo_ids,
+                            actor=current_pm if current_pm != "所有人" else "系统",
+                            intent="todo",
+                            extra_payload={"联动结果": todo_state},
+                        )
+                        st.session_state.form_key += 1
+                        save_project_scope("系统配置")
+                        st.success("未来日期内容已自动转为待办。")
+                        st.caption("识别结果：" + format_event_recognition_hint(
+                            project_name=sel_proj,
+                            component_name=actual_c,
+                            stage_name=wb_stage,
+                            todo_state=todo_state,
+                            reminder_text=temporal_body or str(wb_text).strip(),
+                        ))
+                        st.rerun()
+
                     if wb_stage == "立项":
                         append_component_log_entry(sel_proj, actual_c, {
-                            "日期": str(wb_date),
+                            "日期": str(temporal_date if (temporal_route == "past" and isinstance(temporal_date, datetime.date)) else wb_date),
                             "流转": wb_evt_type,
                             "工序": "立项",
                             "事件": base_log,
@@ -9516,14 +9791,14 @@ elif menu == MENU_SPECIFIC:
                             "提审轮次": int(review_round) if review_type != "(无)" else "",
                         })
                         append_component_log_entry(sel_proj, actual_c, {
-                            "日期": str(wb_date + datetime.timedelta(days=1)),
+                            "日期": str((temporal_date if (temporal_route == "past" and isinstance(temporal_date, datetime.date)) else wb_date) + datetime.timedelta(days=1)),
                             "流转": "系统自动",
                             "工序": "建模(含打印/签样)",
                             "事件": "[系统] 立项完成自动推演",
                         }, resulting_stage="建模(含打印/签样)")
                     else:
                         append_component_log_entry(sel_proj, actual_c, {
-                            "日期": str(wb_date),
+                            "日期": str(temporal_date if (temporal_route == "past" and isinstance(temporal_date, datetime.date)) else wb_date),
                             "流转": wb_evt_type,
                             "工序": wb_stage,
                             "事件": base_log,
@@ -9540,7 +9815,7 @@ elif menu == MENU_SPECIFIC:
                                 continue
                             if sub_info.get("主流程") != wb_stage:
                                 sub_info.setdefault("日志流", []).append({
-                                    "日期": str(wb_date),
+                                    "日期": str(temporal_date if (temporal_route == "past" and isinstance(temporal_date, datetime.date)) else wb_date),
                                     "流转": "系统自动",
                                     "工序": wb_stage,
                                     "事件": "[系统] 全局已暂停，子部件自动同步为暂停",
@@ -9565,7 +9840,7 @@ elif menu == MENU_SPECIFIC:
                             if not td_obj:
                                 continue
                             td_obj["最近联动模块"] = "交接工作台"
-                            td_obj["最近联动日期"] = str(wb_date)
+                            td_obj["最近联动日期"] = str(temporal_date if (temporal_route == "past" and isinstance(temporal_date, datetime.date)) else wb_date)
                             td_obj["最近联动项目"] = sel_proj
                             td_obj["最近联动部件"] = actual_c
                             td_obj["最近联动阶段"] = wb_stage
@@ -9574,15 +9849,16 @@ elif menu == MENU_SPECIFIC:
                                 was_done = bool(td_obj.get("完成", False))
                                 td_obj["完成"] = True
                                 if not was_done:
-                                    td_obj["完成时间"] = str(wb_date)
-                                    append_todo_completion_history(td_obj, wb_date)
+                                    completion_day = temporal_date if (temporal_route == "past" and isinstance(temporal_date, datetime.date)) else wb_date
+                                    td_obj["完成时间"] = str(completion_day)
+                                    append_todo_completion_history(td_obj, completion_day)
                             linked_todo_titles.append(str(td_obj.get("任务", "")).strip())
 
                     standard_event_dirty = append_standard_event_entry(
                         source_module="PM工作台",
                         action_type="工作台记录",
                         project_name=sel_proj,
-                        event_date=wb_date,
+                        event_date=temporal_date if (temporal_route == "past" and isinstance(temporal_date, datetime.date)) else wb_date,
                         component_name=actual_c,
                         stage_name=wb_stage,
                         content_text=base_log,
