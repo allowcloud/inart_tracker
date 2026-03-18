@@ -7707,6 +7707,16 @@ if menu == MENU_DASHBOARD:
             latest_dt_for_gap = parse_date_safe(explanation.get("日期", "")) or latest_date_obj
             dt_txt=f"{(datetime.date.today()-latest_dt_for_gap).days} 天" if latest_dt_for_gap else "-"
             ce = str(explanation.get("内容", "")).strip() or latest_event_str
+            exp_dt = parse_date_safe(explanation.get("日期", ""))
+            reminder_text = str(explanation.get("提醒内容", "")).strip()
+            reminder_date_txt = str(explanation.get("提醒日期", "")).strip()
+            reminder_dt = parse_date_safe(reminder_date_txt)
+            if reminder_text:
+                reminder_label = f"{reminder_date_txt} {reminder_text}".strip() if reminder_date_txt else reminder_text
+                if (not ce or ce == "无数据") or (reminder_dt and (not exp_dt or reminder_dt >= exp_dt)):
+                    ce = f"[待办] {reminder_label}".strip()
+                elif reminder_text not in ce:
+                    ce = f"{ce} ｜ 待办:{reminder_label}".strip()
             latest_comp_name = str(explanation.get("部件", "")).strip() or latest_comp_name or "-"
             _table.append({"状态":r_txt,"项目":proj,"跟单":gd,"项目当前阶段":ms,
                 "开定时间":tgt,"预计发货":ship_itv,"断更":dt_txt,"最新全盘动态":f"[{latest_comp_name}] {ce}"})
