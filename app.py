@@ -3765,7 +3765,7 @@ def _is_todo_standard_event(evt_obj):
     act = str(evt.get("动作", "")).strip()
     if src == "To-do":
         return True
-    if act in ["待办更新", "待办完成", "待办重开", "动态联动待办"]:
+    if act in ["待办新建", "待办更新", "待办完成", "待办重开", "动态联动待办"]:
         return True
     if str(evt.get("意图", "")).strip() == "todo":
         return True
@@ -3812,6 +3812,41 @@ def get_latest_standard_event_pair(project_name):
     return {"progress": latest_progress, "todo": latest_todo}
 
 
+def get_latest_live_todo_binding(project_name):
+    proj = str(project_name or "").strip()
+    if not proj:
+        return None
+    alias_map = db.get("系统配置", {}).get("项目别名", {})
+    proj = resolve_alias_project(proj, alias_map)
+    if proj not in db:
+        return None
+
+    todo_all = db.get("系统配置", {}).get("PM_TODO_LIST", [])
+    pending_hits = []
+    completed_hits = []
+    for td in todo_all:
+        if not isinstance(td, dict):
+            continue
+        if not todo_matches_project(td, proj):
+            continue
+        due_dt = todo_due_date(td)
+        created_dt = parse_date_safe(str(td.get("创建", "")).strip()) or datetime.date.min
+        done_dt = parse_date_safe(str(td.get("完成时间", "")).strip()) or created_dt
+        if bool(td.get("完成")):
+            completed_hits.append((done_dt.toordinal(), created_dt.toordinal(), td))
+        else:
+            due_ord = due_dt.toordinal() if isinstance(due_dt, datetime.date) else datetime.date.max.toordinal()
+            pending_hits.append((due_ord, -created_dt.toordinal(), td))
+
+    if pending_hits:
+        pending_hits.sort(key=lambda x: (x[0], x[1]))
+        return {"todo": pending_hits[0][2], "mode": "pending"}
+    if completed_hits:
+        completed_hits.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        return {"todo": completed_hits[0][2], "mode": "completed"}
+    return None
+
+
 def build_project_current_explanation(project_name):
     proj = str(project_name or "").strip()
     if (not proj) or proj not in db:
@@ -3821,6 +3856,8 @@ def build_project_current_explanation(project_name):
     std_binding = std_pair.get("progress")
     todo_binding = std_pair.get("todo")
     log_binding = get_latest_project_log_binding(proj)
+    live_todo_binding = get_latest_live_todo_binding(proj)
+    live_todo = (live_todo_binding or {}).get("todo", {}) if live_todo_binding else {}
 
     std_date = parse_date_safe(((std_binding or {}).get("event", {}) or {}).get("日期", "")) if std_binding else None
     log_date = parse_date_safe(((log_binding or {}).get("log", {}) or {}).get("日期", "")) if log_binding else None
@@ -3839,6 +3876,13 @@ def build_project_current_explanation(project_name):
         content = str(evt.get("内容", "")).strip() or str(evt.get("原始文本", "")).strip() or "无数据"
         raw = str(evt.get("原始文本", "")).strip() or content
         reminder_evt = (todo_binding or {}).get("event", {}) if todo_binding else {}
+        reminder_text = str(reminder_evt.get("内容", "")).strip()
+        reminder_date = str(reminder_evt.get("日期", "")).strip()
+        reminder_action = str(reminder_evt.get("动作", "")).strip()
+        if (not reminder_text) and live_todo:
+            reminder_text = str(live_todo.get("任务", "")).strip()
+            reminder_date = str(todo_due_date(live_todo) or "").strip() or str(live_todo.get("DDL", "")).strip()
+            reminder_action = "待办提醒"
         return {
             "_事件ID": str(evt.get("_id", "")).strip(),
             "项目": proj,
@@ -3852,9 +3896,9 @@ def build_project_current_explanation(project_name):
             "关联人员": str(evt.get("关联人员", "")).strip(),
             "关联待办": [str(x).strip() for x in (evt.get("关联待办", []) or []) if str(x).strip()],
             "意图": str(evt.get("意图", "")).strip(),
-            "提醒内容": str(reminder_evt.get("内容", "")).strip(),
-            "提醒日期": str(reminder_evt.get("日期", "")).strip(),
-            "提醒动作": str(reminder_evt.get("动作", "")).strip(),
+            "提醒内容": reminder_text,
+            "提醒日期": reminder_date,
+            "提醒动作": reminder_action,
             "模式": "标准事件",
         }
 
@@ -3868,6 +3912,13 @@ def build_project_current_explanation(project_name):
             clean = clean.split("】")[-1]
         clean = clean.split("[系统]")[0].strip() or evt
         reminder_evt = (todo_binding or {}).get("event", {}) if todo_binding else {}
+        reminder_text = str(reminder_evt.get("内容", "")).strip()
+        reminder_date = str(reminder_evt.get("日期", "")).strip()
+        reminder_action = str(reminder_evt.get("动作", "")).strip()
+        if (not reminder_text) and live_todo:
+            reminder_text = str(live_todo.get("任务", "")).strip()
+            reminder_date = str(todo_due_date(live_todo) or "").strip() or str(live_todo.get("DDL", "")).strip()
+            reminder_action = "待办提醒"
         return {
             "_事件ID": "",
             "项目": proj,
@@ -3881,9 +3932,9 @@ def build_project_current_explanation(project_name):
             "关联人员": "",
             "关联待办": [],
             "意图": "",
-            "提醒内容": str(reminder_evt.get("内容", "")).strip(),
-            "提醒日期": str(reminder_evt.get("日期", "")).strip(),
-            "提醒动作": str(reminder_evt.get("动作", "")).strip(),
+            "提醒内容": reminder_text,
+            "提醒日期": reminder_date,
+            "提醒动作": reminder_action,
             "模式": "项目日志",
         }
 
@@ -3907,6 +3958,36 @@ def build_project_current_explanation(project_name):
             "提醒日期": str(evt.get("日期", "")).strip(),
             "提醒动作": str(evt.get("动作", "")).strip(),
             "模式": "待办提醒",
+        }
+
+    if live_todo:
+        due_txt = str(todo_due_date(live_todo) or "").strip() or str(live_todo.get("DDL", "")).strip()
+        content = str(live_todo.get("任务", "")).strip() or todo_cpddl_text(live_todo) or "无数据"
+        inferred_stage = ""
+        event_comp = ""
+        proj_prefill = infer_todo_handoff_prefill(live_todo, proj)
+        if isinstance(proj_prefill, dict):
+            inferred_stage = str(proj_prefill.get("阶段", "")).strip()
+            comp_list = proj_prefill.get("部件", [])
+            if isinstance(comp_list, list) and comp_list:
+                event_comp = _normalize_standard_event_component(comp_list[0])
+        return {
+            "_事件ID": "",
+            "项目": proj,
+            "日期": due_txt,
+            "来源": "To-do",
+            "动作": "待办提醒",
+            "部件": event_comp or "全局进度",
+            "阶段": inferred_stage or "-",
+            "内容": content,
+            "原始文本": todo_cpddl_text(live_todo) or content,
+            "关联人员": normalize_people_text(live_todo.get("关联人员", "")),
+            "关联待办": [str(live_todo.get("_id", "")).strip()] if str(live_todo.get("_id", "")).strip() else [],
+            "意图": "todo",
+            "提醒内容": content,
+            "提醒日期": due_txt,
+            "提醒动作": "待办提醒",
+            "模式": "待办实时兜底",
         }
 
     return {
@@ -4931,6 +5012,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
                 if (not resolved_ref_proj_list) and inferred_defaults.get("projects"):
                     resolved_ref_proj_list = list(inferred_defaults.get("projects") or [])
                 final_people = people_input or ", ".join(inferred_defaults.get("people") or []) or ", ".join(inferred_defaults.get("people_bundle", {}).get("labels", []))
+                standard_event_dirty = False
 
                 created_projects = []
                 for linked_proj in resolved_ref_proj_list:
@@ -4965,11 +5047,39 @@ def render_pm_todo_manager(valid_projs, current_pm):
                     new_td["完成时间"] = str(done_day)
                     append_todo_completion_history(new_td, done_day)
                 todo_all.append(new_td)
+                todo_action = "待办完成" if bool(new_td.get("完成")) else "待办新建"
+                event_day = due_dt if (bool(new_td.get("完成")) and isinstance(due_dt, datetime.date)) else datetime.date.today()
+                for proj_name in [p for p in todo_project_list(new_td) if p and p in db and p != "系统配置"]:
+                    prefill = infer_todo_handoff_prefill(new_td, proj_name)
+                    event_comp = ""
+                    if prefill.get("部件"):
+                        event_comp = _normalize_standard_event_component(prefill["部件"][0])
+                    standard_event_dirty = append_standard_event_entry(
+                        source_module="To-do",
+                        action_type=todo_action,
+                        project_name=proj_name,
+                        event_date=event_day,
+                        component_name=event_comp,
+                        stage_name=str(prefill.get("阶段", "")).strip(),
+                        content_text=str(new_td.get("任务", "")).strip(),
+                        raw_text=todo_cpddl_text(new_td),
+                        people_text=final_people,
+                        todo_ids=[str(new_td.get("_id", "")).strip()],
+                        intent="past" if bool(new_td.get("完成")) else "todo",
+                        actor=current_pm if current_pm != "所有人" else "系统",
+                        extra_payload={
+                            "所属视角": str(new_td.get("所属视角", "")).strip(),
+                            "完成": bool(new_td.get("完成")),
+                            "关联项目列表": todo_project_list(new_td),
+                        },
+                    ) or standard_event_dirty
                 cfg["PM_TODO_LIST"] = todo_all
                 if created_projects:
                     sync_save_db()
                 else:
                     sync_save_db("系统配置")
+                if standard_event_dirty:
+                    save_project_scope("系统配置")
 
                 success_bits = ["待办已添加。"]
                 if created_projects:
@@ -8071,16 +8181,34 @@ if menu == MENU_DASHBOARD:
         _table = []; _gantt = []; _ppr = []; _marks = []; _meta = []
         for proj in valid_projs:
             data = db[proj]
+            explanation = build_project_current_explanation(proj)
+            exp_dt = parse_date_safe(explanation.get("日期", ""))
+            ce = str(explanation.get("内容", "")).strip() or "无数据"
+            reminder_text = str(explanation.get("提醒内容", "")).strip()
+            reminder_date_txt = str(explanation.get("提醒日期", "")).strip()
+            reminder_dt = parse_date_safe(reminder_date_txt)
+            if reminder_text:
+                reminder_label = f"{reminder_date_txt} {reminder_text}".strip() if reminder_date_txt else reminder_text
+                if (not ce or ce == "无数据") or (reminder_dt and (not exp_dt or reminder_dt >= exp_dt)):
+                    ce = f"[待办] {reminder_label}".strip()
+                elif reminder_text not in ce:
+                    ce = f"{ce} ｜ 待办:{reminder_label}".strip()
+            exp_comp_name = str(explanation.get("部件", "")).strip() or "全局进度"
+
             if not data.get('部件列表') and not data.get('Milestone') and not data.get('Target'):
+                latest_dt_for_gap = exp_dt
+                dt_txt=f"{(datetime.date.today()-latest_dt_for_gap).days} 天" if latest_dt_for_gap else "-"
                 _table.append({"状态":"⚪ 未知阶段","项目":proj,"跟单":"","项目当前阶段":"待立项",
-                    "开定时间":"TBD","预计发货":"-","断更":"-","最新全盘动态":"无数据"}); continue
+                    "开定时间":"TBD","预计发货":"-","断更":dt_txt,"最新全盘动态":f"[{exp_comp_name}] {ce}"}); continue
             gd=data.get('跟单',''); ms=data.get('Milestone',''); tgt=data.get('Target','TBD')
             ship_itv=data.get('发货区间','-'); r_txt,_=get_risk_status(ms,tgt)
             comps=data.get('部件列表',{})
             proj_y_label=f"{proj} 📦[{ship_itv}]" if ship_itv and ship_itv!='-' else proj
             if not comps:
+                latest_dt_for_gap = exp_dt
+                dt_txt=f"{(datetime.date.today()-latest_dt_for_gap).days} 天" if latest_dt_for_gap else "-"
                 _table.append({"状态":r_txt,"项目":proj,"跟单":gd,"项目当前阶段":ms,
-                    "开定时间":tgt,"预计发货":ship_itv,"断更":"-","最新全盘动态":"无数据"}); continue
+                    "开定时间":tgt,"预计发货":ship_itv,"断更":dt_txt,"最新全盘动态":f"[{exp_comp_name}] {ce}"}); continue
             latest_date_obj=None; latest_event_str="无数据"; latest_comp_name="-"
             for c_name,info in comps.items():
                 for pair in re.split(r'[,，|]',str(info.get('负责人','')).strip()):
@@ -8096,14 +8224,9 @@ if menu == MENU_DASHBOARD:
                         if latest_date_obj is None or l_dt>latest_date_obj:
                             latest_date_obj=l_dt; latest_event_str=logs[-1]['事件']; latest_comp_name=c_name
                     except: pass
-            explanation = build_project_current_explanation(proj)
             latest_dt_for_gap = parse_date_safe(explanation.get("日期", "")) or latest_date_obj
             dt_txt=f"{(datetime.date.today()-latest_dt_for_gap).days} 天" if latest_dt_for_gap else "-"
             ce = str(explanation.get("内容", "")).strip() or latest_event_str
-            exp_dt = parse_date_safe(explanation.get("日期", ""))
-            reminder_text = str(explanation.get("提醒内容", "")).strip()
-            reminder_date_txt = str(explanation.get("提醒日期", "")).strip()
-            reminder_dt = parse_date_safe(reminder_date_txt)
             if reminder_text:
                 reminder_label = f"{reminder_date_txt} {reminder_text}".strip() if reminder_date_txt else reminder_text
                 if (not ce or ce == "无数据") or (reminder_dt and (not exp_dt or reminder_dt >= exp_dt)):
