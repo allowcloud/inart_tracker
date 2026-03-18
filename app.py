@@ -1387,6 +1387,123 @@ def is_real_review_log(log_obj):
     return has_copyright_review_context(evt)
 
 
+def collect_project_review_rows(project_name):
+    proj = str(project_name or "").strip()
+    rows = []
+    for comp_name, comp_info in db.get(proj, {}).get("部件列表", {}).items():
+        for lg in comp_info.get("日志流", []):
+            if is_hidden_system_log(lg):
+                continue
+            if not is_real_review_log(lg):
+                continue
+            review_type = str(lg.get("提审类型", "")).strip() or "(无)"
+            review_result = str(lg.get("提审结果", "")).strip() or "(无)"
+            review_round = normalize_review_round(lg.get("提审轮次", ""))
+            rows.append({
+                "日期": str(lg.get("日期", "")).strip(),
+                "部件": str(comp_name).strip() or "全局进度",
+                "阶段": str(lg.get("工序", "")).strip(),
+                "提审类型": review_type,
+                "提审结果": review_result,
+                "轮次": review_round if review_round else "",
+                "事件": str(lg.get("事件", "")).strip(),
+            })
+    return rows
+
+
+def render_project_review_progress_matrix(project_name):
+    review_rows = collect_project_review_rows(project_name)
+    review_types = [x for x in REVIEW_TYPE_OPTIONS if x != "(无)"]
+    if not review_rows:
+        st.caption("当前项目暂无版权提审记录。")
+        return
+
+    comp_order = []
+    latest_map = {}
+    result_rank = {"待反馈": 1, "通过": 2, "打回": 3, "(无)": 0, "": 0}
+    status_val = {"(无)": 0, "": 0, "待反馈": 1, "通过": 2, "打回": 3}
+    status_text = {0: "", 1: "待", 2: "过", 3: "回"}
+    colorscale = [
+        [0.00, "#E5E7EB"],
+        [0.24, "#E5E7EB"],
+        [0.25, "#93C5FD"],
+        [0.49, "#93C5FD"],
+        [0.50, "#86EFAC"],
+        [0.74, "#86EFAC"],
+        [0.75, "#FCA5A5"],
+        [1.00, "#FCA5A5"],
+    ]
+
+    for row in review_rows:
+        comp_name = str(row.get("部件", "")).strip() or "全局进度"
+        if comp_name not in comp_order:
+            comp_order.append(comp_name)
+        rv_type = str(row.get("提审类型", "")).strip()
+        if rv_type not in review_types:
+            continue
+        day = parse_date_safe(row.get("日期", "")) or datetime.date.min
+        rnd = normalize_review_round(row.get("轮次", "")) or 0
+        res = str(row.get("提审结果", "")).strip() or "(无)"
+        rank = (day.toordinal(), rnd, result_rank.get(res, 0))
+        key = (comp_name, rv_type)
+        prev = latest_map.get(key)
+        if (prev is None) or (rank >= prev["rank"]):
+            latest_map[key] = {"rank": rank, "row": row}
+
+    z = []
+    text = []
+    hover = []
+    for comp_name in comp_order:
+        z_row = []
+        text_row = []
+        hover_row = []
+        for rv_type in review_types:
+            picked = latest_map.get((comp_name, rv_type), {})
+            row = picked.get("row", {})
+            res = str(row.get("提审结果", "")).strip() if row else ""
+            cell_val = status_val.get(res, 0)
+            z_row.append(cell_val)
+            text_row.append(status_text.get(cell_val, ""))
+            if row:
+                hover_row.append(
+                    f"部件: {comp_name}<br>提审类型: {rv_type}<br>结果: {res or '(无)'}"
+                    f"<br>日期: {str(row.get('日期', '')).strip() or '-'}"
+                    f"<br>轮次: {str(row.get('轮次', '')).strip() or '-'}"
+                    f"<br>事件: {str(row.get('事件', '')).strip() or '-'}"
+                )
+            else:
+                hover_row.append(f"部件: {comp_name}<br>提审类型: {rv_type}<br>状态: 未开始")
+        z.append(z_row)
+        text.append(text_row)
+        hover.append(hover_row)
+
+    fig = go.Figure(data=go.Heatmap(
+        z=z,
+        x=review_types,
+        y=comp_order,
+        colorscale=colorscale,
+        zmin=0,
+        zmax=3,
+        text=text,
+        texttemplate="%{text}",
+        textfont={"size": 13},
+        customdata=hover,
+        hovertemplate="%{customdata}<extra></extra>",
+        showscale=False,
+        xgap=3,
+        ygap=3,
+    ))
+    fig.update_layout(
+        height=max(220, 70 + 42 * len(comp_order)),
+        margin=dict(l=10, r=10, t=10, b=10),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        xaxis=dict(side="top"),
+    )
+    st.caption("矩阵说明：⬜ 未开始 ｜ 🟦 待反馈 ｜ 🟩 通过 ｜ 🟥 打回")
+    st.plotly_chart(fig, width='stretch', config={"displayModeBar": False})
+
+
 
 # --- End bootstrap fallback ---
 # ==========================================
@@ -10235,38 +10352,27 @@ elif menu == MENU_SPECIFIC:
             st.caption("粘贴组件暂时不可用，请先走上传。")
 
         with st.expander("高级选项（可选）", expanded=False):
-            is_review_record = st.checkbox(
-                "这条记录同时属于版权提审",
-                value=False,
-                key=f"wb_review_enabled_{fk}",
-                help="文件流转默认只记交接。只有这条内容确实已经发给版权方 / 进入提审时，再勾这里补提审信息。",
-            )
-            c_adv1, c_adv2, c_adv3 = st.columns([1.1, 1.1, 0.8])
-            with c_adv1:
-                review_type = st.selectbox(
-                    "提审类型",
-                    REVIEW_TYPE_OPTIONS,
-                    index=REVIEW_TYPE_OPTIONS.index("(无)") if "(无)" in REVIEW_TYPE_OPTIONS else 0,
-                    key=f"wb_rv_type_{fk}",
-                    disabled=not is_review_record,
-                )
-            with c_adv2:
-                review_result = st.selectbox(
-                    "提审结果",
-                    REVIEW_RESULT_OPTIONS,
-                    index=REVIEW_RESULT_OPTIONS.index("(无)") if "(无)" in REVIEW_RESULT_OPTIONS else 0,
-                    key=f"wb_rv_res_{fk}",
-                    disabled=not is_review_record,
-                )
-            with c_adv3:
-                review_round = st.number_input("提审轮次", min_value=1, value=1, step=1, key=f"wb_rv_round_{fk}", disabled=not is_review_record)
+            with st.expander("🧾 版权提审（可选）", expanded=False):
+                st.caption("这里仅用于发给版权方 / 正式提审的记录。留空时，这条内容只作为文件流转保存。")
+                c_adv1, c_adv2, c_adv3 = st.columns([1.1, 1.1, 0.8])
+                with c_adv1:
+                    review_type = st.selectbox(
+                        "提审类型",
+                        REVIEW_TYPE_OPTIONS,
+                        index=REVIEW_TYPE_OPTIONS.index("(无)") if "(无)" in REVIEW_TYPE_OPTIONS else 0,
+                        key=f"wb_rv_type_{fk}",
+                    )
+                with c_adv2:
+                    review_result = st.selectbox(
+                        "提审结果",
+                        REVIEW_RESULT_OPTIONS,
+                        index=REVIEW_RESULT_OPTIONS.index("(无)") if "(无)" in REVIEW_RESULT_OPTIONS else 0,
+                        key=f"wb_rv_res_{fk}",
+                    )
+                with c_adv3:
+                    review_round = st.number_input("提审轮次", min_value=1, value=1, step=1, key=f"wb_rv_round_{fk}")
             is_completed = st.checkbox(f"标记【{wb_stage}】已彻底完成", value=False, key=f"wb_done_{fk}")
             force_submit_detail = st.checkbox("忽略阶段/提审 warning 强制提交", value=False, key=f"wb_force_{fk}")
-
-        if not is_review_record:
-            review_type = "(无)"
-            review_result = "(无)"
-            review_round = 1
 
         if st.button("💾 保存交接记录", type="primary", key=f"wb_save_{sel_proj}_{fk}"):
             if wb_comp_raw == "➕ 新增细分配件..." and not wb_new_comp_name:
@@ -10467,26 +10573,11 @@ elif menu == MENU_SPECIFIC:
         with st.expander("📅 计划排期", expanded=False):
             render_project_plan_schedule_editor(sel_proj, key_prefix=f"pm_plan_special_{norm_text(sel_proj)[:24]}")
         with st.expander("🧾 版权审核信息", expanded=False):
-            review_rows = []
-            for _cn, _ci in db.get(sel_proj, {}).get("部件列表", {}).items():
-                for _lg in _ci.get("日志流", []):
-                    if is_hidden_system_log(_lg):
-                        continue
-                    if not is_real_review_log(_lg):
-                        continue
-                    _rt = str(_lg.get("提审类型", "")).strip()
-                    _rr = str(_lg.get("提审结果", "")).strip()
-                    _rd = normalize_review_round(_lg.get("提审轮次", ""))
-                    review_rows.append({
-                        "日期": str(_lg.get("日期", "")),
-                        "部件": _cn,
-                        "阶段": str(_lg.get("工序", "")),
-                        "提审类型": _rt if _rt else "(无)",
-                        "提审结果": _rr if _rr else "(无)",
-                        "轮次": _rd if _rd else "",
-                        "事件": str(_lg.get("事件", "")),
-                    })
+            review_rows = collect_project_review_rows(sel_proj)
             if review_rows:
+                st.markdown("**提审进度透视矩阵**")
+                render_project_review_progress_matrix(sel_proj)
+                st.markdown("**提审明细**")
                 df_rv = pd.DataFrame(review_rows).sort_values(by=["日期", "部件"], ascending=[False, True])
                 st.dataframe(df_rv, width='stretch', hide_index=True)
             else:
