@@ -294,6 +294,15 @@ def canonicalize_project_name(name, valid_projs=None, alias_map=None):
     return raw
 
 
+def is_invalid_project_name(name):
+    txt = str(name or "").strip()
+    if not txt or txt == "系统配置":
+        return True
+    if re.fullmatch(r"\d{1,2}", txt):
+        return True
+    return False
+
+
 def _is_blank_project_value(val):
     txt = str(val or "").strip()
     return txt in ["", "-", "TBD", "待立项", "未分配", "(无)"]
@@ -328,6 +337,7 @@ def get_visible_projects(db_obj, current_pm):
     alias_map = sanitize_project_alias_map(db_obj.get("系统配置", {}).get("项目别名", {}), valid_projs=[p for p in db_obj.keys() if p != "系统配置"])
     raw = [p for p, d in db_obj.items()
            if p != "系统配置" and
+           (not is_invalid_project_name(p)) and
            (current_pm == "所有人" or str(d.get('负责人', '')).strip() == current_pm)]
     raw_set = set(raw)
     out = []
@@ -1781,17 +1791,25 @@ def normalize_project_name_for_write(raw_name, valid_projs=None, alias_map=None)
     name = re.sub(r"\s*/\s*", "/", str(raw_name or "").strip())
     if not name:
         return ""
+    if is_invalid_project_name(name):
+        return ""
     alias_map = alias_map or (db.get("系统配置", {}).get("项目别名", {}) if isinstance(db, dict) else {})
     valid_list = list(valid_projs or [p for p in db.keys() if p != "系统配置"]) if isinstance(db, dict) else list(valid_projs or [])
     canonical = canonicalize_project_name(name, valid_projs=valid_list, alias_map=alias_map)
     if canonical and canonical in valid_list:
         return canonical
 
+    inferred_ratio_target = infer_malformed_ratio_project_target(name)
+    if inferred_ratio_target:
+        return inferred_ratio_target
+
     cleaned = name
     for candidate, reason in _project_name_noise_variants(name):
         if reason.startswith("状态尾缀") or reason == "括号英文尾注":
             cleaned = candidate
             break
+    if is_invalid_project_name(cleaned):
+        return ""
     return cleaned.strip()
 
 
@@ -2806,17 +2824,18 @@ def infer_todo_projects_from_text(td, valid_projs):
     txt = f"{title} {cpddl}".strip()
     txt_norm = norm_text(txt)
     alias_map = db.get("系统配置", {}).get("项目别名", {})
+    valid_match_projs = [p for p in (valid_projs or []) if not is_invalid_project_name(p)]
 
     proj_list = []
     for p in todo_project_list(td_obj):
         p_canon = resolve_alias_project(p, alias_map)
-        if p_canon and p_canon in valid_projs and p_canon not in proj_list:
+        if p_canon and p_canon in valid_match_projs and p_canon not in proj_list:
             proj_list.append(p_canon)
-        elif p in valid_projs and p not in proj_list:
+        elif p in valid_match_projs and p not in proj_list:
             proj_list.append(p)
 
     if not proj_list:
-        for p in valid_projs:
+        for p in valid_match_projs:
             p_full = str(p)
             p_short = re.sub(r'^(1/6|1/4|1/12|1/3|1/1)\s*', "", p_full).strip()
             p_full_n = norm_text(p_full)
@@ -2835,24 +2854,24 @@ def infer_todo_projects_from_text(td, valid_projs):
                     break
 
     if not proj_list and txt:
-        token_hits = _match_projects_from_token(txt, valid_projs, alias_map)
+        token_hits = _match_projects_from_token(txt, valid_match_projs, alias_map)
         for seg in re.split(r"[&＆和|｜]+", txt):
-            token_hits.extend(_match_projects_from_token(seg, valid_projs, alias_map))
+            token_hits.extend(_match_projects_from_token(seg, valid_match_projs, alias_map))
         amp_match = re.search(r"([A-Za-z][A-Za-z0-9\-]*)\s+([A-Za-z][A-Za-z0-9\-]*)\s*[&＆]\s*([A-Za-z][A-Za-z0-9\-]*)", txt)
         if amp_match:
             prefix = str(amp_match.group(1)).strip()
             left = f"{prefix} {str(amp_match.group(2)).strip()}"
             right = f"{prefix} {str(amp_match.group(3)).strip()}"
-            token_hits.extend(_match_projects_from_token(left, valid_projs, alias_map))
-            token_hits.extend(_match_projects_from_token(right, valid_projs, alias_map))
+            token_hits.extend(_match_projects_from_token(left, valid_match_projs, alias_map))
+            token_hits.extend(_match_projects_from_token(right, valid_match_projs, alias_map))
         proj_list.extend(token_hits)
 
     alias_map = db.get("系统配置", {}).get("项目别名", {}) if isinstance(db, dict) else {}
     proj_list = [
-        canonicalize_project_name(x, valid_projs=valid_projs, alias_map=alias_map)
+        canonicalize_project_name(x, valid_projs=valid_match_projs, alias_map=alias_map)
         for x in proj_list
     ]
-    proj_list = list(dict.fromkeys([x for x in proj_list if x and x in valid_projs]))
+    proj_list = list(dict.fromkeys([x for x in proj_list if x and x in valid_match_projs]))
     return proj_list
 
 
@@ -3961,7 +3980,9 @@ def build_project_current_explanation(project_name):
         }
 
     if live_todo:
-        due_txt = str(todo_due_date(live_todo) or "").strip() or str(live_todo.get("DDL", "")).strip()
+        due_dt = todo_due_date(live_todo)
+        due_txt = str(due_dt or "").strip() or str(live_todo.get("DDL", "")).strip()
+        created_dt = parse_date_safe(str(live_todo.get("创建", "")).strip()) or datetime.date.today()
         content = str(live_todo.get("任务", "")).strip() or todo_cpddl_text(live_todo) or "无数据"
         inferred_stage = ""
         event_comp = ""
@@ -3974,7 +3995,7 @@ def build_project_current_explanation(project_name):
         return {
             "_事件ID": "",
             "项目": proj,
-            "日期": due_txt,
+            "日期": str(created_dt),
             "来源": "To-do",
             "动作": "待办提醒",
             "部件": event_comp or "全局进度",
@@ -8264,9 +8285,20 @@ if menu == MENU_DASHBOARD:
 
     # cache key：项目列表 + 数据指纹（只用非图片字段的哈希）
     import hashlib as _hl
+    cfg_for_sig = db.get("系统配置", {}) if isinstance(db.get("系统配置", {}), dict) else {}
+    dashboard_cfg_sig = {
+        "PM_TODO_LIST": cfg_for_sig.get("PM_TODO_LIST", []),
+        "标准事件流": cfg_for_sig.get("标准事件流", []),
+        "项目别名": cfg_for_sig.get("项目别名", {}),
+    }
     _db_sig = _hl.md5(json.dumps(
-        {k: {fk: fv for fk, fv in v.items() if fk not in ("配件清单长图",)}
-         for k, v in db.items() if k != "系统配置"},
+        {
+            "projects": {
+                k: {fk: fv for fk, fv in v.items() if fk not in ("配件清单长图",)}
+                for k, v in db.items() if k != "系统配置"
+            },
+            "cfg": dashboard_cfg_sig,
+        },
         ensure_ascii=False, sort_keys=True).encode()).hexdigest()
     table_data, gantt_data, _ppr_list, timeline_marks, _meta = _build_dash(",".join(valid_projs), _db_sig)
     project_person_roles = set(map(tuple, _ppr_list))
