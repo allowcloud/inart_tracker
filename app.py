@@ -2050,7 +2050,10 @@ def normalize_todo_cpddl_for_storage(cpddl_text, task_text="", due_dt=None):
         return f"{due_dt.month}/{due_dt.day}" if isinstance(due_dt, datetime.date) else ""
     due = due_dt if isinstance(due_dt, datetime.date) else extract_deadline_from_text(raw)
     if not due:
-        return clean_auto_todo_task_text(raw)
+        cleaned_raw = clean_auto_todo_task_text(raw)
+        if task and (cleaned_raw == task or cleaned_raw in task or task in cleaned_raw):
+            return ""
+        return cleaned_raw
     body = re.sub(r"(20\d{2})[-/](\d{1,2})[-/](\d{1,2})", " ", raw)
     body = re.sub(r"(?<!\d)(\d{1,2})[\/\-\.](\d{1,2})(?!\d)", " ", body)
     body = re.sub(r"(?<!\d)(\d{1,2})月(\d{1,2})日?", " ", body)
@@ -4451,9 +4454,9 @@ def render_pm_todo_manager(valid_projs, current_pm):
     m3.metric("3天内到期", len(near_due))
     m4.metric("已关联项目", len(linked_pending))
 
-    with st.container(border=True):
-        st.markdown("##### 新增待办")
-        st.caption("支持先选关联人员；如果你只写“宇涵”，系统会优先匹配历史库里的“设计-宇涵”等唯一人选。")
+    with st.container():
+        st.markdown("##### 快速新增（直接加到下方表格）")
+        st.caption("这里填一行，添加后会直接出现在下方表格里继续编辑；如果你只写“宇涵”，系统会优先匹配库里的“设计-宇涵”等唯一人选。")
 
         todo_title_state = str(st.session_state.get("todo_title_global", "")).strip()
         todo_cpddl_state = str(st.session_state.get("todo_cpddl_global", "")).strip()
@@ -4610,7 +4613,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
             else:
                 inferred_defaults = infer_todo_form_defaults(todo_title, todo_cpddl, valid_projs, current_people_text=people_input)
                 cleaned_task_title = inferred_defaults.get("cleaned_task") or clean_auto_todo_task_text(todo_title) or todo_title.strip()
-                normalized_cpddl = inferred_defaults.get("cpddl") or normalize_todo_cpddl_for_storage(todo_cpddl or todo_title, cleaned_task_title)
+                normalized_cpddl = inferred_defaults.get("cpddl") or normalize_todo_cpddl_for_storage(todo_cpddl, cleaned_task_title, due_dt=due_dt)
                 due_dt = inferred_defaults.get("due_dt") or extract_deadline_from_text(f"{todo_title} {todo_cpddl}".strip())
                 if (not resolved_ref_proj_list) and inferred_defaults.get("projects"):
                     resolved_ref_proj_list = list(inferred_defaults.get("projects") or [])
@@ -4660,7 +4663,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
                 st.success(" ".join(success_bits))
                 st.rerun()
 
-    st.markdown("##### 当前待办")
+    st.markdown("##### 待办表格")
     if not todo_list:
         st.info("当前视角下暂无待办。")
         return todo_list
