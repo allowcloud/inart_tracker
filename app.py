@@ -3972,6 +3972,44 @@ def format_event_recognition_hint(project_name="", component_name="", stage_name
     return " ｜ ".join(bits)
 
 
+def summarize_temporal_route_label(text, ref_date=None):
+    route_info = classify_temporal_event_route(text, ref_date=ref_date or datetime.date.today(), prefer_past=False)
+    evt_date = route_info.get("date") if isinstance(route_info.get("date"), datetime.date) else None
+    route = str(route_info.get("route", "")).strip()
+    date_bucket = str(route_info.get("date_bucket", "")).strip()
+    if route == "todo":
+        if evt_date:
+            return f"待办({evt_date.strftime('%m/%d')})"
+        return "待办"
+    if route == "past":
+        if evt_date:
+            return f"历史({evt_date.strftime('%m/%d')})"
+        return "历史"
+    if date_bucket == "today":
+        return "今日跟进"
+    return "仅记录"
+
+
+def render_compact_recognition_preview(prefix="识别预览", projects=None, component_name="", stage_name="", people=None, route_label="", extra_label=""):
+    bits = []
+    proj_list = [str(x).strip() for x in (projects or []) if str(x).strip()]
+    people_list = [str(x).strip() for x in (people or []) if str(x).strip()]
+    if proj_list:
+        bits.append(f"`项目` {' / '.join(proj_list[:2])}{' ...' if len(proj_list) > 2 else ''}")
+    if component_name:
+        bits.append(f"`部件` {component_name}")
+    if stage_name:
+        bits.append(f"`阶段` {stage_name}")
+    if people_list:
+        bits.append(f"`人员` {' / '.join(people_list[:2])}{' ...' if len(people_list) > 2 else ''}")
+    if route_label:
+        bits.append(f"`去向` {route_label}")
+    if extra_label:
+        bits.append(f"`说明` {extra_label}")
+    if bits:
+        st.caption(f"{prefix}：" + " ｜ ".join(bits))
+
+
 def append_todo_completion_history(td, action_date=None):
     td_obj = td or {}
     proj_list = [p for p in todo_project_list(td_obj) if p and p in db and p != "系统配置"]
@@ -4524,7 +4562,7 @@ def build_project_stage_segments(proj_label, proj_data):
 
 def render_pm_todo_manager(valid_projs, current_pm):
     st.subheader("🗂️ 待办清单（CP/DDL 合并）")
-    st.caption("待办专注任务、DDL/CP、关联项目、关联人员。图片统一在进度明细里补；人员只写姓名时，系统会优先匹配库中的完整角色-姓名。")
+    st.caption("过去日期会自动按已完成入历史；未来日期保留为待办。")
     cfg = db.setdefault("系统配置", {})
     todo_all = cfg.setdefault("PM_TODO_LIST", [])
 
@@ -4649,7 +4687,6 @@ def render_pm_todo_manager(valid_projs, current_pm):
 
     with st.container():
         st.markdown("##### 快速新增（直接加到下方表格）")
-        st.caption("这里填一行，添加后会直接出现在下方表格里继续编辑；如果你只写“宇涵”，系统会优先匹配库里的“设计-宇涵”等唯一人选。")
 
         todo_title_state = str(st.session_state.get("todo_title_global", "")).strip()
         todo_cpddl_state = str(st.session_state.get("todo_cpddl_global", "")).strip()
@@ -4740,7 +4777,6 @@ def render_pm_todo_manager(valid_projs, current_pm):
                 resolved_ref_proj_list.append(str(new_proj_name).strip())
 
         resolved_ref_proj_list = list(dict.fromkeys([p for p in resolved_ref_proj_list if p]))
-        st.caption("人员录入建议：优先在下拉选择；如果库里没有，点“➕ 新增关联人员...”即可。")
         todo_people_sel = st.multiselect("关联人员（可多选/留空）", role_person_options_create, key="todo_people_global", placeholder="请选择关联人员")
 
         todo_people_sel_clean = [x for x in todo_people_sel if x != todo_new_person_option]
@@ -4782,8 +4818,32 @@ def render_pm_todo_manager(valid_projs, current_pm):
                 auto_notes.append("人员已自动识别：" + " / ".join(auto_people[:3]))
             elif not picked_people_set:
                 auto_notes.append("可识别人员：" + " / ".join(auto_people[:3]))
-        if auto_notes:
-            st.caption("自动识别：" + "；".join(auto_notes))
+        preview_projects = resolved_ref_proj_list or auto_projects
+        preview_people = split_people_text(people_input) or auto_people
+        preview_component = ""
+        preview_stage = ""
+        if len(preview_projects) == 1 and preview_projects[0] in db:
+            todo_prefill_preview = infer_todo_handoff_prefill(
+                {
+                    "任务": todo_title,
+                    "CPDDL": todo_cpddl,
+                    "关联项目": preview_projects[0],
+                    "关联项目列表": preview_projects,
+                    "关联人员": people_input,
+                },
+                preview_projects[0],
+            )
+            preview_component = " / ".join(todo_prefill_preview.get("部件", [])[:2]) if isinstance(todo_prefill_preview.get("部件", []), list) else ""
+            preview_stage = str(todo_prefill_preview.get("阶段", "")).strip()
+        route_label = summarize_temporal_route_label(f"{todo_title} {todo_cpddl}".strip(), ref_date=today) if str(todo_title).strip() else ""
+        render_compact_recognition_preview(
+            projects=preview_projects,
+            component_name=preview_component,
+            stage_name=preview_stage,
+            people=preview_people,
+            route_label=route_label,
+            extra_label=("；".join(auto_notes[:2]) if auto_notes else ""),
+        )
 
         tmp_td = {
             "任务": todo_title,
@@ -4792,8 +4852,6 @@ def render_pm_todo_manager(valid_projs, current_pm):
             "关联项目列表": resolved_ref_proj_list,
             "关联人员": people_input,
         }
-        st.caption("开定识别：" + infer_todo_target_hint(tmp_td, valid_projs))
-        st.caption("人员识别：" + format_todo_people_hint(tmp_td))
         people_bundle = infer_todo_people_bundle(tmp_td)
         if not people_input and (people_bundle["ambiguous"] or people_bundle["unknown"]):
             st.warning("人员没有唯一识别，建议在待办里直接补充【关联人员】；图片和细节再放到下方进度明细。")
@@ -5651,7 +5709,7 @@ def save_fastlog_rows_to_db(edited_df, rec_date, source_name, image_bindings=Non
 
 def render_pm_batch_fastlog_integrated(visible_projects, default_proj=""):
     st.subheader("📝 批量速记（多项目）")
-    st.caption("用于晚间复盘：一次输入多项目进展，解析后统一校对并批量入库。")
+    st.caption("用于晚间复盘：过去日期进历史，未来日期进待办。")
 
     MANUAL_PICK = "⚠️请手动选择项目"
     PROJECT_ALIAS_MAP = SYS_CFG.get("项目别名", {})
@@ -5668,6 +5726,25 @@ def render_pm_batch_fastlog_integrated(visible_projects, default_proj=""):
             key="pm_batch_text",
             height=130,
             placeholder="例：1/6金克丝: 头雕提审通过；包装刀线待补\n1/6里夫西装 & 里夫战衣: 官图提审待反馈"
+        )
+    if str(raw_text).strip():
+        route_counts = {"past": 0, "todo": 0, "neutral": 0}
+        for seg in [x.strip() for x in re.split(r"[;；\n]+", str(raw_text)) if x.strip()]:
+            route_key = str(classify_temporal_event_route(seg, ref_date=rec_date, prefer_past=False).get("route", "neutral")).strip() or "neutral"
+            if route_key not in route_counts:
+                route_key = "neutral"
+            route_counts[route_key] += 1
+        route_bits = []
+        if route_counts["past"]:
+            route_bits.append(f"历史 {route_counts['past']} 条")
+        if route_counts["todo"]:
+            route_bits.append(f"待办 {route_counts['todo']} 条")
+        if route_counts["neutral"]:
+            route_bits.append(f"仅记录 {route_counts['neutral']} 条")
+        render_compact_recognition_preview(
+            prefix="输入预览",
+            route_label=" / ".join(route_bits),
+            extra_label="解析后统一校对",
         )
 
     if st.button("✨ 智能拆解", key="pm_batch_parse", type="primary"):
@@ -5838,7 +5915,7 @@ def render_pm_batch_fastlog_integrated(visible_projects, default_proj=""):
 
 def render_pm_fastlog_integrated(sel_proj):
     st.markdown("#### 📝 速记功能（已并入 PM）")
-    st.caption("当前为【单项目速记】。AI 仅猜部件/阶段/提审，不自动跳到全局进度。")
+    st.caption("规则：过去日期进历史，未来日期进待办；再由你校对部件和阶段。")
 
     comp_kw = get_component_keyword_map()
     stage_kw = get_stage_keyword_map()
@@ -5855,6 +5932,26 @@ def render_pm_fastlog_integrated(sel_proj):
             height=110,
             placeholder="例：头雕提审通过；包装刀线已提供；工程拆件待确认"
         )
+    if str(raw_txt).strip():
+        route_counts = {"past": 0, "todo": 0, "neutral": 0}
+        for seg in [x.strip() for x in re.split(r"[;；\n]+", str(raw_txt)) if x.strip()]:
+            route_key = str(classify_temporal_event_route(seg, ref_date=rec_date, prefer_past=False).get("route", "neutral")).strip() or "neutral"
+            if route_key not in route_counts:
+                route_key = "neutral"
+            route_counts[route_key] += 1
+        route_bits = []
+        if route_counts["past"]:
+            route_bits.append(f"历史 {route_counts['past']} 条")
+        if route_counts["todo"]:
+            route_bits.append(f"待办 {route_counts['todo']} 条")
+        if route_counts["neutral"]:
+            route_bits.append(f"仅记录 {route_counts['neutral']} 条")
+        render_compact_recognition_preview(
+            prefix="输入预览",
+            projects=[sel_proj],
+            route_label=" / ".join(route_bits),
+            extra_label="解析后再校对部件/阶段",
+        )
 
     if st.button("✨ 解析到部件/阶段", key=f"pm_fast_parse_{sel_proj}"):
         st.session_state[rk] = parse_fastlog_rows(
@@ -5868,7 +5965,7 @@ def render_pm_fastlog_integrated(sel_proj):
     if not rows:
         st.info("输入速记后点击【解析到部件/阶段】即可批量入库。")
         return
-    st.caption("提审识别规则：仅命中提审语义（提审/过审/review/打回等）时自动填写提审结果，普通 OK 不再默认=通过。")
+    st.caption("只在命中提审语义时自动填提审结果。")
 
     existing_comps = list(db[sel_proj].get("部件列表", {}).keys())
     comp_opts = [unresolved_comp, "全局进度"] + STD_COMPONENTS + existing_comps + ["其他配件(系统自动创建)"]
@@ -9614,6 +9711,22 @@ elif menu == MENU_SPECIFIC:
                 height=90,
                 key=f"wb_text_{fk}",
                 placeholder="例：把建模文件v2发给工程，待确认结构干涉；下午同步设计核对头雕比例",
+            )
+        if str(wb_text).strip():
+            preview_comp_name = ""
+            if wb_comp_raw == "🌐 全局进度 (Overall)":
+                preview_comp_name = "全局进度"
+            elif wb_comp_raw == "➕ 新增细分配件..." and str(wb_new_comp_name).strip():
+                preview_comp_name = str(wb_new_comp_name).strip()
+            elif wb_comp_raw not in ["", "➕ 新增细分配件..."]:
+                preview_comp_name = str(wb_comp_raw).strip()
+            route_label = summarize_temporal_route_label(str(wb_text).strip(), ref_date=wb_date)
+            render_compact_recognition_preview(
+                prefix="输入预览",
+                projects=[sel_proj],
+                component_name=preview_comp_name,
+                stage_name=wb_stage,
+                route_label=route_label,
             )
 
         st.markdown("**关联待办（可选）**")
