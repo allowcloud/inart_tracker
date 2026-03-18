@@ -648,6 +648,25 @@ div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlockBorderWrapp
     color: var(--pm-text-soft);
     font-size: 0.86rem;
 }
+.pm-subsection-card {
+    margin: 0.1rem 0 0.9rem 0;
+    padding: 0.95rem 1.05rem;
+    border-radius: 16px;
+    border: 1px solid var(--pm-border);
+    background: linear-gradient(135deg, var(--pm-card) 0%, var(--pm-card-soft) 100%);
+    box-shadow: var(--pm-shadow);
+}
+.pm-subsection-title {
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--pm-text-main);
+    margin-bottom: 0.25rem;
+}
+.pm-subsection-note {
+    color: var(--pm-text-soft);
+    font-size: 0.9rem;
+    line-height: 1.55;
+}
 /* localize streamlit uploader default English copy */
 [data-testid="stFileUploaderDropzoneInstructions"] span { display: none !important; }
 [data-testid="stFileUploaderDropzoneInstructions"]::before { content: "拖拽文件到这里"; font-size: 14px; color: var(--pm-text-soft); }
@@ -9430,11 +9449,20 @@ elif menu == MENU_SPECIFIC:
             st.plotly_chart(fig_grid, width='stretch')
 
     with pm_tab_update:
-        st.caption("这里集中做最常用的写入动作：改基础信息、记一条速记、补一条交接记录、联动待办。")
+        st.markdown(
+            """
+            <div class='pm-subsection-card'>
+                <div class='pm-subsection-title'>这里就是当前项目的操作台</div>
+                <div class='pm-subsection-note'>快速更新适合一句话推进和改基础字段；文件流转与交接适合发文件、挂图、带入待办、补一条正式记录。两块都只作用于当前选中的项目。</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
         st.divider()
-        quick_tab, handoff_tab = st.tabs(["快速更新", "文件流转"])
+        quick_tab, handoff_tab = st.tabs(["⚡ 快速更新", "📂 文件流转与交接"])
 
         with quick_tab:
+            st.caption("适合改项目基础信息、补一条速记，属于当前项目的轻量更新。")
             with st.expander("📝 单项目速记", expanded=False):
                 render_pm_fastlog_integrated(sel_proj)
             cur_pm     = db[sel_proj].get('负责人', 'Mo')
@@ -9515,6 +9543,7 @@ elif menu == MENU_SPECIFIC:
             st.caption("计划排期、版权审核、配置清单、包装、成本等重模块已挪到右侧【专项模块】页签。")
 
         with handoff_tab:
+            st.caption("这里的内容全部属于当前项目：待办带入、文件交接、挂图留痕都会落到这个项目下面。")
             project_pending_todos = [
                 x for x in todo_list
                 if (not x.get("完成")) and todo_matches_project(x, sel_proj)
@@ -9558,8 +9587,8 @@ elif menu == MENU_SPECIFIC:
                     st.caption("当前项目暂无关联待办；你也可以先在左侧待办新建后再带入。")
 
             st.divider()
-            st.markdown("**2. 细分配件交接工作台**")
-            st.caption("定位：文件流转看板。默认只保留核心字段；提审与强制提交放在高级选项里。")
+            st.markdown("**📂 文件流转与交接工作台**")
+            st.caption("定位：当前项目的文件流转看板。默认只保留核心字段；提审与强制提交放在高级选项里。")
 
     fk = st.session_state.form_key
     handoff_todos = [
@@ -9745,7 +9774,7 @@ elif menu == MENU_SPECIFIC:
                                 st.rerun()
 
     with st.container(border=True):
-        st.markdown("**✍️ 新建一条流转记录**")
+        st.markdown("**✍️ 为当前项目新建一条流转记录**")
 
         a1, a2, a3, a4 = st.columns([1.3, 1.1, 1.2, 1.2])
         with a1:
