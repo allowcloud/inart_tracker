@@ -10235,12 +10235,7 @@ elif menu == MENU_SPECIFIC:
             st.caption("粘贴组件暂时不可用，请先走上传。")
 
         with st.expander("高级选项（可选）", expanded=False):
-            is_review_record = st.checkbox(
-                "这条记录同时属于版权提审",
-                value=False,
-                key=f"wb_review_enabled_{fk}",
-                help="文件流转默认只记交接。只有这条内容确实已经发给版权方 / 进入提审时，再勾这里补提审信息。",
-            )
+            st.caption("提审信息留空时，这条记录只作为文件流转保存；填写了提审类型/结果后，系统才会把它同时记入版权审核信息。")
             c_adv1, c_adv2, c_adv3 = st.columns([1.1, 1.1, 0.8])
             with c_adv1:
                 review_type = st.selectbox(
@@ -10248,7 +10243,6 @@ elif menu == MENU_SPECIFIC:
                     REVIEW_TYPE_OPTIONS,
                     index=REVIEW_TYPE_OPTIONS.index("(无)") if "(无)" in REVIEW_TYPE_OPTIONS else 0,
                     key=f"wb_rv_type_{fk}",
-                    disabled=not is_review_record,
                 )
             with c_adv2:
                 review_result = st.selectbox(
@@ -10256,17 +10250,11 @@ elif menu == MENU_SPECIFIC:
                     REVIEW_RESULT_OPTIONS,
                     index=REVIEW_RESULT_OPTIONS.index("(无)") if "(无)" in REVIEW_RESULT_OPTIONS else 0,
                     key=f"wb_rv_res_{fk}",
-                    disabled=not is_review_record,
                 )
             with c_adv3:
-                review_round = st.number_input("提审轮次", min_value=1, value=1, step=1, key=f"wb_rv_round_{fk}", disabled=not is_review_record)
+                review_round = st.number_input("提审轮次", min_value=1, value=1, step=1, key=f"wb_rv_round_{fk}")
             is_completed = st.checkbox(f"标记【{wb_stage}】已彻底完成", value=False, key=f"wb_done_{fk}")
             force_submit_detail = st.checkbox("忽略阶段/提审 warning 强制提交", value=False, key=f"wb_force_{fk}")
-
-        if not is_review_record:
-            review_type = "(无)"
-            review_result = "(无)"
-            review_round = 1
 
         if st.button("💾 保存交接记录", type="primary", key=f"wb_save_{sel_proj}_{fk}"):
             if wb_comp_raw == "➕ 新增细分配件..." and not wb_new_comp_name:
