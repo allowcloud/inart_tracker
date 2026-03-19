@@ -22,6 +22,7 @@ def load_app_functions(*names: str) -> types.SimpleNamespace:
         "re": re,
         "uuid": uuid,
         "db": {},
+        "get_recognition_keywords": lambda _key: [],
     }
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in wanted:
@@ -34,6 +35,28 @@ def load_app_functions(*names: str) -> types.SimpleNamespace:
 
 
 class ProjectTodoSyncRegressionTest(unittest.TestCase):
+    def test_extract_event_date_and_body_does_not_treat_decimal_like_text_as_date(self) -> None:
+        ns = load_app_functions("extract_event_date_and_body")
+
+        dt, body = ns.extract_event_date_and_body(
+            "7.7的连接杆需要确认平视状态",
+            ref_date=datetime.date(2026, 3, 19),
+        )
+
+        self.assertIsNone(dt)
+        self.assertEqual(body, "7.7的连接杆需要确认平视状态")
+
+    def test_extract_event_date_and_body_still_supports_explicit_month_day_dates(self) -> None:
+        ns = load_app_functions("extract_event_date_and_body")
+
+        dt, body = ns.extract_event_date_and_body(
+            "7/7提审连接杆",
+            ref_date=datetime.date(2026, 3, 19),
+        )
+
+        self.assertEqual(dt, datetime.date(2026, 7, 7))
+        self.assertEqual(body, "提审连接杆")
+
     def test_normalize_todo_project_list_repairs_split_ratio_tokens_from_list(self) -> None:
         ns = load_app_functions(
             "norm_text",

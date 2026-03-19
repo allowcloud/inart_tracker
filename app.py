@@ -2390,7 +2390,7 @@ def normalize_todo_cpddl_for_storage(cpddl_text, task_text="", due_dt=None):
             return ""
         return cleaned_raw
     body = re.sub(r"(20\d{2})[-/](\d{1,2})[-/](\d{1,2})", " ", raw)
-    body = re.sub(r"(?<!\d)(\d{1,2})[\/\-\.](\d{1,2})(?!\d)", " ", body)
+    body = re.sub(r"(?<!\d)(\d{1,2})[\/\-](\d{1,2})(?!\d)", " ", body)
     body = re.sub(r"(?<!\d)(\d{1,2})月(\d{1,2})日?", " ", body)
     body = clean_auto_todo_task_text(body)
     if not body:
@@ -2438,7 +2438,6 @@ def extract_event_date_and_body(text, ref_date=None, prefer_past=False):
     md_patterns = [
         r"(?<!\d)(\d{1,2})[\/／](\d{1,2})(?!\d)",
         r"(?<!\d)(\d{1,2})-(\d{1,2})(?!\d)",
-        r"(?<!\d)(\d{1,2})\.(\d{1,2})(?!\d)",
         r"(?<!\d)(\d{1,2})月(\d{1,2})日?",
     ]
     for pat in md_patterns:
@@ -9378,7 +9377,6 @@ if menu == MENU_DASHBOARD:
             md_patterns = [
                 r"(?<!\d)(\d{1,2})[\/\uff0f](\d{1,2})(?!\d)",
                 r"(?<!\d)(\d{1,2})-(\d{1,2})(?!\d)",
-                r"(?<!\d)(\d{1,2})\.(\d{1,2})(?!\d)",
                 r"(?<!\d)(\d{1,2})\u6708(\d{1,2})\u65e5?",
             ]
             for pat in md_patterns:
