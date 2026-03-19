@@ -566,11 +566,16 @@ div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlockBorderWrapp
     border-radius: var(--pm-radius);
     background: var(--pm-card-soft);
     box-shadow: var(--pm-shadow);
-    overflow: hidden;
+    overflow: visible;
 }
 [data-testid="stExpander"] details summary {
     background: linear-gradient(180deg, var(--pm-card-soft) 0%, transparent 100%);
     border-radius: var(--pm-radius);
+}
+[data-testid="stPlotlyChart"] .js-plotly-plot,
+[data-testid="stPlotlyChart"] .plotly,
+[data-testid="stPlotlyChart"] .plot-container {
+    touch-action: pan-y !important;
 }
 .stButton button, .stDownloadButton button {
     border-radius: 12px !important;
@@ -9988,14 +9993,23 @@ elif menu == MENU_SPECIFIC:
                     text=hover_text, hoverinfo='text'
                 ))
                 fig_grid.update_layout(
-                    xaxis=dict(side='top', tickangle=-45),
-                    yaxis=dict(autorange='reversed', automargin=True),
+                    xaxis=dict(side='top', tickangle=-45, fixedrange=True),
+                    yaxis=dict(autorange='reversed', automargin=True, fixedrange=True),
                     plot_bgcolor='rgba(0,0,0,0)',
                     paper_bgcolor='rgba(0,0,0,0)',
                     height=max(250, len(y_labels) * 45),
-                    margin=dict(t=120, b=20, r=20)
+                    margin=dict(t=120, b=20, r=20),
+                    dragmode=False,
                 )
-                st.plotly_chart(fig_grid, width='stretch')
+                st.plotly_chart(
+                    fig_grid,
+                    width='stretch',
+                    config={
+                        "displayModeBar": False,
+                        "scrollZoom": False,
+                        "doubleClick": False,
+                    },
+                )
 
         with st.container(border=True):
             st.markdown("**当前项目统一状态解释**")
