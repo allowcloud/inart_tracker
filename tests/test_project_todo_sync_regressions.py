@@ -22,6 +22,7 @@ def load_app_functions(*names: str) -> types.SimpleNamespace:
         "re": re,
         "uuid": uuid,
         "db": {},
+        "get_recognition_keywords": lambda _key: [],
     }
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in wanted:
@@ -34,6 +35,83 @@ def load_app_functions(*names: str) -> types.SimpleNamespace:
 
 
 class ProjectTodoSyncRegressionTest(unittest.TestCase):
+    def test_build_project_todo_reminder_skips_todo_hidden_from_current_view(self) -> None:
+        ns = load_app_functions(
+            "parse_date_safe",
+            "todo_cpddl_text",
+            "todo_due_date",
+            "todo_scope_of",
+            "todo_visible_for_view",
+            "build_project_todo_reminder",
+        )
+
+        hidden_todo = {
+            "_id": "td_hidden",
+            "任务": "版权已给反馈诗实物送审",
+            "DDL": "2026-03-19",
+            "完成": False,
+            "所属视角": "Mo",
+            "创建者视角": "Mo",
+        }
+
+        reminder = ns.build_project_todo_reminder(
+            todo_event={
+                "动作": "待办新建",
+                "日期": "2026-03-19",
+                "内容": "版权已给反馈诗实物送审",
+                "关联待办": ["td_hidden"],
+            },
+            live_todo_binding={"todo": hidden_todo, "mode": "pending"},
+        )
+
+        self.assertEqual(reminder["action"], "待办提醒")
+
+        reminder_hidden = ns.build_project_todo_reminder(
+            todo_event={
+                "动作": "待办新建",
+                "日期": "2026-03-19",
+                "内容": "版权已给反馈诗实物送审",
+                "关联待办": ["td_hidden"],
+            },
+            live_todo_binding={"todo": hidden_todo, "mode": "pending"},
+            pm_view="袁",
+        )
+
+        self.assertEqual(reminder_hidden, {})
+
+    def test_format_todo_reminder_label_uses_completed_copy(self) -> None:
+        ns = load_app_functions("parse_date_safe", "format_todo_reminder_label")
+
+        label = ns.format_todo_reminder_label(
+            "素体需要修改",
+            "2026-03-17",
+            "待办完成",
+        )
+
+        self.assertEqual(label, "3/17完成待办：素体需要修改")
+
+    def test_extract_event_date_and_body_does_not_treat_decimal_like_text_as_date(self) -> None:
+        ns = load_app_functions("extract_event_date_and_body")
+
+        dt, body = ns.extract_event_date_and_body(
+            "7.7的连接杆需要确认平视状态",
+            ref_date=datetime.date(2026, 3, 19),
+        )
+
+        self.assertIsNone(dt)
+        self.assertEqual(body, "7.7的连接杆需要确认平视状态")
+
+    def test_extract_event_date_and_body_still_supports_explicit_month_day_dates(self) -> None:
+        ns = load_app_functions("extract_event_date_and_body")
+
+        dt, body = ns.extract_event_date_and_body(
+            "7/7提审连接杆",
+            ref_date=datetime.date(2026, 3, 19),
+        )
+
+        self.assertEqual(dt, datetime.date(2026, 7, 7))
+        self.assertEqual(body, "提审连接杆")
+
     def test_normalize_todo_project_list_repairs_split_ratio_tokens_from_list(self) -> None:
         ns = load_app_functions(
             "norm_text",
