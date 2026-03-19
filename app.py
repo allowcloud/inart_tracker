@@ -709,7 +709,8 @@ HANDOFF_METHODS = ["内部正常推进", "微信", "飞书", "实物/打印件�
 FILE_FLOW_RECORD_TYPES = ["📤 文件流转/交接", "📥 收到反馈/退回"]
 STD_COSTS_LIST  = ["研发费", "模具费", "大货生产", "包装印刷", "物流运输", "外包设计", "杂项其他"]
 QUOTE_ITEM_DEFAULTS = ["生产价", "衣服+皮布件", "头+装配", "模具费", "包装彩盒、吸塑", "手*9", "战衣版成品", "周转运费"]
-REVIEW_TYPE_OPTIONS = ["(无)", "2D提审", "3D提审", "实物提审", "包装提审"]
+REVIEW_TYPE_CANONICAL = ["2D提审", "3D提审", "产品图提审", "官图提审", "包装提审"]
+REVIEW_TYPE_OPTIONS = ["(无)"] + REVIEW_TYPE_CANONICAL + ["实物提审"]
 REVIEW_RESULT_OPTIONS = ["(无)", "待反馈", "通过", "打回"]
 
 PROJECT_RATIO_OPTIONS = ["1/1", "1/3", "1/4", "1/6", "1/12"]
@@ -1366,6 +1367,35 @@ def normalize_review_round(v):
         return ""
 
 
+def normalize_review_type(v):
+    raw = str(v or "").strip()
+    if not raw or raw == "(无)":
+        return "(无)"
+    s = norm_text(raw)
+    if any(k in s for k in ["2d提审", "二维提审", "立项资料提审"]):
+        return "2D提审"
+    if any(k in s for k in ["3d提审", "三维提审"]):
+        return "3D提审"
+    if any(k in s for k in ["产品图提审", "实物提审", "手板提审", "结构件提审", "实物图提审"]):
+        return "产品图提审"
+    if any(k in s for k in ["官图提审", "marketing提审", "营销图提审"]):
+        return "官图提审"
+    if any(k in s for k in ["包装提审", "彩盒提审", "地台贴提审", "电影票提审"]):
+        return "包装提审"
+    return raw
+
+
+def get_review_expected_stage(review_type):
+    rt = normalize_review_type(review_type)
+    return {
+        "2D提审": "立项",
+        "3D提审": "建模(含打印/签样)",
+        "产品图提审": "工厂复样(含胶件/上色等)",
+        "官图提审": "官图",
+        "包装提审": "设计",
+    }.get(rt, "")
+
+
 def has_copyright_review_context(txt):
     s = str(txt or "").strip().lower()
     if not s:
@@ -1380,7 +1410,7 @@ def has_copyright_review_context(txt):
 
 def is_real_review_log(log_obj):
     lg = log_obj or {}
-    review_type = str(lg.get("提审类型", "")).strip()
+    review_type = normalize_review_type(lg.get("提审类型", ""))
     if review_type and review_type != "(无)":
         return True
     evt = str(lg.get("事件", "")).strip()
@@ -1396,7 +1426,7 @@ def collect_project_review_rows(project_name):
                 continue
             if not is_real_review_log(lg):
                 continue
-            review_type = str(lg.get("提审类型", "")).strip() or "(无)"
+            review_type = normalize_review_type(lg.get("提审类型", "")) or "(无)"
             review_result = str(lg.get("提审结果", "")).strip() or "(无)"
             review_round = normalize_review_round(lg.get("提审轮次", ""))
             rows.append({
@@ -1413,7 +1443,7 @@ def collect_project_review_rows(project_name):
 
 def render_project_review_progress_matrix(project_name):
     review_rows = collect_project_review_rows(project_name)
-    review_types = [x for x in REVIEW_TYPE_OPTIONS if x != "(无)"]
+    review_types = list(REVIEW_TYPE_CANONICAL)
     if not review_rows:
         st.caption("当前项目暂无版权提审记录。")
         return
@@ -2169,28 +2199,17 @@ def infer_file_handoff_transition_label(text, target_stage=""):
 
 def validate_review_with_stage(review_type, stage_name, comp_name, stages):
     """返回空字符串表示合法，否则返回 warning 文案。"""
-    rt = str(review_type).strip()
+    rt = normalize_review_type(review_type)
     if not rt or rt == "(无)":
         return ""
     idx = get_stage_index(stage_name, stages)
     if idx < 0:
         return f"提审[{rt}]无法校验：阶段[{stage_name}]不在标准阶段中"
-    design_idx = get_stage_index("设计", stages)
-    eng_idx = get_stage_index("工程拆件", stages)
-    struct_idx = get_stage_index("手板/结构板", stages)
-    if rt == "2D提审":
-        if idx < get_stage_index("立项", stages):
-            return "2D提审应在立项后再使用"
-    elif rt == "3D提审":
-        min_idx = min([i for i in [design_idx, eng_idx] if i >= 0], default=-1)
-        if min_idx >= 0 and idx < min_idx:
-            return "3D提审建议在设计或工程阶段使用"
-    elif rt == "实物提审":
-        if struct_idx >= 0 and idx < struct_idx:
-            return "实物提审建议在手板/结构板阶段及之后使用"
-    elif rt == "包装提审":
-        if "包装" not in str(comp_name):
-            return "包装提审建议用于【包装】部件"
+    expected_stage = get_review_expected_stage(rt)
+    if rt == "包装提审" and "包装" not in str(comp_name):
+        return "包装提审建议用于【包装】部件"
+    if expected_stage and expected_stage in stages and stage_name != expected_stage:
+        return f"{rt}建议归到[{expected_stage}]阶段，不建议写在[{stage_name}]"
     return ""
 
 def validate_transition_warning(curr_stage, next_stage, stages):
@@ -2217,8 +2236,10 @@ def infer_review_type_from_text(txt):
         return "2D提审"
     if "3d" in s and "提审" in s:
         return "3D提审"
-    if any(k in s for k in ["实物提审", "手板提审", "结构件提审"]):
-        return "实物提审"
+    if any(k in s for k in ["产品图提审", "实物提审", "手板提审", "结构件提审", "实物图提审"]):
+        return "产品图提审"
+    if "官图" in s and "提审" in s:
+        return "官图提审"
     if "包装" in s and "提审" in s:
         return "包装提审"
     return "(无)"
@@ -3826,14 +3847,20 @@ def infer_todo_handoff_prefill(td, proj_name):
     if not comp_hits and any(k in txt for k in ["全局", "整体", "项目", "大盘"]):
         comp_hits = ["🌐 全局进度 (Overall)"]
 
+    review_type_hint = normalize_review_type(infer_review_type_from_text(txt))
     stage_guess = ""
-    for kw, stage_name in _sorted_kw_items(stage_kw_map):
-        if kw in txt or norm_text(kw) in txt_norm:
-            stage_guess = stage_name
-            break
+    review_stage_hint = get_review_expected_stage(review_type_hint)
+    if review_stage_hint:
+        stage_guess = review_stage_hint
+    if not stage_guess:
+        for kw, stage_name in _sorted_kw_items(stage_kw_map):
+            if kw in txt or norm_text(kw) in txt_norm:
+                stage_guess = stage_name
+                break
     if not stage_guess:
         macro_to_stage = {
             "立项": "立项",
+            "预研": "预研",
             "建模": "建模(含打印/签样)",
             "打印": "打印",
             "设计": "设计",
@@ -3858,6 +3885,11 @@ def infer_todo_handoff_prefill(td, proj_name):
             if stg_norm and stg_norm in txt_norm:
                 stage_guess = stg
                 break
+
+    if review_type_hint == "包装提审" and not comp_hits:
+        picked_packaging = _pick_component_from_hint("包装")
+        if picked_packaging:
+            comp_hits = [picked_packaging]
 
     people_bundle = infer_todo_people_bundle(td_obj)
     role_map = {}
@@ -4631,7 +4663,7 @@ def build_project_stage_segments(proj_label, proj_data):
                 "stage": macro,
                 "component": comp_name,
                 "event": evt,
-                "review_type": str(log.get("提审类型", "")).strip(),
+                "review_type": normalize_review_type(log.get("提审类型", "")),
                 "review_result": str(log.get("提审结果", "")).strip(),
                 "review_round": str(log.get("提审轮次", "")).strip(),
                 "raw_stage": raw_stage,
@@ -6092,7 +6124,7 @@ def save_fastlog_rows_to_db(edited_df, rec_date, source_name, image_bindings=Non
         if comp == "其他配件(系统自动创建)":
             comp = "自定义配件"
         stage_in = str(row.get("阶段", "(维持原阶段)")).strip()
-        rv_type = str(row.get("提审类型", "(无)")) or "(无)"
+        rv_type = normalize_review_type(row.get("提审类型", "(无)")) or "(无)"
         rv_res = str(row.get("提审结果", "(无)")) or "(无)"
         rv_round = normalize_review_round(row.get("提审轮次", ""))
 
@@ -8794,7 +8826,7 @@ if menu == MENU_DASHBOARD:
                     if not is_real_review_log(lg):
                         continue
                     evt = str(lg.get("事件", "")).strip()
-                    review_type = str(lg.get("提审类型", "")).strip()
+                    review_type = normalize_review_type(lg.get("提审类型", ""))
                     key = (proj_label, dt, review_type, evt, comp_name)
                     if key in review_seen:
                         continue
@@ -10353,7 +10385,7 @@ elif menu == MENU_SPECIFIC:
 
         with st.expander("高级选项（可选）", expanded=False):
             with st.expander("🧾 版权提审（可选）", expanded=False):
-                st.caption("这里仅用于发给版权方 / 正式提审的记录。留空时，这条内容只作为文件流转保存。")
+                st.caption("这里只记录发给版权方的正式提审。2D=立项资料，3D=建模文件，产品图=手板实物图，官图=marketing 图，包装=彩盒/地台贴/电影票等。留空时只保存为文件流转。")
                 c_adv1, c_adv2, c_adv3 = st.columns([1.1, 1.1, 0.8])
                 with c_adv1:
                     review_type = st.selectbox(
@@ -10380,6 +10412,7 @@ elif menu == MENU_SPECIFIC:
             elif not str(wb_text).strip() and not linked_todo_ids:
                 st.warning("请至少填写一条记录内容，或关联一个待办。")
             else:
+                review_type = normalize_review_type(review_type)
                 if wb_comp_raw == "🌐 全局进度 (Overall)":
                     actual_c = "全局进度"
                 elif wb_comp_raw == "➕ 新增细分配件...":
@@ -10861,7 +10894,7 @@ elif menu == MENU_FASTLOG:
                                       key=f"rv_ai_res_{i}")
             edited_logs.append({"项目": sel_proj_ai, "部件": sel_comp, "事件": sel_event,
                                  "推测阶段": sel_stage, "新词汇": ai_kw,
-                                 "提审类型": rv_type, "提审结果": rv_res})
+                                 "提审类型": normalize_review_type(rv_type), "提审结果": rv_res})
 
         st.markdown("**🖼️ 附件图片**")
         st.caption("附件会跟随每条入库记录自动关联到其对应项目/部件，后续可在【历史溯源】按项目追溯。")
@@ -10952,7 +10985,7 @@ elif menu == MENU_FASTLOG:
                 db[p]["部件列表"][target_comp]['日志流'].append({
                     "日期": td, "流转": "AI速记",
                     "工序": final_stage, "事件": log['事件'], "图片": ai_ref_list,
-                    "提审类型": log.get("提审类型", "(无)"), "提审结果": log.get("提审结果", "(无)")
+                    "提审类型": normalize_review_type(log.get("提审类型", "(无)")), "提审结果": log.get("提审结果", "(无)")
                 })
                 db[p]["部件列表"][target_comp]["主流程"] = final_stage
 
@@ -11283,7 +11316,7 @@ elif menu == MENU_HISTORY:
                     if img and img not in seen_imgs:
                         seen_imgs.add(img)
                         all_imgs.append(img)
-                rv_type = str(g["log"].get("提审类型", "(无)") or "(无)")
+                rv_type = normalize_review_type(g["log"].get("提审类型", "(无)") or "(无)")
         rv_res = str(g["log"].get("提审结果", "(无)") or "(无)")
         if rv_type == "(无)" and rv_res == "(无)":
             rv_state = "(无)"
@@ -11572,7 +11605,7 @@ elif menu == MENU_HISTORY:
                     day_global_proj_map[lid] = p_name
                     day_global_comp_map[lid] = c_name
 
-                    rv_type = str(lg.get("提审类型", "(无)") or "(无)")
+                    rv_type = normalize_review_type(lg.get("提审类型", "(无)") or "(无)")
                     rv_res = str(lg.get("提审结果", "(无)") or "(无)")
                     if rv_type == "(无)" and rv_res == "(无)":
                         rv_state = "(无)"
@@ -11667,7 +11700,7 @@ elif menu == MENU_HISTORY:
                         new_type = str(row.get("类型", "")).strip() or str(day_source_df.at[ridx, "类型"]).strip()
                         new_event = str(row.get("事件", "")).strip() or str(day_source_df.at[ridx, "事件"]).strip()
 
-                        new_rt = str(row.get("提审类型", "(无)")).strip() or "(无)"
+                        new_rt = normalize_review_type(row.get("提审类型", "(无)")) or "(无)"
                         if new_rt not in REVIEW_TYPE_OPTIONS:
                             new_rt = "(无)"
                         new_rr = str(row.get("提审结果", "(无)")).strip() or "(无)"
@@ -11692,7 +11725,7 @@ elif menu == MENU_HISTORY:
                         if str(lg.get("事件", "")) != new_event:
                             lg["事件"] = new_event
                             changed = True
-                        if str(lg.get("提审类型", "(无)")) != new_rt:
+                        if normalize_review_type(lg.get("提审类型", "(无)")) != new_rt:
                             lg["提审类型"] = new_rt
                             changed = True
                         if str(lg.get("提审结果", "(无)")) != new_rr:
@@ -11744,7 +11777,7 @@ elif menu == MENU_HISTORY:
             else:
                 st.caption("当前视角下无可按日查看的历史记录。")
 
-        review_ctx = df_logs["事件"].astype(str).str.contains(r"提审|过审|review|打回|驳回|退回|待反馈|2d|3d|二维|三维|实物提审|包装提审", case=False, regex=True)
+        review_ctx = df_logs["事件"].astype(str).str.contains(r"提审|过审|review|打回|驳回|退回|待反馈|2d|3d|二维|三维|实物提审|产品图提审|官图提审|包装提审", case=False, regex=True)
         mismatch_mask = (df_logs['提审类型'].astype(str) == '(无)') & (df_logs['提审结果'].astype(str).isin(['待反馈', '通过', '打回'])) & (~review_ctx)
         mismatch_cnt = int(mismatch_mask.sum())
         if mismatch_cnt > 0:
@@ -11783,7 +11816,7 @@ elif menu == MENU_HISTORY:
                         "_id": str(uuid.uuid4()),
                         "日期": str(row["日期"]), "工序": str(row["工序"]),
                         "流转": str(row["类型"]), "事件": str(row["事件"]),
-                        "提审类型": str(row.get("提审类型", "(无)")),
+                        "提审类型": normalize_review_type(row.get("提审类型", "(无)")),
                         "提审结果": str(row.get("提审结果", "(无)")),
                         "提审轮次": normalize_review_round(row.get("提审轮次", "")),
                         "图片": old_images
