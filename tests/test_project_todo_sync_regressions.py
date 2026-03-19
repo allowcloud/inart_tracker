@@ -35,6 +35,61 @@ def load_app_functions(*names: str) -> types.SimpleNamespace:
 
 
 class ProjectTodoSyncRegressionTest(unittest.TestCase):
+    def test_build_project_todo_reminder_skips_todo_hidden_from_current_view(self) -> None:
+        ns = load_app_functions(
+            "parse_date_safe",
+            "todo_cpddl_text",
+            "todo_due_date",
+            "todo_scope_of",
+            "todo_visible_for_view",
+            "build_project_todo_reminder",
+        )
+
+        hidden_todo = {
+            "_id": "td_hidden",
+            "任务": "版权已给反馈诗实物送审",
+            "DDL": "2026-03-19",
+            "完成": False,
+            "所属视角": "Mo",
+            "创建者视角": "Mo",
+        }
+
+        reminder = ns.build_project_todo_reminder(
+            todo_event={
+                "动作": "待办新建",
+                "日期": "2026-03-19",
+                "内容": "版权已给反馈诗实物送审",
+                "关联待办": ["td_hidden"],
+            },
+            live_todo_binding={"todo": hidden_todo, "mode": "pending"},
+        )
+
+        self.assertEqual(reminder["action"], "待办提醒")
+
+        reminder_hidden = ns.build_project_todo_reminder(
+            todo_event={
+                "动作": "待办新建",
+                "日期": "2026-03-19",
+                "内容": "版权已给反馈诗实物送审",
+                "关联待办": ["td_hidden"],
+            },
+            live_todo_binding={"todo": hidden_todo, "mode": "pending"},
+            pm_view="袁",
+        )
+
+        self.assertEqual(reminder_hidden, {})
+
+    def test_format_todo_reminder_label_uses_completed_copy(self) -> None:
+        ns = load_app_functions("parse_date_safe", "format_todo_reminder_label")
+
+        label = ns.format_todo_reminder_label(
+            "素体需要修改",
+            "2026-03-17",
+            "待办完成",
+        )
+
+        self.assertEqual(label, "3/17完成待办：素体需要修改")
+
     def test_extract_event_date_and_body_does_not_treat_decimal_like_text_as_date(self) -> None:
         ns = load_app_functions("extract_event_date_and_body")
 
