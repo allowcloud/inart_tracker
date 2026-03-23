@@ -7651,6 +7651,39 @@ def _extract_print_location(text, locations):
     return ""
 
 
+def _has_strong_print_tracking_signal(text, positive_kw=None):
+    txt = str(text or "").strip()
+    if not txt:
+        return False
+    strong_markers = [
+        "已安排打印", "安排打印", "安排内部打印", "内部打印", "安排外发打印", "外发打印",
+        "送打", "寄打", "去打", "开打", "安排打", "已安排打", "打件", "打样件",
+        "打印件已出", "已打印", "打印完成", "打印出来", "打印好了",
+        "博泰", "逸博", "小样儿",
+    ]
+    if any(k in txt for k in strong_markers):
+        return True
+    for kw in positive_kw or []:
+        sx = str(kw or "").strip()
+        if not sx or sx in ["打印", "打印件"]:
+            continue
+        if sx in txt:
+            return True
+    return False
+
+
+def _has_weak_only_print_mentions(text):
+    txt = str(text or "").strip()
+    if not txt:
+        return False
+    weak_markers = [
+        "待打印", "打印确认效果", "以打印确认效果", "确认打印效果",
+        "安排拆件", "已安排拆件", "待工程拆件", "工程拆件",
+        "待翻模", "建模(含打印/签样)",
+    ]
+    return any(k in txt for k in weak_markers)
+
+
 def _contains_print_tracking_signal(text):
     txt = str(text or "").strip()
     if not txt:
@@ -7659,7 +7692,22 @@ def _contains_print_tracking_signal(text):
     negative_kw = get_recognition_keywords("打印排除词")
     if any(k in txt for k in negative_kw):
         return False
-    return any(k in txt for k in positive_kw)
+    hard_blockers = [
+        "[系统自动同步]",
+        "跟随全局阶段",
+        "打印件已收",
+        "打印件已收到",
+        "打印件已收齐",
+        "收到打印件",
+        "收齐打印件",
+    ]
+    if any(k in txt for k in hard_blockers):
+        return False
+    if _has_strong_print_tracking_signal(txt, positive_kw=positive_kw):
+        return True
+    if _has_weak_only_print_mentions(txt):
+        return False
+    return any(str(k or "").strip() in txt for k in positive_kw if str(k or "").strip() not in ["", "打印", "打印件"])
 
 
 def _infer_print_component(project_name, free_text):

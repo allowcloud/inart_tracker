@@ -124,6 +124,18 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         self.assertIn(("鞋子和手型已安排拆件", "服装", "工程拆件"), tuples)
         self.assertIn(("鞋子和手型已安排拆件", "手型", "工程拆件"), tuples)
 
+    def test_contains_print_tracking_signal_filters_weak_stage_sync_and_received_noise(self) -> None:
+        ns = load_app_functions(
+            "_has_strong_print_tracking_signal",
+            "_has_weak_only_print_mentions",
+            "_contains_print_tracking_signal",
+        )
+
+        self.assertFalse(ns._contains_print_tracking_signal("萨鲁曼头雕待打印确认效果；鞋子和手型已安排拆件"))
+        self.assertFalse(ns._contains_print_tracking_signal("[系统自动同步] 跟随全局阶段 设计 -> 建模(含打印/签样)"))
+        self.assertFalse(ns._contains_print_tracking_signal("早川秋发型打印件已收齐，待翻模；3D建模提审已交未有反馈"))
+        self.assertTrue(ns._contains_print_tracking_signal("第一版头雕已拆眼睛已安排内部打印"))
+
     def test_is_stage_timeline_driver_log_excludes_todo_completion_logs(self) -> None:
         ns = load_app_functions("is_stage_timeline_driver_log")
 
