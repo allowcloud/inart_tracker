@@ -2608,7 +2608,186 @@ def classify_temporal_event_route(text, ref_date=None, prefer_past=False):
     }
 
 
-def upsert_todo_from_event_text(project_name, event_text, forced_due_dt=None, forced_task_body="", people_text="", actor="系统", scope_override="", prefer_existing_pending=False, return_payload=False):
+def extract_dashboard_todo_segments(text, project_name="", ref_date=None):
+    raw_text = str(text or "").strip()
+    if not raw_text:
+        return []
+
+    ref = ref_date or datetime.date.today()
+    proj = str(project_name or "").strip()
+    proj_comps = list(db.get(proj, {}).get("部件列表", {}).keys()) if proj in db else []
+    std_components = globals().get("STD_COMPONENTS", ["头雕(表情)", "素体", "手型", "服装", "配件", "地台", "包装"])
+    comp_kw_getter = globals().get("get_component_keyword_map")
+    stage_kw_getter = globals().get("get_stage_keyword_map")
+    comp_kw = comp_kw_getter() if callable(comp_kw_getter) else {}
+    stage_kw_map = stage_kw_getter() if callable(stage_kw_getter) else {}
+    stage_options = globals().get("STAGES_UNIFIED", [
+        "预研", "立项", "建模(含打印/签样)", "手板/结构板", "设计", "工程拆件",
+        "工厂复样(含胶件/上色等)", "大货", "官图", "包装", "⏸️ 暂停/搁置", "✅ 已完成(结束)",
+    ])
+
+    def _sorted_kw_items(mapping):
+        rows = []
+        for k, v in (mapping or {}).items():
+            kk = str(k).strip()
+            vv = str(v).strip()
+            if kk and vv:
+                rows.append((kk, vv))
+        rows.sort(key=lambda x: (-len(str(x[0])), str(x[0])))
+        return rows
+
+    def _pick_component_from_hint(target_keyword):
+        target = str(target_keyword or "").strip()
+        if not target:
+            return ""
+        if "全局" in target:
+            return "🌐 全局进度 (Overall)"
+        target_norm = norm_text(target)
+        for comp_name in proj_comps:
+            comp_txt = str(comp_name).strip()
+            if not comp_txt:
+                continue
+            comp_norm = norm_text(comp_txt)
+            if target == comp_txt or (target_norm and target_norm == comp_norm):
+                return "🌐 全局进度 (Overall)" if "全局" in comp_txt else comp_txt
+            if target in comp_txt or (target_norm and target_norm in comp_norm):
+                return "🌐 全局进度 (Overall)" if "全局" in comp_txt else comp_txt
+        for std_comp in std_components:
+            std_txt = str(std_comp).strip()
+            std_norm = norm_text(std_txt)
+            if target == std_txt or (target_norm and target_norm == std_norm):
+                return std_txt
+            if target in std_txt or (target_norm and target_norm in std_norm):
+                return std_txt
+        if target in ["植发", "头发", "发"] or target_norm in [norm_text(x) for x in ["植发", "头发", "发"]]:
+            for fallback in ["头雕", "表情"]:
+                head_comp = next(
+                    (
+                        str(comp_name).strip()
+                        for comp_name in proj_comps
+                        if fallback in str(comp_name) or norm_text(fallback) in norm_text(comp_name)
+                    ),
+                    "",
+                )
+                if head_comp:
+                    return head_comp
+            return "头雕(表情)"
+        return ""
+
+    def _pick_stage_from_hint(hint_text):
+        hint = str(hint_text or "").strip()
+        if not hint:
+            return ""
+        hint_norm = norm_text(hint)
+        for kw, stage_name in _sorted_kw_items(stage_kw_map):
+            kw_norm = norm_text(kw)
+            if kw in hint or (kw_norm and kw_norm in hint_norm):
+                return stage_name
+        stage_aliases = {
+            "工厂复样": "工厂复样(含胶件/上色等)",
+            "复样": "工厂复样(含胶件/上色等)",
+            "建模": "建模(含打印/签样)",
+            "打印": "建模(含打印/签样)",
+            "包装": "包装",
+            "工程": "工程拆件",
+            "拆件": "工程拆件",
+        }
+        for alias, stage_name in stage_aliases.items():
+            if alias in hint:
+                return stage_name
+        for stage_name in stage_options:
+            stage_txt = str(stage_name).strip()
+            if not stage_txt:
+                continue
+            if stage_txt in hint or norm_text(stage_txt) in hint_norm:
+                return stage_txt
+        return ""
+
+    segments = [x.strip() for x in re.split(r"[;；\n]+", raw_text) if x.strip()]
+    if not segments:
+        segments = [raw_text]
+
+    out = []
+    for seg in segments:
+        body_text = seg
+        hint_text = ""
+        m = re.match(r"^(.*?)(?:\s*(?:--+|——+)\s*)(.+)$", seg)
+        if m:
+            body_text = str(m.group(1) or "").strip() or seg
+            hint_text = str(m.group(2) or "").strip()
+
+        route_probe = " ".join([body_text, hint_text]).strip()
+        route_info = classify_temporal_event_route(route_probe, ref_date=ref, prefer_past=False)
+        route = str(route_info.get("route", "")).strip() or "neutral"
+        if re.search(r"\bto\s*do\b", hint_text, flags=re.I) or any(k in hint_text for k in ["待办", "待处理"]):
+            route = "todo"
+
+        due_dt, body_without_date = extract_event_date_and_body(body_text, ref_date=ref, prefer_past=False)
+        task = clean_auto_todo_task_text(body_without_date or body_text)
+        if not task:
+            continue
+
+        component_name = ""
+        stage_name = ""
+        explicit_tags = [str(x).strip() for x in re.findall(r"[【\[]([^】\]]+)[】\]]", hint_text) if str(x).strip()]
+        for tag in explicit_tags:
+            comp_candidate = _pick_component_from_hint(tag)
+            stage_candidate = _pick_stage_from_hint(tag)
+            if comp_candidate and not component_name:
+                component_name = comp_candidate
+                if stage_candidate == comp_candidate:
+                    stage_candidate = ""
+            if stage_candidate and not stage_name:
+                stage_name = stage_candidate
+
+        if not component_name or not stage_name:
+            hint_rows = extract_todo_segment_hints(
+                " ".join([body_text, hint_text]).strip(),
+                project_components=proj_comps,
+                comp_kw=comp_kw,
+                stage_kw_map=stage_kw_map,
+            )
+            if hint_rows:
+                first_hint = hint_rows[0]
+                if not component_name:
+                    comp_list = [str(x).strip() for x in (first_hint.get("components", []) or []) if str(x).strip()]
+                    if comp_list:
+                        component_name = comp_list[0]
+                if not stage_name:
+                    stage_name = str(first_hint.get("stage", "")).strip()
+
+        if (not component_name or not stage_name) and proj:
+            tmp_td = {
+                "任务": task,
+                "CPDDL": (f"{due_dt.month}/{due_dt.day}" if isinstance(due_dt, datetime.date) else ""),
+            }
+            prefill = infer_todo_handoff_prefill(tmp_td, proj)
+            if isinstance(prefill, dict):
+                if not component_name:
+                    comp_list = [str(x).strip() for x in (prefill.get("部件", []) or []) if str(x).strip()]
+                    if comp_list:
+                        component_name = comp_list[0]
+                if not stage_name:
+                    stage_name = str(prefill.get("阶段", "")).strip()
+
+        if component_name == "🌐 全局进度 (Overall)":
+            component_name = "全局进度"
+
+        out.append({
+            "raw": seg,
+            "task": task,
+            "body": body_text,
+            "hint": hint_text,
+            "route": route,
+            "due_dt": due_dt if isinstance(due_dt, datetime.date) else None,
+            "component": component_name,
+            "stage": stage_name,
+            "allow_empty_due": (route == "todo" and (not isinstance(due_dt, datetime.date))),
+        })
+    return out
+
+
+def upsert_todo_from_event_text(project_name, event_text, forced_due_dt=None, forced_task_body="", people_text="", actor="系统", scope_override="", prefer_existing_pending=False, return_payload=False, allow_empty_due=False, forced_component="", forced_stage=""):
     proj = str(project_name or "").strip()
     if (not proj) or proj not in db or proj == "系统配置":
         return ""
@@ -2616,7 +2795,7 @@ def upsert_todo_from_event_text(project_name, event_text, forced_due_dt=None, fo
     task_body = str(forced_task_body or "").strip()
     if due_dt is None:
         due_dt, task_body = extract_event_date_and_body(event_text, ref_date=datetime.date.today(), prefer_past=False)
-    if not due_dt:
+    if (not due_dt) and (not allow_empty_due):
         return ""
     task = clean_auto_todo_task_text(task_body or event_text)
     if not task:
@@ -2626,7 +2805,13 @@ def upsert_todo_from_event_text(project_name, event_text, forced_due_dt=None, fo
     owner = str(proj_data.get("负责人", "")).strip()
     scope = str(scope_override or "").strip() or (owner if owner and owner != "所有人" else "未分配")
     people = normalize_people_text(people_text or str(proj_data.get("跟单", "")).strip())
-    cpddl_txt = normalize_todo_cpddl_for_storage(f"{due_dt.month}/{due_dt.day} {task}", task, due_dt=due_dt)
+    due_txt = str(due_dt) if isinstance(due_dt, datetime.date) else ""
+    cpddl_seed = f"{due_dt.month}/{due_dt.day} {task}" if isinstance(due_dt, datetime.date) else task
+    cpddl_txt = normalize_todo_cpddl_for_storage(cpddl_seed, task, due_dt=due_dt) if isinstance(due_dt, datetime.date) else ""
+    explicit_component = str(forced_component or "").strip()
+    if explicit_component == "🌐 全局进度 (Overall)":
+        explicit_component = "全局进度"
+    explicit_stage = str(forced_stage or "").strip()
 
     cfg = db.setdefault("系统配置", {})
     todo_all = cfg.setdefault("PM_TODO_LIST", [])
@@ -2666,7 +2851,7 @@ def upsert_todo_from_event_text(project_name, event_text, forced_due_dt=None, fo
         need_history = False
         if str(hit.get("任务", "")).strip() != task:
             need_history = True
-        if str(hit.get("DDL", "")).strip() != str(due_dt):
+        if str(hit.get("DDL", "")).strip() != due_txt:
             need_history = True
         if str(hit.get("CPDDL", "")).strip() != cpddl_txt:
             need_history = True
@@ -2679,8 +2864,8 @@ def upsert_todo_from_event_text(project_name, event_text, forced_due_dt=None, fo
         if str(hit.get("任务", "")).strip() != task:
             hit["任务"] = task
             changed = True
-        if str(hit.get("DDL", "")).strip() != str(due_dt):
-            hit["DDL"] = str(due_dt)
+        if str(hit.get("DDL", "")).strip() != due_txt:
+            hit["DDL"] = due_txt
             changed = True
         if str(hit.get("CPDDL", "")).strip() != cpddl_txt:
             hit["CPDDL"] = cpddl_txt
@@ -2688,6 +2873,12 @@ def upsert_todo_from_event_text(project_name, event_text, forced_due_dt=None, fo
             changed = True
         if people and not str(hit.get("关联人员", "")).strip():
             hit["关联人员"] = people
+            changed = True
+        if explicit_component and str(hit.get("默认落地部件", "")).strip() != explicit_component:
+            hit["默认落地部件"] = explicit_component
+            changed = True
+        if explicit_stage and str(hit.get("默认落地阶段", "")).strip() != explicit_stage:
+            hit["默认落地阶段"] = explicit_stage
             changed = True
         if new_proj_list != old_proj_list:
             hit["关联项目列表"] = new_proj_list
@@ -2701,7 +2892,7 @@ def upsert_todo_from_event_text(project_name, event_text, forced_due_dt=None, fo
         "任务": task,
         "CPDDL": cpddl_txt,
         "CP": cpddl_txt,
-        "DDL": str(due_dt),
+        "DDL": due_txt,
         "完成": False,
         "关联项目": proj,
         "关联项目列表": [proj],
@@ -2711,6 +2902,8 @@ def upsert_todo_from_event_text(project_name, event_text, forced_due_dt=None, fo
         "创建": str(datetime.date.today()),
         "完成时间": "",
         "历史版本": [],
+        "默认落地部件": explicit_component,
+        "默认落地阶段": explicit_stage,
     }
     todo_all.append(new_td)
     payload = _pack_result("created", new_td)
@@ -3955,6 +4148,8 @@ def extract_todo_segment_hints(text, project_components=None, comp_kw=None, stag
     proj_comps = [str(x).strip() for x in (project_components or []) if str(x).strip()]
     comp_kw = comp_kw or {}
     stage_kw_map = stage_kw_map or {}
+    packaging_tokens = ["包装", "彩盒", "灰箱", "物流箱", "地台贴", "电影票", "说明书", "刀线", "内托", "烫色", "打样", "样稿"]
+    hair_tokens = ["植发", "马海毛", "毛到货", "种发", "补毛"]
 
     def _sorted_kw_items(mapping):
         rows = []
@@ -3980,10 +4175,37 @@ def extract_todo_segment_hints(text, project_components=None, comp_kw=None, stag
             std_txt = str(std_comp).strip()
             if target_keyword in std_txt or (target_norm and target_norm in norm_text(std_txt)):
                 return std_txt
+        if target_keyword in ["植发", "头发", "发"] or target_norm in [norm_text(x) for x in ["植发", "头发", "发"]]:
+            for fallback in ["头雕", "表情"]:
+                head_comp = next(
+                    (
+                        str(comp_name).strip()
+                        for comp_name in proj_comps
+                        if fallback in str(comp_name) or norm_text(fallback) in norm_text(comp_name)
+                    ),
+                    "",
+                )
+                if head_comp:
+                    return head_comp
+            return "头雕(表情)"
         return ""
+
+    def _has_packaging_context(seg_value):
+        helper = globals().get("_is_packaging_context")
+        if callable(helper):
+            try:
+                if helper("", seg_value, ""):
+                    return True
+            except Exception:
+                pass
+        return any(tok in seg_value for tok in packaging_tokens)
 
     def _pick_stage_from_segment(seg_text_value):
         seg_norm = norm_text(seg_text_value)
+        if _has_packaging_context(seg_text_value) and any(tok in seg_text_value for tok in ["打样", "待打样", "烫色", "修改", "改稿", "返修"]):
+            return "工厂复样(含胶件/上色等)"
+        if any(tok in seg_text_value for tok in hair_tokens):
+            return "工厂复样(含胶件/上色等)"
         for kw, stage_name in _sorted_kw_items(stage_kw_map):
             kw_norm = norm_text(kw)
             if kw in seg_text_value or (kw_norm and kw_norm in seg_norm):
@@ -4027,6 +4249,24 @@ def extract_todo_segment_hints(text, project_components=None, comp_kw=None, stag
             picked_comp = _pick_component_from_hint(target) or str(target).strip()
             if picked_comp and picked_comp not in seg_comps:
                 seg_comps.append(picked_comp)
+
+        if not seg_comps and any(tok in seg for tok in hair_tokens):
+            picked_head = _pick_component_from_hint("头雕")
+            if picked_head:
+                seg_comps.append(picked_head)
+            else:
+                picked_hair = _pick_component_from_hint("植发")
+                if picked_hair:
+                    seg_comps.append(picked_hair)
+                else:
+                    seg_comps.append("头雕(表情)")
+
+        if not seg_comps and _has_packaging_context(seg):
+            picked_packaging = _pick_component_from_hint("包装")
+            if picked_packaging:
+                seg_comps.append(picked_packaging)
+            else:
+                seg_comps.append("包装")
 
         if not seg_comps and any(k in seg for k in ["全局", "整体", "项目", "大盘"]):
             seg_comps = ["🌐 全局进度 (Overall)"]
@@ -4089,6 +4329,13 @@ def infer_todo_handoff_prefill(td, proj_name):
     proj_comps = list(db.get(proj, {}).get("部件列表", {}).keys())
     comp_kw = get_component_keyword_map()
     stage_kw_map = get_stage_keyword_map()
+    explicit_component = str(td_obj.get("默认落地部件", "")).strip()
+    explicit_stage = str(td_obj.get("默认落地阶段", "")).strip()
+    if explicit_component:
+        if explicit_component == "🌐 全局进度 (Overall)":
+            comp_hits.append("🌐 全局进度 (Overall)")
+        else:
+            comp_hits.append(explicit_component)
 
     def _sorted_kw_items(mapping):
         rows = []
@@ -4114,6 +4361,19 @@ def infer_todo_handoff_prefill(td, proj_name):
             std_txt = str(std_comp).strip()
             if target_keyword in std_txt or (target_norm and target_norm in norm_text(std_txt)):
                 return std_txt
+        if target_keyword in ["植发", "头发", "发"] or target_norm in [norm_text(x) for x in ["植发", "头发", "发"]]:
+            for fallback in ["头雕", "表情"]:
+                head_comp = next(
+                    (
+                        str(comp_name).strip()
+                        for comp_name in proj_comps
+                        if fallback in str(comp_name) or norm_text(fallback) in norm_text(comp_name)
+                    ),
+                    "",
+                )
+                if head_comp:
+                    return head_comp
+            return "头雕(表情)"
         return ""
 
     for comp in proj_comps:
@@ -4162,9 +4422,9 @@ def infer_todo_handoff_prefill(td, proj_name):
         comp_hits = ["🌐 全局进度 (Overall)"]
 
     review_type_hint = normalize_review_type(infer_review_type_from_text(txt))
-    stage_guess = ""
+    stage_guess = explicit_stage
     review_stage_hint = get_review_expected_stage(review_type_hint)
-    if review_stage_hint:
+    if (not stage_guess) and review_stage_hint:
         stage_guess = review_stage_hint
     if (not stage_guess) and segment_hints:
         stage_guess = next((str(x.get("stage", "")).strip() for x in segment_hints if str(x.get("stage", "")).strip()), "")
@@ -4649,12 +4909,13 @@ def get_latest_live_todo_binding(project_name, pm_view=None):
     return None
 
 
-def build_project_todo_reminder(todo_event=None, live_todo_binding=None, pm_view=None):
+def build_project_todo_reminder(todo_event=None, live_todo_binding=None, pm_view=None, project_name=""):
     evt = todo_event if isinstance(todo_event, dict) else {}
     binding = live_todo_binding if isinstance(live_todo_binding, dict) else {}
     live_td = binding.get("todo", {}) if isinstance(binding.get("todo"), dict) else {}
     live_mode = str(binding.get("mode", "")).strip()
     evt_action = str(evt.get("动作", "")).strip()
+    proj = str(project_name or evt.get("项目", "")).strip()
     evt_scope = ""
     if isinstance(evt.get("附加信息", {}), dict):
         evt_scope = str(evt.get("附加信息", {}).get("所属视角", "")).strip()
@@ -4668,6 +4929,15 @@ def build_project_todo_reminder(todo_event=None, live_todo_binding=None, pm_view
     if live_td:
         task = str(live_td.get("任务", "")).strip() or str(evt.get("内容", "")).strip() or str(evt.get("原始文本", "")).strip()
         if task:
+            inferred_component = ""
+            inferred_stage = ""
+            if proj and proj in db:
+                prefill = infer_todo_handoff_prefill(live_td, proj)
+                if isinstance(prefill, dict):
+                    comp_list = [str(x).strip() for x in (prefill.get("部件", []) or []) if str(x).strip()]
+                    if comp_list:
+                        inferred_component = _normalize_standard_event_component(comp_list[0])
+                    inferred_stage = str(prefill.get("阶段", "")).strip()
             if bool(live_td.get("完成")) or live_mode == "completed":
                 done_txt = str(live_td.get("完成时间", "")).strip()
                 if not done_txt:
@@ -4677,13 +4947,17 @@ def build_project_todo_reminder(todo_event=None, live_todo_binding=None, pm_view
                     "text": task,
                     "date": done_txt or str(evt.get("日期", "")).strip(),
                     "action": "待办完成",
+                    "component": str(evt.get("部件", "")).strip() or inferred_component,
+                    "stage": str(evt.get("阶段", "")).strip() or inferred_stage,
                 }
             due_dt = todo_due_date(live_td)
             due_txt = str(due_dt) if isinstance(due_dt, datetime.date) else str(live_td.get("DDL", "")).strip()
             return {
                 "text": task,
-                "date": due_txt or str(evt.get("日期", "")).strip(),
+                "date": due_txt,
                 "action": "待办重开" if evt_action == "待办重开" else "待办提醒",
+                "component": str(evt.get("部件", "")).strip() or inferred_component,
+                "stage": str(evt.get("阶段", "")).strip() or inferred_stage,
             }
 
     if evt_visible and evt_action == "待办完成":
@@ -4693,6 +4967,8 @@ def build_project_todo_reminder(todo_event=None, live_todo_binding=None, pm_view
                 "text": text,
                 "date": str(evt.get("日期", "")).strip(),
                 "action": "待办完成",
+                "component": str(evt.get("部件", "")).strip(),
+                "stage": str(evt.get("阶段", "")).strip(),
             }
     return {}
 
@@ -4733,6 +5009,7 @@ def build_project_current_explanation(project_name, pm_view=None):
         todo_event=(todo_binding or {}).get("event", {}) if todo_binding else {},
         live_todo_binding=live_todo_binding,
         pm_view=pm_view,
+        project_name=proj,
     )
 
     std_date = parse_date_safe(((std_binding or {}).get("event", {}) or {}).get("日期", "")) if std_binding else None
@@ -4764,6 +5041,8 @@ def build_project_current_explanation(project_name, pm_view=None):
         reminder_text = str(todo_reminder.get("text", "")).strip()
         reminder_date = str(todo_reminder.get("date", "")).strip()
         reminder_action = str(todo_reminder.get("action", "")).strip()
+        reminder_comp = str(todo_reminder.get("component", "")).strip()
+        reminder_stage = str(todo_reminder.get("stage", "")).strip()
         return {
             "_事件ID": str(evt.get("_id", "")).strip(),
             "项目": proj,
@@ -4780,6 +5059,8 @@ def build_project_current_explanation(project_name, pm_view=None):
             "提醒内容": reminder_text,
             "提醒日期": reminder_date,
             "提醒动作": reminder_action,
+            "提醒部件": reminder_comp,
+            "提醒阶段": reminder_stage,
             "模式": "标准事件",
         }
 
@@ -4795,6 +5076,8 @@ def build_project_current_explanation(project_name, pm_view=None):
         reminder_text = str(todo_reminder.get("text", "")).strip()
         reminder_date = str(todo_reminder.get("date", "")).strip()
         reminder_action = str(todo_reminder.get("action", "")).strip()
+        reminder_comp = str(todo_reminder.get("component", "")).strip()
+        reminder_stage = str(todo_reminder.get("stage", "")).strip()
         return {
             "_事件ID": "",
             "项目": proj,
@@ -4811,6 +5094,8 @@ def build_project_current_explanation(project_name, pm_view=None):
             "提醒内容": reminder_text,
             "提醒日期": reminder_date,
             "提醒动作": reminder_action,
+            "提醒部件": reminder_comp,
+            "提醒阶段": reminder_stage,
             "模式": "项目日志",
         }
 
@@ -4833,6 +5118,8 @@ def build_project_current_explanation(project_name, pm_view=None):
             "提醒内容": content,
             "提醒日期": str(todo_reminder.get("date", "")).strip() or str(evt.get("日期", "")).strip(),
             "提醒动作": str(todo_reminder.get("action", "")).strip() or str(evt.get("动作", "")).strip(),
+            "提醒部件": str(todo_reminder.get("component", "")).strip() or str(evt.get("部件", "")).strip(),
+            "提醒阶段": str(todo_reminder.get("stage", "")).strip() or str(evt.get("阶段", "")).strip(),
             "模式": "待办提醒",
         }
 
@@ -4863,6 +5150,8 @@ def build_project_current_explanation(project_name, pm_view=None):
             "提醒内容": content,
             "提醒日期": str(todo_reminder.get("date", "")).strip(),
             "提醒动作": str(todo_reminder.get("action", "")).strip() or "待办提醒",
+            "提醒部件": str(todo_reminder.get("component", "")).strip() or event_comp,
+            "提醒阶段": str(todo_reminder.get("stage", "")).strip() or inferred_stage,
             "模式": "待办实时兜底",
         }
 
@@ -4882,6 +5171,8 @@ def build_project_current_explanation(project_name, pm_view=None):
         "提醒内容": "",
         "提醒日期": "",
         "提醒动作": "",
+        "提醒部件": "",
+        "提醒阶段": "",
         "模式": "空",
     }
 
@@ -9230,11 +9521,22 @@ if menu == MENU_DASHBOARD:
             reminder_text = str(explanation.get("提醒内容", "")).strip()
             reminder_date_txt = str(explanation.get("提醒日期", "")).strip()
             reminder_action = str(explanation.get("提醒动作", "")).strip()
+            reminder_comp = str(explanation.get("提醒部件", "")).strip()
             reminder_dt = parse_date_safe(reminder_date_txt)
             if reminder_text:
                 reminder_label = format_todo_reminder_label(reminder_text, reminder_date_txt, reminder_action)
-                if (not ce or ce == "无数据") or (reminder_dt and (not exp_dt or reminder_dt >= exp_dt)):
+                should_override_reminder = (not ce or ce == "无数据")
+                if reminder_dt and (not exp_dt or reminder_dt >= exp_dt):
+                    should_override_reminder = True
+                elif (not reminder_dt) and reminder_action in ["待办提醒", "待办重开"]:
+                    exp_src = str(explanation.get("来源", "")).strip()
+                    exp_act = str(explanation.get("动作", "")).strip()
+                    if exp_src == "全局大盘" and exp_act in ["追加最新动态", "改写最新动态"]:
+                        should_override_reminder = True
+                if should_override_reminder:
                     ce = reminder_label
+                    if reminder_comp:
+                        explanation["部件"] = reminder_comp
                 elif reminder_label not in ce:
                     ce = f"{ce} ｜ {reminder_label}".strip()
             exp_comp_name = str(explanation.get("部件", "")).strip() or "全局进度"
@@ -9275,6 +9577,8 @@ if menu == MENU_DASHBOARD:
                 reminder_label = format_todo_reminder_label(reminder_text, reminder_date_txt, reminder_action)
                 if (not ce or ce == "无数据") or (reminder_dt and (not exp_dt or reminder_dt >= exp_dt)):
                     ce = reminder_label
+                    if reminder_comp:
+                        explanation["部件"] = reminder_comp
                 elif reminder_label not in ce:
                     ce = f"{ce} ｜ {reminder_label}".strip()
             latest_comp_name = str(explanation.get("部件", "")).strip() or latest_comp_name or "-"
@@ -9909,42 +10213,150 @@ if menu == MENU_DASHBOARD:
             return "neutral"
 
         def _sync_todo_checkpoint_from_dynamic(project_name, event_text, forced_due_dt=None, forced_task_body="", skip_intent_check=False, return_payload=False):
+            def _empty_payload():
+                return {
+                    "status": "",
+                    "todo_id": "",
+                    "todo_ids": [],
+                    "items": [],
+                    "created": 0,
+                    "updated": 0,
+                    "exists": 0,
+                }
+
+            payload = _empty_payload()
             if not skip_intent_check:
                 intent = _classify_dynamic_intent(event_text)
                 if intent != "todo":
-                    return {"status": "", "todo_ids": []} if return_payload else ""
+                    return payload if return_payload else ""
 
-            due_dt = forced_due_dt if isinstance(forced_due_dt, datetime.date) else None
-            task_body = str(forced_task_body or "").strip()
-            if due_dt is None:
-                due_dt, task_body = _extract_event_date_from_text(event_text, prefer_past=False)
-            if not due_dt:
-                return {"status": "", "todo_ids": []} if return_payload else ""
-            if (not skip_intent_check) and due_dt < datetime.date.today():
-                return {"status": "", "todo_ids": []} if return_payload else ""
+            raw_text = str(event_text or "").strip()
+            if not raw_text:
+                return payload if return_payload else ""
 
-            task = clean_auto_todo_task_text(task_body or event_text)
-            if not task:
-                return {"status": "", "todo_ids": []} if return_payload else ""
+            ref_dt = forced_due_dt if isinstance(forced_due_dt, datetime.date) else datetime.date.today()
+            segments = extract_dashboard_todo_segments(raw_text, project_name=project_name, ref_date=ref_dt)
+
+            if (not segments) and raw_text:
+                due_dt = forced_due_dt if isinstance(forced_due_dt, datetime.date) else None
+                task_body = str(forced_task_body or "").strip()
+                if due_dt is None:
+                    due_dt, task_body = _extract_event_date_from_text(raw_text, prefer_past=False)
+                task = clean_auto_todo_task_text(task_body or raw_text)
+                if task:
+                    segments = [{
+                        "raw": raw_text,
+                        "task": task,
+                        "body": raw_text,
+                        "hint": "",
+                        "route": "todo" if (isinstance(due_dt, datetime.date) or skip_intent_check) else "",
+                        "due_dt": due_dt if isinstance(due_dt, datetime.date) else None,
+                        "component": "",
+                        "stage": "",
+                        "allow_empty_due": False,
+                    }]
+
+            if not segments:
+                return payload if return_payload else ""
+
+            today_ref = datetime.date.today()
+            todo_candidates = []
+            for seg in segments:
+                seg_task = clean_auto_todo_task_text(str(seg.get("task", "")).strip())
+                seg_due = seg.get("due_dt") if isinstance(seg.get("due_dt"), datetime.date) else None
+                seg_route = str(seg.get("route", "")).strip()
+                seg_allow_empty_due = bool(seg.get("allow_empty_due"))
+                if len(segments) == 1 and str(forced_task_body or "").strip():
+                    seg_task = clean_auto_todo_task_text(forced_task_body) or seg_task
+                if len(segments) == 1 and isinstance(forced_due_dt, datetime.date) and (seg_due is None):
+                    seg_due = forced_due_dt
+                if not seg_task:
+                    continue
+                if not skip_intent_check:
+                    if seg_route != "todo":
+                        continue
+                    if isinstance(seg_due, datetime.date) and seg_due < today_ref:
+                        continue
+                else:
+                    if seg_route == "past":
+                        continue
+                if (not isinstance(seg_due, datetime.date)) and (not seg_allow_empty_due):
+                    continue
+                todo_candidates.append({
+                    "task": seg_task,
+                    "due_dt": seg_due,
+                    "component": str(seg.get("component", "")).strip(),
+                    "stage": str(seg.get("stage", "")).strip(),
+                    "allow_empty_due": seg_allow_empty_due,
+                    "raw": str(seg.get("raw", "")).strip() or raw_text,
+                    "body": str(seg.get("body", "")).strip() or seg_task,
+                    "hint": str(seg.get("hint", "")).strip(),
+                })
+
+            if not todo_candidates:
+                return payload if return_payload else ""
+
             proj_data = db.get(project_name, {}) if project_name in db else {}
             owner = str(proj_data.get("负责人", "")).strip()
             scope = owner if owner and owner != "所有人" else "未分配"
             people = str(proj_data.get("跟单", "")).strip()
-            return upsert_todo_from_event_text(
-                project_name,
-                event_text,
-                forced_due_dt=due_dt,
-                forced_task_body=task,
-                people_text=people,
-                actor="系统",
-                scope_override=current_pm if current_pm != "所有人" else scope,
-                prefer_existing_pending=True,
-                return_payload=return_payload,
-            )
+            prefer_single_pending = (len(todo_candidates) == 1)
+
+            for seg in todo_candidates:
+                result = upsert_todo_from_event_text(
+                    project_name,
+                    seg["raw"] or raw_text,
+                    forced_due_dt=seg["due_dt"],
+                    forced_task_body=seg["task"],
+                    people_text=people,
+                    actor="系统",
+                    scope_override=current_pm if current_pm != "所有人" else scope,
+                    prefer_existing_pending=prefer_single_pending,
+                    return_payload=True,
+                    allow_empty_due=seg["allow_empty_due"],
+                    forced_component=seg["component"],
+                    forced_stage=seg["stage"],
+                )
+                todo_state, todo_ids = unpack_todo_upsert_result(result)
+                if not todo_state:
+                    continue
+                payload["todo_ids"].extend(todo_ids)
+                if todo_state == "created":
+                    payload["created"] += 1
+                elif todo_state == "updated":
+                    payload["updated"] += 1
+                elif todo_state == "exists":
+                    payload["exists"] += 1
+                payload["items"].append({
+                    "status": todo_state,
+                    "todo_ids": todo_ids,
+                    "task": seg["task"],
+                    "due_dt": seg["due_dt"],
+                    "component": seg["component"],
+                    "stage": seg["stage"],
+                    "allow_empty_due": seg["allow_empty_due"],
+                    "raw": seg["raw"] or raw_text,
+                    "hint": seg["hint"],
+                })
+
+            payload["todo_ids"] = list(dict.fromkeys([str(x).strip() for x in payload["todo_ids"] if str(x).strip()]))
+            if payload["todo_ids"]:
+                payload["todo_id"] = payload["todo_ids"][0]
+            if payload["created"]:
+                payload["status"] = "created"
+            elif payload["updated"]:
+                payload["status"] = "updated"
+            elif payload["exists"]:
+                payload["status"] = "exists"
+            return payload if return_payload else payload["status"]
 
         st.markdown("##### 🧩 大盘明细可编辑表")
         st.caption("直接在表格中修改基础字段和【最新全盘动态】；默认追加为新记录，勾选【改写历史】后改写当前最新动态。")
         st.caption("规则：日期优先。未来日期自动同步到待办；过去日期按该日期写入历史。无日期时再按语气词判断。")
+        with st.expander("📝 大盘动态识别说明", expanded=False):
+            st.caption("一句里有多个动作时，请用 `；` 分开。系统会按每一小句分别识别待办、部件和阶段。")
+            st.caption("不需要额外写 `--` 标记；像 `植发 / 马海毛 / 毛到货` 会优先理解成头雕相关动作，`彩盒 / 地台贴 / 烫色 / 打样` 会优先理解成包装复样动作。")
+            st.caption("示例：`4/20马海毛到货开始植发；地台贴需修改、彩盒需修改烫色，已转交立宇待打样`")
 
         editable_cols = ["状态", "项目", "项目当前阶段", "开定时间", "预计发货", "跟单", "最新全盘动态", "断更", "开定延迟预警", "发货延迟预警"]
         editable_df = show_df[editable_cols].copy()
@@ -10131,13 +10543,14 @@ if menu == MENU_DASHBOARD:
                                 dynamic_rewrite_updates += 1
                             changed_projects.add(proj)
                             if row_dynamic_mode == "append_latest":
-                                todo_result = {"status": "", "todo_ids": []}
+                                todo_result = {"status": "", "todo_ids": [], "items": [], "created": 0, "updated": 0, "exists": 0}
+                                has_multi_todo_segments = len([x for x in re.split(r"[;；\n]+", str(latest_after or "")) if str(x).strip()]) > 1
                                 if date_bucket == "future" and isinstance(parsed_date, datetime.date):
                                     todo_result = _sync_todo_checkpoint_from_dynamic(
                                         proj,
                                         latest_after,
-                                        forced_due_dt=parsed_date,
-                                        forced_task_body=parsed_body,
+                                        forced_due_dt=None if has_multi_todo_segments else parsed_date,
+                                        forced_task_body="" if has_multi_todo_segments else parsed_body,
                                         skip_intent_check=True,
                                         return_payload=True,
                                     )
@@ -10145,47 +10558,57 @@ if menu == MENU_DASHBOARD:
                                     todo_result = _sync_todo_checkpoint_from_dynamic(
                                         proj,
                                         latest_after,
-                                        forced_due_dt=parsed_date,
-                                        forced_task_body=parsed_body,
+                                        forced_due_dt=None if has_multi_todo_segments else parsed_date,
+                                        forced_task_body="" if has_multi_todo_segments else parsed_body,
                                         skip_intent_check=True,
                                         return_payload=True,
                                     )
                                 elif not date_bucket:
                                     todo_result = _sync_todo_checkpoint_from_dynamic(proj, latest_after, return_payload=True)
-                                todo_state, todo_ids = unpack_todo_upsert_result(todo_result)
 
-                                if todo_state == "created":
-                                    todo_created += 1
-                                elif todo_state == "updated":
-                                    todo_updated += 1
-                                hint_line = format_event_recognition_hint(
-                                    project_name=proj,
-                                    component_name=target_comp,
-                                    stage_name=str(db.get(proj, {}).get("部件列表", {}).get(target_comp, {}).get("主流程", "")).strip(),
-                                    todo_state=todo_state,
-                                    reminder_text=parsed_body or latest_after,
-                                )
-                                if hint_line:
-                                    hint_lines.append(hint_line)
+                                todo_created += int(todo_result.get("created", 0) or 0)
+                                todo_updated += int(todo_result.get("updated", 0) or 0)
+                                todo_items = [x for x in (todo_result.get("items", []) or []) if isinstance(x, dict)]
 
-                                if todo_state in ["created", "updated", "exists"]:
-                                    standard_event_dirty = (
-                                        append_standard_event_entry(
-                                            source_module="全局大盘",
-                                            action_type="动态联动待办",
-                                            project_name=proj,
-                                            event_date=parsed_date if isinstance(parsed_date, datetime.date) else datetime.date.today(),
-                                            component_name=target_comp,
-                                            stage_name=str(db.get(proj, {}).get("部件列表", {}).get(target_comp, {}).get("主流程", "")).strip(),
-                                            content_text=parsed_body or latest_after,
-                                            raw_text=latest_raw_after,
-                                            todo_ids=todo_ids,
-                                            people_text="",
-                                            intent="todo",
-                                            actor="系统",
-                                            extra_payload={"联动结果": todo_state},
-                                        ) or standard_event_dirty
+                                for todo_item in todo_items:
+                                    item_state = str(todo_item.get("status", "")).strip()
+                                    item_comp = str(todo_item.get("component", "")).strip() or target_comp
+                                    item_stage = str(todo_item.get("stage", "")).strip() or str(db.get(proj, {}).get("部件列表", {}).get(item_comp, {}).get("主流程", "")).strip()
+                                    item_task = str(todo_item.get("task", "")).strip() or parsed_body or latest_after
+                                    item_due = todo_item.get("due_dt") if isinstance(todo_item.get("due_dt"), datetime.date) else None
+                                    item_todo_ids = [str(x).strip() for x in (todo_item.get("todo_ids", []) or []) if str(x).strip()]
+
+                                    hint_line = format_event_recognition_hint(
+                                        project_name=proj,
+                                        component_name=item_comp,
+                                        stage_name=item_stage,
+                                        todo_state=item_state,
+                                        reminder_text=item_task,
                                     )
+                                    if hint_line:
+                                        hint_lines.append(hint_line)
+
+                                    if item_state in ["created", "updated", "exists"]:
+                                        standard_event_dirty = (
+                                            append_standard_event_entry(
+                                                source_module="全局大盘",
+                                                action_type="动态联动待办",
+                                                project_name=proj,
+                                                event_date=item_due if isinstance(item_due, datetime.date) else datetime.date.today(),
+                                                component_name=item_comp,
+                                                stage_name=item_stage,
+                                                content_text=item_task,
+                                                raw_text=str(todo_item.get("raw", "")).strip() or latest_raw_after,
+                                                todo_ids=item_todo_ids,
+                                                people_text="",
+                                                intent="todo",
+                                                actor="系统",
+                                                extra_payload={
+                                                    "联动结果": item_state,
+                                                    "无DDL": not isinstance(item_due, datetime.date),
+                                                },
+                                            ) or standard_event_dirty
+                                        )
                         else:
                             error_msgs.append(f"{proj}: {msg}")
 

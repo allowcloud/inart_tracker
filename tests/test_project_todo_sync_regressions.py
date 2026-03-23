@@ -362,6 +362,111 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         self.assertEqual(todo_row["最近联动部件"], "全局进度")
         self.assertEqual(todo_row["最近联动阶段"], "官图")
 
+    def test_extract_dashboard_todo_segments_infers_component_and_stage_from_natural_text(self) -> None:
+        ns = load_app_functions("extract_dashboard_todo_segments", "extract_todo_segment_hints")
+        globals_map = ns.extract_dashboard_todo_segments.__globals__
+        globals_map["db"].update(
+            {
+                "1/6马尔福": {
+                    "部件列表": {
+                        "头雕(表情)": {},
+                        "包装": {},
+                        "全局进度": {},
+                    }
+                }
+            }
+        )
+        globals_map["norm_text"] = lambda text: str(text or "").strip().lower().replace(" ", "")
+        globals_map["classify_temporal_event_route"] = (
+            lambda text, ref_date=None, prefer_past=False: {
+                "route": "todo",
+                "date": None,
+                "body": str(text or "").strip(),
+                "intent": "todo",
+                "date_bucket": "",
+            }
+        )
+
+        def _extract_date(text, ref_date=None, prefer_past=False):
+            raw = str(text or "").strip()
+            m = re.search(r"(\d{1,2})/(\d{1,2})", raw)
+            if not m:
+                return None, raw
+            mm = int(m.group(1))
+            dd = int(m.group(2))
+            body = (raw[:m.start()] + " " + raw[m.end():]).strip()
+            return datetime.date(2026, mm, dd), body
+
+        globals_map["extract_event_date_and_body"] = _extract_date
+        globals_map["clean_auto_todo_task_text"] = lambda text: re.sub(r"\s+", " ", str(text or "").strip())
+        globals_map["get_component_keyword_map"] = lambda: {
+            "植发": "植发",
+            "马海毛": "植发",
+            "彩盒": "包装",
+            "地台贴": "包装",
+        }
+        globals_map["get_stage_keyword_map"] = lambda: {
+            "打样": "建模(含打印/签样)",
+            "修改": "建模(含打印/签样)",
+        }
+        globals_map["infer_todo_handoff_prefill"] = lambda td, proj_name: {}
+
+        rows = ns.extract_dashboard_todo_segments(
+            "4/20马海毛到货开始植发；地台贴需修改、彩盒需修改烫色，已转交立宇待打样",
+            project_name="1/6马尔福",
+            ref_date=datetime.date(2026, 3, 23),
+        )
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["task"], "马海毛到货开始植发")
+        self.assertEqual(rows[0]["component"], "头雕(表情)")
+        self.assertEqual(rows[0]["stage"], "工厂复样(含胶件/上色等)")
+        self.assertEqual(rows[0]["due_dt"], datetime.date(2026, 4, 20))
+        self.assertEqual(rows[1]["task"], "地台贴需修改、彩盒需修改烫色，已转交立宇待打样")
+        self.assertEqual(rows[1]["component"], "包装")
+        self.assertEqual(rows[1]["stage"], "工厂复样(含胶件/上色等)")
+        self.assertIsNone(rows[1]["due_dt"])
+        self.assertTrue(rows[1]["allow_empty_due"])
+
+    def test_upsert_todo_from_event_text_keeps_undated_dashboard_todo_hints(self) -> None:
+        ns = load_app_functions("upsert_todo_from_event_text")
+        globals_map = ns.upsert_todo_from_event_text.__globals__
+        globals_map["db"].update(
+            {
+                "系统配置": {"PM_TODO_LIST": []},
+                "1/6马尔福": {"负责人": "袁", "跟单": "浪"},
+            }
+        )
+        globals_map["extract_event_date_and_body"] = lambda text, ref_date=None, prefer_past=False: (None, str(text or "").strip())
+        globals_map["clean_auto_todo_task_text"] = lambda text: str(text or "").strip()
+        globals_map["normalize_people_text"] = lambda text: str(text or "").strip()
+        globals_map["normalize_todo_cpddl_for_storage"] = lambda cpddl_text, task_text="", due_dt=None: str(cpddl_text or "").strip()
+        globals_map["norm_text"] = lambda text: str(text or "").strip().lower()
+        globals_map["todo_matches_project"] = lambda td, proj: proj in (td.get("关联项目列表", []) or []) or str(td.get("关联项目", "")).strip() == proj
+        globals_map["todo_project_list"] = (
+            lambda td: [str(x).strip() for x in (td.get("关联项目列表", []) or []) if str(x).strip()]
+            or ([str(td.get("关联项目", "")).strip()] if str(td.get("关联项目", "")).strip() else [])
+        )
+        globals_map["todo_append_history_version"] = lambda td, actor="系统": None
+
+        result = ns.upsert_todo_from_event_text(
+            "1/6马尔福",
+            "地台贴需修改、彩盒需修改烫色，已转交立宇待打样",
+            forced_task_body="地台贴需修改、彩盒需修改烫色，已转交立宇待打样",
+            allow_empty_due=True,
+            return_payload=True,
+            forced_component="包装",
+            forced_stage="工厂复样(含胶件/上色等)",
+        )
+
+        self.assertEqual(result["status"], "created")
+        todo_row = globals_map["db"]["系统配置"]["PM_TODO_LIST"][0]
+        self.assertEqual(todo_row["任务"], "地台贴需修改、彩盒需修改烫色，已转交立宇待打样")
+        self.assertEqual(todo_row["DDL"], "")
+        self.assertEqual(todo_row["CPDDL"], "")
+        self.assertEqual(todo_row["默认落地部件"], "包装")
+        self.assertEqual(todo_row["默认落地阶段"], "工厂复样(含胶件/上色等)")
+
 
 if __name__ == "__main__":
     unittest.main()
