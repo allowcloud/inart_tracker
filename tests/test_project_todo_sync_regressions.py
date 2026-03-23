@@ -45,6 +45,97 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
 
         self.assertEqual(stale, ["6威龙", "6早川秋"])
 
+    def test_has_live_todo_reference_ignores_deleted_or_hidden_todos(self) -> None:
+        ns = load_app_functions(
+            "todo_scope_of",
+            "todo_visible_for_view",
+            "get_live_linked_todo_ids",
+            "has_live_todo_reference",
+        )
+        ns.db.update(
+            {
+                "系统配置": {
+                    "PM_TODO_LIST": [
+                        {"_id": "td_live", "所属视角": "袁", "创建者视角": "袁"},
+                        {"_id": "td_other", "所属视角": "Mo", "创建者视角": "Mo"},
+                    ]
+                }
+            }
+        )
+
+        self.assertTrue(ns.has_live_todo_reference({"关联待办": ["td_live"]}, pm_view="袁"))
+        self.assertFalse(ns.has_live_todo_reference({"关联待办": ["td_live"]}, pm_view="Mo"))
+        self.assertFalse(ns.has_live_todo_reference({"关联待办": ["td_missing"]}, pm_view="袁"))
+
+    def test_purge_deleted_todo_standard_events_removes_stale_todo_reminders(self) -> None:
+        ns = load_app_functions(
+            "_is_todo_standard_event",
+            "purge_deleted_todo_standard_events",
+        )
+        ns.db.update(
+            {
+                "系统配置": {
+                    "标准事件流": [
+                        {
+                            "_id": "evt_todo",
+                            "来源": "To-do",
+                            "动作": "待办更新",
+                            "关联待办": ["td1"],
+                            "内容": "7/7待办：旧提醒",
+                        },
+                        {
+                            "_id": "evt_progress",
+                            "来源": "全局大盘",
+                            "动作": "追加最新动态",
+                            "关联待办": ["td1", "td2"],
+                            "内容": "项目继续推进",
+                        },
+                    ]
+                }
+            }
+        )
+
+        removed = ns.purge_deleted_todo_standard_events(["td1"])
+
+        self.assertEqual(removed, 1)
+        remaining = ns.db["系统配置"]["标准事件流"]
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0]["_id"], "evt_progress")
+        self.assertEqual(remaining[0]["关联待办"], ["td2"])
+
+    def test_expand_workbench_segment_entries_preserves_split_stage_hints(self) -> None:
+        ns = load_app_functions(
+            "norm_text",
+            "extract_todo_segment_hints",
+            "expand_workbench_segment_entries",
+        )
+
+        rows = ns.expand_workbench_segment_entries(
+            "头雕待打印确认效果；鞋子和手型已安排拆件",
+            default_component="全局进度",
+            default_stage="工程拆件",
+            project_components=["头雕(表情)", "服装", "手型", "全局进度"],
+            comp_kw={"头雕": "头雕(表情)", "鞋子": "服装", "手型": "手型", "手": "手型"},
+            stage_kw_map={"拆件": "工程拆件", "打印": "建模(含打印/签样)"},
+        )
+
+        tuples = {(str(row.get("text", "")), str(row.get("component", "")), str(row.get("stage", ""))) for row in rows}
+        self.assertIn(("头雕待打印确认效果", "头雕(表情)", "建模(含打印/签样)"), tuples)
+        self.assertIn(("鞋子和手型已安排拆件", "服装", "工程拆件"), tuples)
+        self.assertIn(("鞋子和手型已安排拆件", "手型", "工程拆件"), tuples)
+
+    def test_contains_print_tracking_signal_filters_weak_stage_sync_and_received_noise(self) -> None:
+        ns = load_app_functions(
+            "_has_strong_print_tracking_signal",
+            "_has_weak_only_print_mentions",
+            "_contains_print_tracking_signal",
+        )
+
+        self.assertFalse(ns._contains_print_tracking_signal("萨鲁曼头雕待打印确认效果；鞋子和手型已安排拆件"))
+        self.assertFalse(ns._contains_print_tracking_signal("[系统自动同步] 跟随全局阶段 设计 -> 建模(含打印/签样)"))
+        self.assertFalse(ns._contains_print_tracking_signal("早川秋发型打印件已收齐，待翻模；3D建模提审已交未有反馈"))
+        self.assertTrue(ns._contains_print_tracking_signal("第一版头雕已拆眼睛已安排内部打印"))
+
     def test_is_stage_timeline_driver_log_excludes_todo_completion_logs(self) -> None:
         ns = load_app_functions("is_stage_timeline_driver_log")
 
