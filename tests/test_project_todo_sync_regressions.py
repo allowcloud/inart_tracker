@@ -103,6 +103,27 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         self.assertEqual(remaining[0]["_id"], "evt_progress")
         self.assertEqual(remaining[0]["关联待办"], ["td2"])
 
+    def test_expand_workbench_segment_entries_preserves_split_stage_hints(self) -> None:
+        ns = load_app_functions(
+            "norm_text",
+            "extract_todo_segment_hints",
+            "expand_workbench_segment_entries",
+        )
+
+        rows = ns.expand_workbench_segment_entries(
+            "头雕待打印确认效果；鞋子和手型已安排拆件",
+            default_component="全局进度",
+            default_stage="工程拆件",
+            project_components=["头雕(表情)", "服装", "手型", "全局进度"],
+            comp_kw={"头雕": "头雕(表情)", "鞋子": "服装", "手型": "手型", "手": "手型"},
+            stage_kw_map={"拆件": "工程拆件", "打印": "建模(含打印/签样)"},
+        )
+
+        tuples = {(str(row.get("text", "")), str(row.get("component", "")), str(row.get("stage", ""))) for row in rows}
+        self.assertIn(("头雕待打印确认效果", "头雕(表情)", "建模(含打印/签样)"), tuples)
+        self.assertIn(("鞋子和手型已安排拆件", "服装", "工程拆件"), tuples)
+        self.assertIn(("鞋子和手型已安排拆件", "手型", "工程拆件"), tuples)
+
     def test_is_stage_timeline_driver_log_excludes_todo_completion_logs(self) -> None:
         ns = load_app_functions("is_stage_timeline_driver_log")
 

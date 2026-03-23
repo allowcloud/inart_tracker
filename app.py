@@ -740,7 +740,7 @@ DEFAULT_COMPONENT_KEYWORDS = {
     "头雕": "头雕(表情)", "表情": "头雕(表情)", "头": "头雕(表情)", "眼": "头雕(表情)", "脸": "头雕(表情)",
     "植发": "植发", "头发": "植发", "发": "植发",
     "手": "手型", "手型": "手型",
-    "衣": "服装", "服": "服装", "服装": "服装",
+    "衣": "服装", "服": "服装", "服装": "服装", "鞋": "服装", "鞋子": "服装", "靴": "服装", "靴子": "服装",
     "包": "包装", "盒": "包装", "包装": "包装",
     "地台": "地台",
     "扣": "配件", "法杖": "配件", "杯": "配件", "剑": "配件", "配件": "配件",
@@ -764,6 +764,8 @@ DEFAULT_COMPONENT_SPLIT_KEYWORDS = {
     "头发": "植发",
     "手型": "手型",
     "服装": "服装",
+    "鞋子": "服装",
+    "靴子": "服装",
     "包装": "包装",
     "地台": "地台",
     "配件": "配件",
@@ -3879,6 +3881,140 @@ def collect_todo_loading_pairs(pm_view="所有人"):
     return pairs
 
 
+def extract_todo_segment_hints(text, project_components=None, comp_kw=None, stage_kw_map=None):
+    seg_text = str(text or "").strip()
+    if not seg_text:
+        return []
+
+    std_components = globals().get("STD_COMPONENTS", ["头雕(表情)", "素体", "手型", "服装", "配件", "地台", "包装"])
+    proj_comps = [str(x).strip() for x in (project_components or []) if str(x).strip()]
+    comp_kw = comp_kw or {}
+    stage_kw_map = stage_kw_map or {}
+
+    def _sorted_kw_items(mapping):
+        rows = []
+        for k, v in (mapping or {}).items():
+            kk = str(k).strip()
+            vv = str(v).strip()
+            if kk and vv:
+                rows.append((kk, vv))
+        rows.sort(key=lambda x: (-len(str(x[0])), str(x[0])))
+        return rows
+
+    def _pick_component_from_hint(target_keyword):
+        target_norm = norm_text(target_keyword)
+        for comp_name in proj_comps:
+            comp_txt = str(comp_name).strip()
+            if not comp_txt:
+                continue
+            if target_keyword in comp_txt or (target_norm and target_norm in norm_text(comp_txt)):
+                if "全局" in comp_txt:
+                    return "🌐 全局进度 (Overall)"
+                return comp_txt
+        for std_comp in std_components:
+            std_txt = str(std_comp).strip()
+            if target_keyword in std_txt or (target_norm and target_norm in norm_text(std_txt)):
+                return std_txt
+        return ""
+
+    def _pick_stage_from_segment(seg_text_value):
+        seg_norm = norm_text(seg_text_value)
+        for kw, stage_name in _sorted_kw_items(stage_kw_map):
+            kw_norm = norm_text(kw)
+            if kw in seg_text_value or (kw_norm and kw_norm in seg_norm):
+                return stage_name
+        print_like_tokens = ["待打印", "打印确认", "打印效果", "确认打印", "print"]
+        if any(tok in seg_text_value for tok in print_like_tokens):
+            return "建模(含打印/签样)"
+        if any(tok in seg_text_value for tok in ["拆件", "结构", "工程分件"]):
+            return "工程拆件"
+        return ""
+
+    segments = [x.strip() for x in re.split(r"(?:[;；\n]+|--+|——+)", seg_text) if x.strip()]
+    if not segments:
+        segments = [seg_text]
+
+    hint_rows = []
+    for seg in segments:
+        seg_norm = norm_text(seg)
+        seg_comps = []
+        for comp in proj_comps:
+            variants = {str(comp).strip()}
+            if " - " in str(comp):
+                variants.add(str(comp).split(" - ", 1)[1].strip())
+            if "全局" in str(comp):
+                variants.update(["全局", "整体"])
+            for std_comp in std_components:
+                if str(comp).startswith(std_comp):
+                    variants.add(std_comp)
+                    variants.add(re.sub(r"\(.*?\)", "", std_comp).strip())
+            if any(v and ((v in seg) or (norm_text(v) in seg_norm)) for v in variants):
+                picked = "🌐 全局进度 (Overall)" if "全局" in str(comp) else str(comp).strip()
+                if picked and picked not in seg_comps:
+                    seg_comps.append(picked)
+
+        for kw, target in _sorted_kw_items(comp_kw):
+            kw_norm = norm_text(kw)
+            if not (kw in seg or (kw_norm and kw_norm in seg_norm)):
+                continue
+            if kw == "手" and any(noise in seg for noise in ["手板", "手机", "手办"]):
+                continue
+            picked_comp = _pick_component_from_hint(target) or str(target).strip()
+            if picked_comp and picked_comp not in seg_comps:
+                seg_comps.append(picked_comp)
+
+        if not seg_comps and any(k in seg for k in ["全局", "整体", "项目", "大盘"]):
+            seg_comps = ["🌐 全局进度 (Overall)"]
+
+        stage_name = _pick_stage_from_segment(seg)
+        if seg_comps or stage_name:
+            hint_rows.append({
+                "segment": seg,
+                "components": seg_comps,
+                "stage": stage_name,
+            })
+    return hint_rows
+
+
+def expand_workbench_segment_entries(text, default_component="", default_stage="", project_components=None, comp_kw=None, stage_kw_map=None):
+    raw_text = str(text or "").strip()
+    if not raw_text:
+        return []
+
+    fallback_comp = str(default_component or "").strip() or "🌐 全局进度 (Overall)"
+    fallback_stage = str(default_stage or "").strip()
+    segments = [x.strip() for x in re.split(r"(?:[;；\n]+|--+|——+)", raw_text) if x.strip()]
+    if not segments:
+        segments = [raw_text]
+
+    hint_rows = extract_todo_segment_hints(
+        raw_text,
+        project_components=project_components,
+        comp_kw=comp_kw,
+        stage_kw_map=stage_kw_map,
+    )
+    hint_map = {}
+    for hint in hint_rows:
+        seg_key = str(hint.get("segment", "")).strip()
+        if seg_key and seg_key not in hint_map:
+            hint_map[seg_key] = hint
+
+    out = []
+    for seg in segments:
+        hint = hint_map.get(seg, {})
+        seg_comps = [str(x).strip() for x in hint.get("components", []) if str(x).strip()]
+        if not seg_comps:
+            seg_comps = [fallback_comp]
+        seg_stage = str(hint.get("stage", "")).strip() or fallback_stage
+        for comp_name in list(dict.fromkeys(seg_comps)):
+            out.append({
+                "text": seg,
+                "component": comp_name or fallback_comp,
+                "stage": seg_stage or fallback_stage,
+            })
+    return out or [{"text": raw_text, "component": fallback_comp, "stage": fallback_stage}]
+
+
 def infer_todo_handoff_prefill(td, proj_name):
     td_obj = td or {}
     proj = str(proj_name or "").strip()
@@ -3899,6 +4035,22 @@ def infer_todo_handoff_prefill(td, proj_name):
         rows.sort(key=lambda x: (-len(str(x[0])), str(x[0])))
         return rows
 
+    def _pick_component_from_hint(target_keyword):
+        target_norm = norm_text(target_keyword)
+        for comp_name in proj_comps:
+            comp_txt = str(comp_name).strip()
+            if not comp_txt:
+                continue
+            if target_keyword in comp_txt or (target_norm and target_norm in norm_text(comp_txt)):
+                if "全局" in comp_txt:
+                    return "🌐 全局进度 (Overall)"
+                return comp_txt
+        for std_comp in STD_COMPONENTS:
+            std_txt = str(std_comp).strip()
+            if target_keyword in std_txt or (target_norm and target_norm in norm_text(std_txt)):
+                return std_txt
+        return ""
+
     for comp in proj_comps:
         variants = {str(comp).strip()}
         if " - " in str(comp):
@@ -3917,28 +4069,19 @@ def infer_todo_handoff_prefill(td, proj_name):
             elif comp not in comp_hits:
                 comp_hits.append(comp)
 
+    segment_hints = extract_todo_segment_hints(txt, proj_comps, comp_kw, stage_kw_map)
+    if segment_hints:
+        for hint in segment_hints:
+            for picked_comp in hint.get("components", []):
+                if picked_comp and picked_comp not in comp_hits:
+                    comp_hits.append(picked_comp)
+
     if not comp_hits:
         for std_comp in STD_COMPONENTS:
             base = re.sub(r"\(.*?\)", "", std_comp).strip()
             if (base and base in txt) or (norm_text(std_comp) in txt_norm):
                 comp_hits.append(std_comp)
                 break
-
-    def _pick_component_from_hint(target_keyword):
-        target_norm = norm_text(target_keyword)
-        for comp_name in proj_comps:
-            comp_txt = str(comp_name).strip()
-            if not comp_txt:
-                continue
-            if target_keyword in comp_txt or (target_norm and target_norm in norm_text(comp_txt)):
-                if "全局" in comp_txt:
-                    return "🌐 全局进度 (Overall)"
-                return comp_txt
-        for std_comp in STD_COMPONENTS:
-            std_txt = str(std_comp).strip()
-            if target_keyword in std_txt or (target_norm and target_norm in norm_text(std_txt)):
-                return std_txt
-        return ""
 
     if not comp_hits:
         for kw, target in _sorted_kw_items(comp_kw):
@@ -3958,6 +4101,8 @@ def infer_todo_handoff_prefill(td, proj_name):
     review_stage_hint = get_review_expected_stage(review_type_hint)
     if review_stage_hint:
         stage_guess = review_stage_hint
+    if (not stage_guess) and segment_hints:
+        stage_guess = next((str(x.get("stage", "")).strip() for x in segment_hints if str(x.get("stage", "")).strip()), "")
     if not stage_guess:
         for kw, stage_name in _sorted_kw_items(stage_kw_map):
             if kw in txt or norm_text(kw) in txt_norm:
@@ -4015,6 +4160,18 @@ def infer_todo_handoff_prefill(td, proj_name):
     if not log_txt:
         log_txt = "待办联动补充"
 
+    segment_hint_labels = []
+    for hint in segment_hints:
+        hint_comps = [str(x).strip() for x in hint.get("components", []) if str(x).strip()]
+        hint_stage = str(hint.get("stage", "")).strip()
+        if not hint_comps and not hint_stage:
+            continue
+        comp_label = "/".join(hint_comps) if hint_comps else "全局进度"
+        if hint_stage:
+            segment_hint_labels.append(f"{comp_label}→{hint_stage}")
+        else:
+            segment_hint_labels.append(comp_label)
+
     return {
         "项目": proj,
         "todo_ids": [str(td_obj.get("_id", "")).strip()] if str(td_obj.get("_id", "")).strip() else [],
@@ -4022,6 +4179,7 @@ def infer_todo_handoff_prefill(td, proj_name):
         "阶段": stage_guess,
         "内容": log_txt,
         "角色映射": role_map,
+        "分句提示": segment_hint_labels,
     }
 
 
@@ -5633,6 +5791,9 @@ def render_pm_todo_manager(valid_projs, current_pm):
             )
             preview_component = " / ".join(todo_prefill_preview.get("部件", [])[:2]) if isinstance(todo_prefill_preview.get("部件", []), list) else ""
             preview_stage = str(todo_prefill_preview.get("阶段", "")).strip()
+            segment_preview = [str(x).strip() for x in todo_prefill_preview.get("分句提示", []) if str(x).strip()]
+            if segment_preview:
+                auto_notes.append("分句识别：" + "；".join(segment_preview[:2]))
         route_label = summarize_temporal_route_label(f"{todo_title} {todo_cpddl}".strip(), ref_date=today) if str(todo_title).strip() else ""
         render_compact_recognition_preview(
             projects=preview_projects,
@@ -10431,6 +10592,10 @@ elif menu == MENU_SPECIFIC:
                         with c_l2:
                             st.caption("开定识别：" + infer_todo_target_hint(pick_todo, valid_projs))
                             st.caption("最近落地：" + todo_link_status_text(pick_todo))
+                            picked_prefill_preview = infer_todo_handoff_prefill(pick_todo, sel_proj)
+                            picked_segment_preview = [str(x).strip() for x in picked_prefill_preview.get("分句提示", []) if str(x).strip()]
+                            if picked_segment_preview:
+                                st.caption("分句识别：" + "；".join(picked_segment_preview[:3]))
                     else:
                         st.caption("当前项目暂无关联待办；你也可以先在左侧待办新建后再带入。")
 
@@ -10449,7 +10614,11 @@ elif menu == MENU_SPECIFIC:
             prefill = st.session_state.get("todo_handoff_prefill")
             if prefill and str(prefill.get("项目", "")).strip() == sel_proj:
                 if prefill.get("部件"):
-                    st.session_state[f"wb_comp_{fk}"] = prefill.get("部件")
+                    prefill_comps = prefill.get("部件", [])
+                    if isinstance(prefill_comps, list) and prefill_comps:
+                        st.session_state[f"wb_comp_{fk}"] = prefill_comps[0]
+                    elif isinstance(prefill_comps, str) and str(prefill_comps).strip():
+                        st.session_state[f"wb_comp_{fk}"] = str(prefill_comps).strip()
                 if prefill.get("阶段") in STAGES_UNIFIED:
                     st.session_state[f"wb_stage_{fk}"] = prefill.get("阶段")
                 if prefill.get("内容"):
@@ -10677,6 +10846,20 @@ elif menu == MENU_SPECIFIC:
                         preview_comp_name = str(wb_comp_raw).strip()
                     route_label = summarize_temporal_route_label(str(wb_text).strip(), ref_date=wb_date)
                     flow_label = infer_file_handoff_transition_label(str(wb_text).strip(), target_stage=wb_stage)
+                    preview_components = list(dict.fromkeys(list(db.get(sel_proj, {}).get("部件列表", {}).keys()) + ([preview_comp_name] if preview_comp_name else [])))
+                    preview_segment_rows = expand_workbench_segment_entries(
+                        str(wb_text).strip(),
+                        default_component=(preview_comp_name or "全局进度"),
+                        default_stage=wb_stage,
+                        project_components=preview_components,
+                        comp_kw=get_component_keyword_map(),
+                        stage_kw_map=get_stage_keyword_map(),
+                    )
+                    preview_segment_bits = []
+                    for row in preview_segment_rows[:3]:
+                        row_comp = str(row.get("component", "")).strip() or "全局进度"
+                        row_stage = str(row.get("stage", "")).strip() or wb_stage
+                        preview_segment_bits.append(f"{row_comp}→{row_stage}")
                     render_compact_recognition_preview(
                         prefix="输入预览",
                         projects=[sel_proj],
@@ -10684,6 +10867,7 @@ elif menu == MENU_SPECIFIC:
                         stage_name=wb_stage,
                         route_label=route_label,
                         flow_label=flow_label,
+                        extra_label=("分句：" + "；".join(preview_segment_bits)) if preview_segment_bits else "",
                     )
 
                 st.markdown("**关联待办（可选）**")
@@ -10794,13 +10978,51 @@ elif menu == MENU_SPECIFIC:
                         else:
                             actual_c = wb_comp_raw
 
-                        comp_data = ensure_project_component(sel_proj, actual_c)
-                        curr_stage_detail = comp_data.get("主流程", STAGES_UNIFIED[0])
-                        stage_warn = validate_transition_warning(curr_stage_detail, wb_stage, STAGES_UNIFIED)
-                        review_warn = validate_review_with_stage(review_type, wb_stage, actual_c, STAGES_UNIFIED)
-                        if (stage_warn or review_warn) and not force_submit_detail:
-                            warn_txt = "；".join([w for w in [stage_warn, review_warn] if w])
-                            st.warning(f"[{actual_c}] {warn_txt}（如确认无误可在高级选项里勾选强制提交）")
+                        component_pool = list(dict.fromkeys(list(db.get(sel_proj, {}).get("部件列表", {}).keys()) + ([actual_c] if actual_c else [])))
+                        segment_entries = expand_workbench_segment_entries(
+                            str(wb_text).strip(),
+                            default_component=actual_c or "全局进度",
+                            default_stage=wb_stage,
+                            project_components=component_pool,
+                            comp_kw=get_component_keyword_map(),
+                            stage_kw_map=get_stage_keyword_map(),
+                        )
+                        if not segment_entries:
+                            segment_entries = [{"text": str(wb_text).strip(), "component": actual_c or "全局进度", "stage": wb_stage}]
+
+                        review_signal_flags = []
+                        for seg_row in segment_entries:
+                            seg_txt = str(seg_row.get("text", "")).strip()
+                            seg_review_hint = normalize_review_type(infer_review_type_from_text(seg_txt))
+                            has_review_signal = bool(
+                                (seg_review_hint and seg_review_hint != "(无)")
+                                or re.search(r"送审|提审|review|待反馈|打回|驳回|退回|反馈", seg_txt, flags=re.I)
+                            )
+                            review_signal_flags.append(has_review_signal)
+                        has_any_review_signal = any(review_signal_flags)
+
+                        warning_lines = []
+                        for idx, seg_row in enumerate(segment_entries):
+                            seg_comp = str(seg_row.get("component", "")).strip() or actual_c or "全局进度"
+                            if seg_comp == "🌐 全局进度 (Overall)":
+                                seg_comp = "全局进度"
+                            seg_stage = str(seg_row.get("stage", "")).strip()
+                            if seg_stage not in STAGES_UNIFIED:
+                                seg_stage = wb_stage
+                            seg_comp_data = ensure_project_component(sel_proj, seg_comp)
+                            curr_stage_detail = seg_comp_data.get("主流程", STAGES_UNIFIED[0])
+                            stage_warn = validate_transition_warning(curr_stage_detail, seg_stage, STAGES_UNIFIED)
+                            seg_review_type = review_type if review_type != "(无)" and ((not has_any_review_signal and idx == 0) or review_signal_flags[idx]) else "(无)"
+                            review_warn = validate_review_with_stage(seg_review_type, seg_stage, seg_comp, STAGES_UNIFIED) if seg_review_type != "(无)" else ""
+                            if stage_warn or review_warn:
+                                warn_txt = "；".join([w for w in [stage_warn, review_warn] if w])
+                                warning_lines.append(f"[{seg_comp} / {seg_stage}] {warn_txt}")
+
+                        if warning_lines and not force_submit_detail:
+                            preview_warn = "；".join(warning_lines[:3])
+                            if len(warning_lines) > 3:
+                                preview_warn += "；..."
+                            st.warning(preview_warn + "（如确认无误可在高级选项里勾选强制提交）")
                         else:
                             img_ref_list = []
                             for f in (wb_files or []):
@@ -10812,16 +11034,11 @@ elif menu == MENU_SPECIFIC:
                                 if ref:
                                     img_ref_list.append(ref)
 
-                            base_log = (f"【{wb_evt_type} | {wb_handoff}】补充: {str(wb_text).strip()}" if str(wb_text).strip() else f"【{wb_evt_type} | {wb_handoff}】")
                             todo_names_for_log = [
                                 str(handoff_todo_map.get(str(tid).strip(), {}).get("任务", "")).strip()
                                 for tid in linked_todo_ids
                                 if str(handoff_todo_map.get(str(tid).strip(), {}).get("任务", "")).strip()
                             ]
-                            if todo_names_for_log:
-                                base_log += " [关联待办] " + "；".join(todo_names_for_log[:3])
-                            if is_completed:
-                                base_log += " [系统]彻底完成"
 
                             temporal = classify_temporal_event_route(str(wb_text).strip(), ref_date=wb_date, prefer_past=False) if str(wb_text).strip() else {"route": "neutral", "date": None, "body": ""}
                             temporal_route = str(temporal.get("route", "")).strip()
@@ -10867,55 +11084,104 @@ elif menu == MENU_SPECIFIC:
                                 ))
                                 st.rerun()
 
-                            if wb_stage == "立项":
-                                append_component_log_entry(sel_proj, actual_c, {
-                                    "日期": str(temporal_date if (temporal_route == "past" and isinstance(temporal_date, datetime.date)) else wb_date),
-                                    "流转": wb_evt_type,
-                                    "工序": "立项",
-                                    "事件": base_log,
-                                    "图片": img_ref_list,
-                                    "提审类型": review_type,
-                                    "提审结果": review_result,
-                                    "提审轮次": int(review_round) if review_type != "(无)" else "",
-                                })
-                                append_component_log_entry(sel_proj, actual_c, {
-                                    "日期": str((temporal_date if (temporal_route == "past" and isinstance(temporal_date, datetime.date)) else wb_date) + datetime.timedelta(days=1)),
-                                    "流转": "系统自动",
-                                    "工序": "建模(含打印/签样)",
-                                    "事件": "[系统] 立项完成自动推演",
-                                }, resulting_stage="建模(含打印/签样)")
-                            else:
-                                append_component_log_entry(sel_proj, actual_c, {
-                                    "日期": str(temporal_date if (temporal_route == "past" and isinstance(temporal_date, datetime.date)) else wb_date),
-                                    "流转": wb_evt_type,
-                                    "工序": wb_stage,
-                                    "事件": base_log,
-                                    "图片": img_ref_list,
-                                    "提审类型": review_type,
-                                    "提审结果": review_result,
-                                    "提审轮次": int(review_round) if review_type != "(无)" else "",
-                                }, resulting_stage=wb_stage)
+                            action_day = temporal_date if (temporal_route == "past" and isinstance(temporal_date, datetime.date)) else wb_date
+                            standard_event_dirty = False
+                            primary_seg_comp = actual_c
+                            primary_seg_stage = wb_stage
 
-                            if "全局" in str(actual_c) and is_pause_stage(wb_stage):
-                                db[sel_proj]["Milestone"] = "暂停研发"
-                                for sub_c, sub_info in db[sel_proj].get("部件列表", {}).items():
-                                    if "全局" in sub_c:
-                                        continue
-                                    if sub_info.get("主流程") != wb_stage:
-                                        append_component_log_entry(sel_proj, sub_c, {
-                                            "日期": str(temporal_date if (temporal_route == "past" and isinstance(temporal_date, datetime.date)) else wb_date),
-                                            "流转": "系统自动",
-                                            "工序": wb_stage,
-                                            "事件": "[系统] 全局已暂停，子部件自动同步为暂停",
-                                        }, resulting_stage=wb_stage)
+                            for idx, seg_row in enumerate(segment_entries):
+                                seg_text = str(seg_row.get("text", "")).strip() or str(wb_text).strip()
+                                seg_comp = str(seg_row.get("component", "")).strip() or actual_c or "全局进度"
+                                if seg_comp == "🌐 全局进度 (Overall)":
+                                    seg_comp = "全局进度"
+                                seg_stage = str(seg_row.get("stage", "")).strip()
+                                if seg_stage not in STAGES_UNIFIED:
+                                    seg_stage = wb_stage
+                                if idx == 0:
+                                    primary_seg_comp = seg_comp
+                                    primary_seg_stage = seg_stage
 
-                            if "全局" in str(actual_c):
-                                sync_core_components_follow_global(
-                                    sel_proj,
-                                    action_date=wb_date,
-                                    source_module="交接工作台",
-                                    skip_components=[actual_c],
-                                )
+                                seg_review_type = review_type if review_type != "(无)" and ((not has_any_review_signal and idx == 0) or review_signal_flags[idx]) else "(无)"
+                                seg_review_result = review_result if seg_review_type != "(无)" else "(无)"
+                                seg_review_round = int(review_round) if seg_review_type != "(无)" else ""
+                                seg_log = (f"【{wb_evt_type} | {wb_handoff}】补充: {seg_text}" if seg_text else f"【{wb_evt_type} | {wb_handoff}】")
+                                if idx == 0 and todo_names_for_log:
+                                    seg_log += " [关联待办] " + "；".join(todo_names_for_log[:3])
+                                if idx == 0 and is_completed:
+                                    seg_log += " [系统]彻底完成"
+
+                                if seg_stage == "立项":
+                                    append_component_log_entry(sel_proj, seg_comp, {
+                                        "日期": str(action_day),
+                                        "流转": wb_evt_type,
+                                        "工序": "立项",
+                                        "事件": seg_log,
+                                        "图片": img_ref_list,
+                                        "提审类型": seg_review_type,
+                                        "提审结果": seg_review_result,
+                                        "提审轮次": seg_review_round,
+                                    })
+                                    append_component_log_entry(sel_proj, seg_comp, {
+                                        "日期": str(action_day + datetime.timedelta(days=1)),
+                                        "流转": "系统自动",
+                                        "工序": "建模(含打印/签样)",
+                                        "事件": "[系统] 立项完成自动推演",
+                                    }, resulting_stage="建模(含打印/签样)")
+                                else:
+                                    append_component_log_entry(sel_proj, seg_comp, {
+                                        "日期": str(action_day),
+                                        "流转": wb_evt_type,
+                                        "工序": seg_stage,
+                                        "事件": seg_log,
+                                        "图片": img_ref_list,
+                                        "提审类型": seg_review_type,
+                                        "提审结果": seg_review_result,
+                                        "提审轮次": seg_review_round,
+                                    }, resulting_stage=seg_stage)
+
+                                if "全局" in str(seg_comp) and is_pause_stage(seg_stage):
+                                    db[sel_proj]["Milestone"] = "暂停研发"
+                                    for sub_c, sub_info in db[sel_proj].get("部件列表", {}).items():
+                                        if "全局" in sub_c:
+                                            continue
+                                        if sub_info.get("主流程") != seg_stage:
+                                            append_component_log_entry(sel_proj, sub_c, {
+                                                "日期": str(action_day),
+                                                "流转": "系统自动",
+                                                "工序": seg_stage,
+                                                "事件": "[系统] 全局已暂停，子部件自动同步为暂停",
+                                            }, resulting_stage=seg_stage)
+
+                                if "全局" in str(seg_comp):
+                                    sync_core_components_follow_global(
+                                        sel_proj,
+                                        action_date=action_day,
+                                        source_module="交接工作台",
+                                        skip_components=[seg_comp],
+                                    )
+
+                                standard_event_dirty = append_standard_event_entry(
+                                    source_module="PM工作台",
+                                    action_type="工作台记录",
+                                    project_name=sel_proj,
+                                    event_date=action_day,
+                                    component_name=seg_comp,
+                                    stage_name=seg_stage,
+                                    content_text=seg_log,
+                                    raw_text=seg_text,
+                                    todo_ids=linked_todo_ids if idx == 0 else [],
+                                    actor=current_pm if current_pm != "所有人" else "系统",
+                                    extra_payload={
+                                        "记录类型": wb_evt_type,
+                                        "关联媒介": wb_handoff,
+                                        "提审类型": seg_review_type,
+                                        "提审结果": seg_review_result,
+                                        "提审轮次": seg_review_round,
+                                        "自动完成待办": bool(todo_auto_done and idx == 0),
+                                        "拆分序号": idx + 1,
+                                        "拆分总数": len(segment_entries),
+                                    },
+                                ) or standard_event_dirty
 
                             linked_todo_titles = []
                             if linked_todo_ids:
@@ -10928,52 +11194,32 @@ elif menu == MENU_SPECIFIC:
                                     if not td_obj:
                                         continue
                                     td_obj["最近联动模块"] = link_module
-                                    td_obj["最近联动日期"] = str(temporal_date if (temporal_route == "past" and isinstance(temporal_date, datetime.date)) else wb_date)
+                                    td_obj["最近联动日期"] = str(action_day)
                                     td_obj["最近联动项目"] = sel_proj
-                                    td_obj["最近联动部件"] = actual_c
-                                    td_obj["最近联动阶段"] = wb_stage
+                                    td_obj["最近联动部件"] = primary_seg_comp
+                                    td_obj["最近联动阶段"] = primary_seg_stage
                                     td_obj["最近联动写入时间"] = write_ts
                                     if todo_auto_done:
                                         was_done = bool(td_obj.get("完成", False))
                                         td_obj["完成"] = True
                                         if not was_done:
-                                            completion_day = temporal_date if (temporal_route == "past" and isinstance(temporal_date, datetime.date)) else wb_date
+                                            completion_day = action_day
                                             td_obj["完成时间"] = str(completion_day)
                                             append_todo_completion_history(td_obj, completion_day)
                                     linked_todo_titles.append(str(td_obj.get("任务", "")).strip())
-
-                            standard_event_dirty = append_standard_event_entry(
-                                source_module="PM工作台",
-                                action_type="工作台记录",
-                                project_name=sel_proj,
-                                event_date=temporal_date if (temporal_route == "past" and isinstance(temporal_date, datetime.date)) else wb_date,
-                                component_name=actual_c,
-                                stage_name=wb_stage,
-                                content_text=base_log,
-                                raw_text=str(wb_text).strip(),
-                                todo_ids=linked_todo_ids,
-                                actor=current_pm if current_pm != "所有人" else "系统",
-                                extra_payload={
-                                    "记录类型": wb_evt_type,
-                                    "关联媒介": wb_handoff,
-                                    "提审类型": review_type,
-                                    "提审结果": review_result,
-                                    "提审轮次": int(review_round) if review_type != "(无)" else "",
-                                    "自动完成待办": bool(todo_auto_done),
-                                },
-                            )
 
                             st.session_state.form_key += 1
                             save_project_scope(sel_proj)
                             if linked_todo_ids or standard_event_dirty:
                                 save_project_scope("系统配置")
                             todo_msg = f"；联动待办 {len(linked_todo_titles)} 条" if linked_todo_titles else ""
-                            st.success(f"记录已保存{todo_msg}。")
+                            split_msg = f"；拆成 {len(segment_entries)} 条子记录" if len(segment_entries) > 1 else ""
+                            st.success(f"记录已保存{split_msg}{todo_msg}。")
                             st.session_state.setdefault("clipboard_image_cache", {}).pop(wb_paste_cache_key, None)
                             st.caption("识别结果：" + format_event_recognition_hint(
                                 project_name=sel_proj,
-                                component_name=actual_c,
-                                stage_name=wb_stage,
+                                component_name=primary_seg_comp,
+                                stage_name=primary_seg_stage,
                                 reminder_text=str(wb_text).strip(),
                             ))
                             st.rerun()
