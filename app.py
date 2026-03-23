@@ -799,6 +799,12 @@ def _deep_copy_obj(obj):
     return json.loads(json.dumps(obj, ensure_ascii=False))
 
 
+def compute_stale_doc_keys(existing_keys, target_keys):
+    existing = [str(x).strip() for x in (existing_keys or []) if str(x).strip()]
+    target = {str(x).strip() for x in (target_keys or []) if str(x).strip()}
+    return [key for key in existing if key not in target]
+
+
 def get_recognition_dict():
     cfg = st.session_state.db.setdefault("系统配置", {}) if "db" in st.session_state else DEFAULT_DB.setdefault("系统配置", {})
     raw = cfg.setdefault("识别词典", _deep_copy_obj(DEFAULT_RECOGNITION_DICT))
@@ -929,6 +935,11 @@ class _LocalJsonDBManager:
         data[key] = value
         self.save(data)
 
+    def delete_one(self, key):
+        data = self.load()
+        data.pop(key, None)
+        self.save(data)
+
     def save_file_bytes(self, file_bytes, filename="", prefix="upload"):
         if not os.path.exists(IMG_DIR):
             os.makedirs(IMG_DIR)
@@ -978,6 +989,9 @@ class _MemoryDBManager:
 
     def save_one(self, key, value):
         self._data[key] = _deep_copy_obj(value)
+
+    def delete_one(self, key):
+        self._data.pop(key, None)
 
     def save_file_bytes(self, file_bytes, filename="", prefix="upload"):
         safe_name = filename or f"{prefix}.jpg"
@@ -1073,12 +1087,22 @@ class _MongoDBManager:
         self._ensure_ready()
         try:
             from pymongo import UpdateOne
+            target_data = data if isinstance(data, dict) else {}
+            target_keys = [str(key).strip() for key in target_data.keys() if str(key).strip()]
+            existing_keys = {
+                str(doc.get("_doc_key", "")).strip()
+                for doc in self.col.find({}, {"_doc_key": 1})
+                if str(doc.get("_doc_key", "")).strip()
+            }
             ops = [
                 UpdateOne({"_doc_key": key}, {"$set": {"_doc_key": key, "payload": value}}, upsert=True)
-                for key, value in data.items()
+                for key, value in target_data.items()
             ]
             if ops:
                 self.col.bulk_write(ops, ordered=False)
+            stale_keys = compute_stale_doc_keys(existing_keys, target_keys)
+            if stale_keys:
+                self.col.delete_many({"_doc_key": {"$in": stale_keys}})
         except self.PyMongoError as e:
             st.warning(f"Mongo 保存失败: {e}")
 
@@ -1093,6 +1117,14 @@ class _MongoDBManager:
             )
         except self.PyMongoError as e:
             st.warning(f"Mongo 保存失败 [{key}]: {e}")
+
+    def delete_one(self, key):
+        """删除单个 key，避免被后续 reload 重新带回。"""
+        self._ensure_ready()
+        try:
+            self.col.delete_one({"_doc_key": key})
+        except self.PyMongoError as e:
+            st.warning(f"Mongo 删除失败 [{key}]: {e}")
 
     def save_file_bytes(self, file_bytes, filename="", prefix="upload"):
         self._ensure_ready()
@@ -3541,6 +3573,12 @@ def rename_project_to_target(src_name, dst_name):
     db[dst] = db.pop(src)
     if isinstance(db.get(dst), dict):
         db[dst]["项目名称"] = dst
+    mgr = globals().get("db_manager")
+    if mgr and hasattr(mgr, "delete_one"):
+        try:
+            mgr.delete_one(src)
+        except Exception:
+            pass
     alias_map = db.setdefault("系统配置", {}).setdefault("项目别名", {})
     updated_alias = {}
     for k, v in alias_map.items():
@@ -3622,6 +3660,12 @@ def merge_project_into_target(merge_src, merge_dst, learned_aliases=None):
     db[dst] = dst_data
     if src in db:
         del db[src]
+    mgr = globals().get("db_manager")
+    if mgr and hasattr(mgr, "delete_one"):
+        try:
+            mgr.delete_one(src)
+        except Exception:
+            pass
 
     alias_map = db.setdefault("系统配置", {}).setdefault("项目别名", {})
     for a in set([src, dst] + [str(x).strip() for x in (learned_aliases or []) if str(x).strip()]):
@@ -3672,6 +3716,12 @@ def delete_project_and_refs(project_name):
         }
 
     db.pop(pick, None)
+    mgr = globals().get("db_manager")
+    if mgr and hasattr(mgr, "delete_one"):
+        try:
+            mgr.delete_one(pick)
+        except Exception:
+            pass
     canonicalize_all_project_references()
     return True
 
