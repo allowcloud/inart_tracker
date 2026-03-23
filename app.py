@@ -10541,10 +10541,10 @@ elif menu == MENU_SPECIFIC:
                     wb_date = st.date_input("发生日期", datetime.date.today(), key=f"wb_date_{fk}")
                 with b2:
                     wb_text = st.text_area(
-                        "这次发了什么文件给谁（自由填写）",
+                        "记录内容 / 提审补充说明（自由填写）",
                         height=90,
                         key=f"wb_text_{fk}",
-                        placeholder="例：把建模文件v2发给工程，待确认结构干涉；下午同步设计核对头雕比例",
+                        placeholder="例：把建模文件v2发给工程，待确认结构干涉；若这次同时属于提审，也把补充说明写在这里",
                     )
                 if str(wb_text).strip():
                     preview_comp_name = ""
@@ -10638,6 +10638,7 @@ elif menu == MENU_SPECIFIC:
                 with st.expander("高级选项（可选）", expanded=False):
                     with st.expander("🧾 版权提审（可选）", expanded=False):
                         st.caption("这里只记录发给版权方的正式提审。2D=立项资料，3D=建模文件，产品图=手板实物图，官图=marketing 图，包装=彩盒/地台贴/电影票等。留空时只保存为文件流转。")
+                        st.caption("提审的补充说明不在这里单独填写，仍写在上方的“记录内容 / 提审补充说明”里；这里仅补结构化字段。")
                         c_adv1, c_adv2, c_adv3 = st.columns([1.1, 1.1, 0.8])
                         with c_adv1:
                             review_type = st.selectbox(
@@ -11934,6 +11935,7 @@ elif menu == MENU_HISTORY:
 
                 day_edit_df = day_source_df.drop(columns=["_id"]).copy()
                 day_edit_df["删除"] = False
+                st.caption("如果要改之前写过的提审补充说明，请直接修改下方“事件 / 提审补充说明”这一列；提审类型/结果/轮次改右侧对应列。")
                 day_edited_df = st.data_editor(
                     day_edit_df,
                     column_config={
@@ -11941,6 +11943,8 @@ elif menu == MENU_HISTORY:
                         "部件": st.column_config.TextColumn(disabled=True),
                         "日期": st.column_config.TextColumn("日期"),
                         "工序": st.column_config.SelectboxColumn("工序", options=STAGES_UNIFIED, required=True),
+                        "类型": st.column_config.TextColumn("类型"),
+                        "事件": st.column_config.TextColumn("事件 / 提审补充说明"),
                         "提审类型": st.column_config.SelectboxColumn("提审类型", options=REVIEW_TYPE_OPTIONS, required=True),
                         "提审结果": st.column_config.SelectboxColumn("提审结果", options=REVIEW_RESULT_OPTIONS, required=True),
                         "提审状态": st.column_config.TextColumn("提审状态", disabled=True),
@@ -12068,13 +12072,15 @@ elif menu == MENU_HISTORY:
             st.warning(f"检测到 {mismatch_cnt} 条记录疑似误判提审（无提审语义但提审结果有值）。建议改为(无)或补齐提审信息。")
 
         st.markdown("**当前项目历史日志**")
-        st.info("💡 下方为历史日志。直接**双击修改文字**，或选中整行后按 **Delete** 删除。")
+        st.info("💡 下方为当前项目历史日志。之前写过的提审补充说明就在“事件 / 提审补充说明”列里改；提审类型/结果/轮次改对应列。支持**双击修改文字**，或选中整行后按 **Delete** 删除。")
         edited_df = st.data_editor(
             df_logs.drop(columns=["_ids", "图片"]),
             column_config={
                 "序号":  st.column_config.NumberColumn(disabled=True),
                 "部件":  st.column_config.TextColumn(disabled=True),
                 "工序":  st.column_config.SelectboxColumn("工序", options=STAGES_UNIFIED, required=True),
+                "类型": st.column_config.TextColumn("类型"),
+                "事件": st.column_config.TextColumn("事件 / 提审补充说明"),
                 "提审类型": st.column_config.SelectboxColumn("提审类型", options=REVIEW_TYPE_OPTIONS, required=True),
                 "提审结果": st.column_config.SelectboxColumn("提审结果", options=REVIEW_RESULT_OPTIONS, required=True),
                 "提审状态": st.column_config.TextColumn("提审状态", disabled=True),
