@@ -4835,6 +4835,17 @@ def _parse_log_date(log_obj):
         return None
 
 
+def is_stage_timeline_driver_log(log_obj):
+    lg = log_obj if isinstance(log_obj, dict) else {}
+    evt = str(lg.get("事件", "")).strip()
+    flow = str(lg.get("流转", "")).strip()
+    if evt.startswith("[待办完成]"):
+        return False
+    if flow == "待办" and ("完成" in evt):
+        return False
+    return True
+
+
 def infer_current_macro_stages(proj_data):
     proj_obj = proj_data or {}
     current = set()
@@ -4867,6 +4878,8 @@ def build_project_stage_segments(proj_label, proj_data):
     for comp_name, comp_info in comps.items():
         for log in comp_info.get("日志流", []):
             if is_hidden_system_log(log):
+                continue
+            if not is_stage_timeline_driver_log(log):
                 continue
             dt_obj = _parse_log_date(log)
             if not dt_obj:
@@ -11883,18 +11896,41 @@ elif menu == MENU_HISTORY:
                 sync_save_db(p_name)
 
         day_global_df = pd.DataFrame(day_global_rows)
-        day_date_values = day_global_df["日期"].tolist() if "日期" in day_global_df.columns else []
-        day_options = sorted(
-            {str(x).strip() for x in day_date_values if str(x).strip()},
-            reverse=True,
-        )
-        with st.expander("📅 按日查看 / 修正操作历史（当前视角全项目）", expanded=False):
+        with st.expander("📅 按日查看 / 修正操作历史", expanded=False):
+            day_scope_key = norm_text(current_pm)
+            day_scope_mode = st.radio(
+                "查看范围",
+                ["当前项目", "当前视角全项目"],
+                horizontal=True,
+                key=f"hist_day_scope_mode_{day_scope_key}_{norm_text(sel_proj)}",
+            )
+
+            if day_scope_mode == "当前项目":
+                day_base_df = day_global_df[day_global_df["项目"].astype(str) == str(sel_proj)].copy() if not day_global_df.empty else pd.DataFrame()
+                if sel_comp != "🌐 全部展示" and (not day_base_df.empty):
+                    day_base_df = day_base_df[day_base_df["部件"].astype(str) == str(sel_comp)].copy()
+                st.caption("这里和下方历史日志保持同一项目上下文；如果上面还筛了特定部件，这里也会一起跟随。")
+                day_empty_text = "当前项目在该过滤范围下暂无可按日查看的历史记录。"
+                day_save_scope_label = "当前项目"
+            else:
+                day_base_df = day_global_df.copy()
+                st.caption("这里是当前视角下的全项目工具，不受上方项目/部件筛选限制，适合做跨项目的同日修正。")
+                day_empty_text = "当前视角下无可按日查看的历史记录。"
+                day_save_scope_label = "当前视角全项目"
+
+            day_date_values = day_base_df["日期"].tolist() if "日期" in day_base_df.columns else []
+            day_options = sorted(
+                {str(x).strip() for x in day_date_values if str(x).strip()},
+                reverse=True,
+            )
             if day_options:
-                day_scope_key = norm_text(current_pm)
-                sel_day = st.selectbox("选择日期", day_options, key=f"hist_day_pick_scope_{day_scope_key}")
-                day_source_df = day_global_df[day_global_df["日期"].astype(str) == str(sel_day)].copy()
+                sel_day = st.selectbox("选择日期", day_options, key=f"hist_day_pick_scope_{day_scope_key}_{norm_text(sel_proj)}_{day_scope_mode}")
+                day_source_df = day_base_df[day_base_df["日期"].astype(str) == str(sel_day)].copy()
                 day_source_df = day_source_df.sort_values(by=["项目", "部件", "日期"]).reset_index(drop=True)
-                st.caption(f"当前视角下该日期共 {len(day_source_df)} 条记录。支持编辑或勾选删除。")
+                if day_scope_mode == "当前项目":
+                    st.caption(f"当前项目在 {sel_day} 共 {len(day_source_df)} 条记录。支持编辑或勾选删除。")
+                else:
+                    st.caption(f"当前视角下 {sel_day} 共 {len(day_source_df)} 条记录。支持编辑或勾选删除。")
 
                 day_edit_df = day_source_df.drop(columns=["_id"]).copy()
                 day_edit_df["删除"] = False
@@ -11913,10 +11949,10 @@ elif menu == MENU_HISTORY:
                     },
                     num_rows="fixed",
                     width='stretch',
-                    key=f"hist_day_editor_scope_{day_scope_key}_{sel_day}",
+                    key=f"hist_day_editor_scope_{day_scope_key}_{norm_text(sel_proj)}_{sel_day}_{day_scope_mode}",
                 )
 
-                if st.button("💾 保存当日修正（当前视角）", type="primary", key=f"btn_hist_day_save_scope_{day_scope_key}_{sel_day}"):
+                if st.button(f"💾 保存当日修正（{day_save_scope_label}）", type="primary", key=f"btn_hist_day_save_scope_{day_scope_key}_{norm_text(sel_proj)}_{sel_day}_{day_scope_mode}"):
                     touched_projects = set()
                     update_count = 0
                     delete_count = 0
@@ -12023,7 +12059,7 @@ elif menu == MENU_HISTORY:
                         else:
                             st.info("当日无可保存变更。")
             else:
-                st.caption("当前视角下无可按日查看的历史记录。")
+                st.caption(day_empty_text)
 
         review_ctx = df_logs["事件"].astype(str).str.contains(r"提审|过审|review|打回|驳回|退回|待反馈|2d|3d|二维|三维|实物提审|产品图提审|官图提审|包装提审", case=False, regex=True)
         mismatch_mask = (df_logs['提审类型'].astype(str) == '(无)') & (df_logs['提审结果'].astype(str).isin(['待反馈', '通过', '打回'])) & (~review_ctx)
@@ -12031,6 +12067,7 @@ elif menu == MENU_HISTORY:
         if mismatch_cnt > 0:
             st.warning(f"检测到 {mismatch_cnt} 条记录疑似误判提审（无提审语义但提审结果有值）。建议改为(无)或补齐提审信息。")
 
+        st.markdown("**当前项目历史日志**")
         st.info("💡 下方为历史日志。直接**双击修改文字**，或选中整行后按 **Delete** 删除。")
         edited_df = st.data_editor(
             df_logs.drop(columns=["_ids", "图片"]),
