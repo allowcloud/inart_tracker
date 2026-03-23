@@ -35,6 +35,20 @@ def load_app_functions(*names: str) -> types.SimpleNamespace:
 
 
 class ProjectTodoSyncRegressionTest(unittest.TestCase):
+    def test_is_stage_timeline_driver_log_excludes_todo_completion_logs(self) -> None:
+        ns = load_app_functions("is_stage_timeline_driver_log")
+
+        self.assertFalse(
+            ns.is_stage_timeline_driver_log(
+                {"流转": "待办", "事件": "[待办完成] 早川秋&玛奇玛 待确认提审结果"}
+            )
+        )
+        self.assertTrue(
+            ns.is_stage_timeline_driver_log(
+                {"流转": "大盘动态", "事件": "版权已给反馈诗实物送审"}
+            )
+        )
+
     def test_build_project_todo_reminder_skips_todo_hidden_from_current_view(self) -> None:
         ns = load_app_functions(
             "parse_date_safe",
