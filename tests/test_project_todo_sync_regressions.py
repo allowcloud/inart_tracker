@@ -35,6 +35,16 @@ def load_app_functions(*names: str) -> types.SimpleNamespace:
 
 
 class ProjectTodoSyncRegressionTest(unittest.TestCase):
+    def test_compute_stale_doc_keys_returns_removed_project_docs(self) -> None:
+        ns = load_app_functions("compute_stale_doc_keys")
+
+        stale = ns.compute_stale_doc_keys(
+            ["系统配置", "1/6威龙", "6威龙", "6早川秋"],
+            ["系统配置", "1/6威龙", "1/6早川秋"],
+        )
+
+        self.assertEqual(stale, ["6威龙", "6早川秋"])
+
     def test_is_stage_timeline_driver_log_excludes_todo_completion_logs(self) -> None:
         ns = load_app_functions("is_stage_timeline_driver_log")
 
