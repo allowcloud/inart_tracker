@@ -134,7 +134,65 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         self.assertFalse(ns._contains_print_tracking_signal("萨鲁曼头雕待打印确认效果；鞋子和手型已安排拆件"))
         self.assertFalse(ns._contains_print_tracking_signal("[系统自动同步] 跟随全局阶段 设计 -> 建模(含打印/签样)"))
         self.assertFalse(ns._contains_print_tracking_signal("早川秋发型打印件已收齐，待翻模；3D建模提审已交未有反馈"))
+        self.assertFalse(ns._contains_print_tracking_signal("[待办完成] 小比例Neo尼奥安排打印并涂装"))
         self.assertTrue(ns._contains_print_tracking_signal("第一版头雕已拆眼睛已安排内部打印"))
+
+    def test_get_standard_event_display_people_hides_dashboard_followup_person(self) -> None:
+        ns = load_app_functions(
+            "norm_text",
+            "_clean_project_name_identity_text",
+            "_project_identity_key",
+            "_project_identity_preference",
+            "resolve_alias_project",
+            "_project_name_noise_variants",
+            "infer_malformed_ratio_project_target",
+            "canonicalize_project_name",
+            "split_people_text",
+            "normalize_people_text",
+            "get_standard_event_display_people",
+        )
+        ns.db.update(
+            {
+                "系统配置": {"项目别名": {}},
+                "1/6萨鲁曼": {"跟单": "魏"},
+            }
+        )
+
+        hidden = ns.get_standard_event_display_people(
+            {"来源": "全局大盘", "项目": "1/6萨鲁曼", "关联人员": "魏"},
+            "1/6萨鲁曼",
+        )
+        kept = ns.get_standard_event_display_people(
+            {"来源": "To-do", "项目": "1/6萨鲁曼", "关联人员": "建模-猫老师"},
+            "1/6萨鲁曼",
+        )
+
+        self.assertEqual(hidden, "")
+        self.assertEqual(kept, "建模-猫老师")
+
+    def test_normalize_project_name_for_write_reuses_hidden_char_variant(self) -> None:
+        ns = load_app_functions(
+            "norm_text",
+            "_clean_project_name_identity_text",
+            "_project_identity_key",
+            "_project_identity_preference",
+            "resolve_alias_project",
+            "_project_name_noise_variants",
+            "infer_malformed_ratio_project_target",
+            "canonicalize_project_name",
+            "is_invalid_project_name",
+            "normalize_project_name_for_write",
+        )
+        ns.db.update(
+            {
+                "系统配置": {"项目别名": {}},
+                "1/6早川秋": {"Milestone": "研发中"},
+            }
+        )
+
+        normalized = ns.normalize_project_name_for_write("1／6早川秋\u200b")
+
+        self.assertEqual(normalized, "1/6早川秋")
 
     def test_is_stage_timeline_driver_log_excludes_todo_completion_logs(self) -> None:
         ns = load_app_functions("is_stage_timeline_driver_log")
@@ -230,6 +288,9 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
     def test_normalize_todo_project_list_repairs_split_ratio_tokens_from_list(self) -> None:
         ns = load_app_functions(
             "norm_text",
+            "_clean_project_name_identity_text",
+            "_project_identity_key",
+            "_project_identity_preference",
             "resolve_alias_project",
             "_project_name_noise_variants",
             "infer_malformed_ratio_project_target",
@@ -250,6 +311,9 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
     def test_append_standard_event_entry_updates_todo_recent_linkage(self) -> None:
         ns = load_app_functions(
             "norm_text",
+            "_clean_project_name_identity_text",
+            "_project_identity_key",
+            "_project_identity_preference",
             "resolve_alias_project",
             "_project_name_noise_variants",
             "infer_malformed_ratio_project_target",

@@ -244,8 +244,53 @@ def format_project_option_label(project_name, attention_map=None):
     return f"{proj}  ·  ⚠️{tag_txt}"
 
 
+def _clean_project_name_identity_text(raw_name):
+    txt = str(raw_name or "")
+    if not txt:
+        return ""
+    txt = txt.replace("\u3000", " ")
+    txt = re.sub(r"[\u200b-\u200d\u2060\ufeff]", "", txt)
+    for src in ["／", "∕", "⁄", "⧸", "╱", "\\"]:
+        txt = txt.replace(src, "/")
+    txt = re.sub(r"\s*/\s*", "/", txt)
+    txt = re.sub(r"\s+", " ", txt).strip()
+    txt = re.sub(r"^(1/\d{1,2})\s+", r"\1", txt)
+    return txt
+
+
+def _project_identity_key(project_name):
+    return norm_text(_clean_project_name_identity_text(project_name))
+
+
+def _project_identity_preference(project_name, db_obj=None):
+    proj = str(project_name or "").strip()
+    data_src = db_obj if isinstance(db_obj, dict) else db
+    proj_data = data_src.get(proj, {}) if isinstance(data_src, dict) else {}
+    comp_map = proj_data.get("部件列表", {}) if isinstance(proj_data, dict) else {}
+    if not isinstance(comp_map, dict):
+        comp_map = {}
+    log_count = 0
+    for comp_info in comp_map.values():
+        logs = (comp_info or {}).get("日志流", [])
+        if isinstance(logs, list):
+            log_count += len(logs)
+    milestone = str((proj_data or {}).get("Milestone", "")).strip()
+    target = str((proj_data or {}).get("Target", "")).strip()
+    ship = str((proj_data or {}).get("发货区间", "")).strip()
+    memo = str((proj_data or {}).get("备忘录", "")).strip()
+    return (
+        1 if milestone and milestone not in ["待立项", "-", "(无)"] else 0,
+        log_count,
+        len(comp_map),
+        1 if target and target not in ["TBD", "-", "(无)"] else 0,
+        1 if ship and ship not in ["-", "(无)"] else 0,
+        1 if memo else 0,
+        len(proj),
+    )
+
+
 def canonicalize_project_name(name, valid_projs=None, alias_map=None):
-    raw = str(name or "").strip()
+    raw = _clean_project_name_identity_text(name)
     if not raw or raw == "系统配置":
         return ""
     if re.fullmatch(r"\d{1,2}", raw):
@@ -254,6 +299,14 @@ def canonicalize_project_name(name, valid_projs=None, alias_map=None):
     alias_map = alias_map or (db.get("系统配置", {}).get("项目别名", {}) if isinstance(db, dict) else {})
     valid_list = list(valid_projs or [p for p in db.keys() if p != "系统配置"])
     valid_set = set(valid_list)
+    raw_identity = _project_identity_key(raw)
+
+    identity_matches = [p for p in valid_list if _project_identity_key(p) == raw_identity]
+    if identity_matches:
+        identity_matches.sort(key=lambda p: _project_identity_preference(p), reverse=True)
+        picked = str(identity_matches[0]).strip()
+        if picked and picked != "系统配置":
+            return picked
 
     direct = resolve_alias_project(raw, alias_map)
     if direct in valid_set and direct != "系统配置":
@@ -346,6 +399,18 @@ def get_visible_projects(db_obj, current_pm):
         if canonical != p and canonical in raw_set:
             continue
         out.append(p)
+
+    deduped = []
+    seen_identity = set()
+    sorted_for_pick = sorted(out, key=lambda p: _project_identity_preference(p, db_obj), reverse=True)
+    for p in sorted_for_pick:
+        identity_key = _project_identity_key(p)
+        if identity_key and identity_key in seen_identity:
+            continue
+        if identity_key:
+            seen_identity.add(identity_key)
+        deduped.append(p)
+    out = deduped
 
     def _latest_log_date(proj_name):
         latest = datetime.date.min
@@ -1983,7 +2048,7 @@ def sync_save_db(changed_proj=None):
 
 
 def normalize_project_name_for_write(raw_name, valid_projs=None, alias_map=None):
-    name = re.sub(r"\s*/\s*", "/", str(raw_name or "").strip())
+    name = _clean_project_name_identity_text(raw_name)
     if not name:
         return ""
     if is_invalid_project_name(name):
@@ -3462,7 +3527,7 @@ def upsert_project_shell(project_name, owner_name="", ratio_preset="", ip_owner=
 
 
 def infer_malformed_ratio_project_target(project_name):
-    name = str(project_name or "").strip()
+    name = _clean_project_name_identity_text(project_name)
     if (not name) or ("/" in name) or name == "系统配置":
         return ""
 
@@ -4285,6 +4350,20 @@ def append_standard_event_entry(
     if len(event_stream) > 3000:
         cfg["标准事件流"] = event_stream[-2500:]
     return True
+
+
+def get_standard_event_display_people(event_obj, project_name=""):
+    evt = event_obj if isinstance(event_obj, dict) else {}
+    people = normalize_people_text(evt.get("关联人员", ""))
+    if not people:
+        return ""
+    src = str(evt.get("来源", "")).strip()
+    proj = str(project_name or evt.get("项目", "")).strip()
+    proj = canonicalize_project_name(proj, valid_projs=[p for p in db.keys() if p != "系统配置"]) or proj
+    proj_follow = normalize_people_text((db.get(proj, {}) or {}).get("跟单", "")) if proj in db else ""
+    if src == "全局大盘" and proj_follow and people == proj_follow:
+        return ""
+    return people
 
 
 def get_latest_project_log_binding(project_name):
@@ -7694,6 +7773,7 @@ def _contains_print_tracking_signal(text):
         return False
     hard_blockers = [
         "[系统自动同步]",
+        "[待办完成]",
         "跟随全局阶段",
         "打印件已收",
         "打印件已收到",
@@ -7790,7 +7870,10 @@ def _build_auto_print_rows_from_logs(visible_projects, locations, days=30):
                     continue
                 stage = str((lg or {}).get("\u5de5\u5e8f", "")).strip()
                 evt = str((lg or {}).get("\u4e8b\u4ef6", "")).strip()
+                flow = str((lg or {}).get("\u6d41\u8f6c", "")).strip()
                 if not evt and not stage:
+                    continue
+                if evt.startswith("[待办完成]") or (flow == "待办" and "完成" in evt):
                     continue
                 if not _contains_print_tracking_signal(evt):
                     continue
@@ -10033,7 +10116,7 @@ if menu == MENU_DASHBOARD:
                                     stage_name=str(db.get(proj, {}).get("部件列表", {}).get(target_comp, {}).get("主流程", "")).strip(),
                                     content_text=latest_after,
                                     raw_text=latest_raw_after,
-                                    people_text=str(db.get(proj, {}).get("跟单", "")).strip(),
+                                    people_text="",
                                     intent=intent,
                                     actor=current_pm if current_pm != "所有人" else "系统",
                                     extra_payload={
@@ -10097,7 +10180,7 @@ if menu == MENU_DASHBOARD:
                                             content_text=parsed_body or latest_after,
                                             raw_text=latest_raw_after,
                                             todo_ids=todo_ids,
-                                            people_text=str(db.get(proj, {}).get("跟单", "")).strip(),
+                                            people_text="",
                                             intent="todo",
                                             actor="系统",
                                             extra_payload={"联动结果": todo_state},
@@ -10255,6 +10338,12 @@ elif menu == MENU_SPECIFIC:
                 f"未完成待办：{len(sel_proj_pending_todos)}",
             ]
             st.caption(" ｜ ".join(project_head_bits))
+            project_memo = str(sel_proj_data.get("备忘录", "")).strip()
+            if project_memo:
+                st.caption("项目备忘录")
+                st.info(project_memo)
+            else:
+                st.caption("项目备忘录：暂无。可在下方专项模块继续维护。")
             st.caption("下方的项目概览、状态解释、项目更新和专项模块，都只作用于这个当前选定项目。")
 
         with st.container(border=True):
@@ -10430,8 +10519,9 @@ elif menu == MENU_SPECIFIC:
             extra_bits = []
             if str(proj_explain.get("动作", "")).strip():
                 extra_bits.append(f"动作：{str(proj_explain.get('动作', '')).strip()}")
-            if str(proj_explain.get("关联人员", "")).strip():
-                extra_bits.append(f"关联人员：{str(proj_explain.get('关联人员', '')).strip()}")
+            explain_people = get_standard_event_display_people(proj_explain, sel_proj)
+            if explain_people:
+                extra_bits.append(f"关联人员：{explain_people}")
             todo_refs = [x for x in (proj_explain.get("关联待办", []) or []) if str(x).strip()]
             if todo_refs:
                 extra_bits.append(f"关联待办：{len(todo_refs)} 条")
@@ -12139,6 +12229,7 @@ elif menu == MENU_HISTORY:
             event_rows = []
             for evt in filtered_events:
                 todo_links = [str(x).strip() for x in (evt.get("关联待办", []) or []) if str(x).strip()]
+                display_people = get_standard_event_display_people(evt, sel_proj) or "-"
                 event_rows.append({
                     "日期": str(evt.get("日期", "")),
                     "来源": str(evt.get("来源", "")),
@@ -12147,7 +12238,7 @@ elif menu == MENU_HISTORY:
                     "阶段": str(evt.get("阶段", "")) or "-",
                     "内容": str(evt.get("内容", "")),
                     "原始文本": str(evt.get("原始文本", "")),
-                    "关联人员": str(evt.get("关联人员", "")) or "-",
+                    "关联人员": display_people,
                     "关联待办": " / ".join(todo_links) if todo_links else "-",
                     "意图": str(evt.get("意图", "")) or "-",
                     "操作者": str(evt.get("操作者", "")) or "-",
