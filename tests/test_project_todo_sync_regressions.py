@@ -45,6 +45,64 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
 
         self.assertEqual(stale, ["6威龙", "6早川秋"])
 
+    def test_has_live_todo_reference_ignores_deleted_or_hidden_todos(self) -> None:
+        ns = load_app_functions(
+            "todo_scope_of",
+            "todo_visible_for_view",
+            "get_live_linked_todo_ids",
+            "has_live_todo_reference",
+        )
+        ns.db.update(
+            {
+                "系统配置": {
+                    "PM_TODO_LIST": [
+                        {"_id": "td_live", "所属视角": "袁", "创建者视角": "袁"},
+                        {"_id": "td_other", "所属视角": "Mo", "创建者视角": "Mo"},
+                    ]
+                }
+            }
+        )
+
+        self.assertTrue(ns.has_live_todo_reference({"关联待办": ["td_live"]}, pm_view="袁"))
+        self.assertFalse(ns.has_live_todo_reference({"关联待办": ["td_live"]}, pm_view="Mo"))
+        self.assertFalse(ns.has_live_todo_reference({"关联待办": ["td_missing"]}, pm_view="袁"))
+
+    def test_purge_deleted_todo_standard_events_removes_stale_todo_reminders(self) -> None:
+        ns = load_app_functions(
+            "_is_todo_standard_event",
+            "purge_deleted_todo_standard_events",
+        )
+        ns.db.update(
+            {
+                "系统配置": {
+                    "标准事件流": [
+                        {
+                            "_id": "evt_todo",
+                            "来源": "To-do",
+                            "动作": "待办更新",
+                            "关联待办": ["td1"],
+                            "内容": "7/7待办：旧提醒",
+                        },
+                        {
+                            "_id": "evt_progress",
+                            "来源": "全局大盘",
+                            "动作": "追加最新动态",
+                            "关联待办": ["td1", "td2"],
+                            "内容": "项目继续推进",
+                        },
+                    ]
+                }
+            }
+        )
+
+        removed = ns.purge_deleted_todo_standard_events(["td1"])
+
+        self.assertEqual(removed, 1)
+        remaining = ns.db["系统配置"]["标准事件流"]
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0]["_id"], "evt_progress")
+        self.assertEqual(remaining[0]["关联待办"], ["td2"])
+
     def test_is_stage_timeline_driver_log_excludes_todo_completion_logs(self) -> None:
         ns = load_app_functions("is_stage_timeline_driver_log")
 

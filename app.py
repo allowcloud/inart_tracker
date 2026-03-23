@@ -4196,6 +4196,69 @@ def _is_todo_standard_event(evt_obj):
     return False
 
 
+def get_live_linked_todo_ids(todo_ids, pm_view=None):
+    id_list = [str(x).strip() for x in (todo_ids or []) if str(x).strip()]
+    if not id_list:
+        return []
+    id_set = set(id_list)
+    live_ids = []
+    for td in db.get("系统配置", {}).get("PM_TODO_LIST", []):
+        if not isinstance(td, dict):
+            continue
+        td_id = str(td.get("_id", "")).strip()
+        if td_id not in id_set:
+            continue
+        if pm_view and (not todo_visible_for_view(td, pm_view)):
+            continue
+        live_ids.append(td_id)
+    return live_ids
+
+
+def has_live_todo_reference(evt_obj, pm_view=None):
+    evt = evt_obj if isinstance(evt_obj, dict) else {}
+    todo_ids = [str(x).strip() for x in (evt.get("关联待办", []) or []) if str(x).strip()]
+    if not todo_ids:
+        return False
+    return bool(get_live_linked_todo_ids(todo_ids, pm_view=pm_view))
+
+
+def purge_deleted_todo_standard_events(todo_ids):
+    id_set = {str(x).strip() for x in (todo_ids or []) if str(x).strip()}
+    if not id_set:
+        return 0
+    cfg = db.setdefault("系统配置", {})
+    events = cfg.get("标准事件流", [])
+    if not isinstance(events, list):
+        return 0
+
+    new_events = []
+    removed = 0
+    for evt in events:
+        evt_obj = evt if isinstance(evt, dict) else {}
+        linked_ids = [str(x).strip() for x in (evt_obj.get("关联待办", []) or []) if str(x).strip()]
+        if not linked_ids:
+            new_events.append(evt_obj)
+            continue
+        hit_deleted = any(tid in id_set for tid in linked_ids)
+        if not hit_deleted:
+            new_events.append(evt_obj)
+            continue
+
+        action = str(evt_obj.get("动作", "")).strip()
+        if _is_todo_standard_event(evt_obj) or action in ["工作台联动待办", "动态联动待办"]:
+            removed += 1
+            continue
+
+        filtered_ids = [tid for tid in linked_ids if tid not in id_set]
+        evt_copy = dict(evt_obj)
+        evt_copy["关联待办"] = filtered_ids
+        new_events.append(evt_copy)
+
+    if removed or len(new_events) != len(events):
+        cfg["标准事件流"] = new_events
+    return removed
+
+
 def todo_link_module_label(source_module="", action_type=""):
     src = str(source_module or "").strip()
     act = str(action_type or "").strip()
@@ -4270,7 +4333,7 @@ def get_latest_todo_landing_event(td_obj):
     return latest["event"] if latest else None
 
 
-def get_latest_standard_event_pair(project_name):
+def get_latest_standard_event_pair(project_name, pm_view=None):
     proj = str(project_name or "").strip()
     if not proj:
         return {"progress": None, "todo": None}
@@ -4302,6 +4365,8 @@ def get_latest_standard_event_pair(project_name):
         )
         target_key = "todo" if _is_todo_standard_event(evt) else "progress"
         if target_key == "todo":
+            if (evt.get("关联待办") or []) and (not has_live_todo_reference(evt, pm_view=pm_view)):
+                continue
             if (latest_todo is None) or (rank > latest_todo["rank"]):
                 latest_todo = {"rank": rank, "event": evt}
         else:
@@ -4421,7 +4486,7 @@ def build_project_current_explanation(project_name, pm_view=None):
     if (not proj) or proj not in db:
         return {}
 
-    std_pair = get_latest_standard_event_pair(proj)
+    std_pair = get_latest_standard_event_pair(proj, pm_view=pm_view)
     std_binding = std_pair.get("progress")
     todo_binding = std_pair.get("todo")
     log_binding = get_latest_project_log_binding(proj)
@@ -5796,6 +5861,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
         skipped = 0
         project_history_updates = set()
         new_project_created = False
+        removed_todo_events = 0
 
         for row in edited_df.to_dict("records"):
             rid = str(row.get("_id", "")).strip()
@@ -5928,13 +5994,18 @@ def render_pm_todo_manager(valid_projs, current_pm):
 
         todo_all[:] = [x for x in todo_all if str(x.get("_id", "")).strip() not in delete_ids and str(x.get("任务", "")).strip()]
         cfg["PM_TODO_LIST"] = todo_all
+        if delete_ids:
+            removed_todo_events = purge_deleted_todo_standard_events(delete_ids)
 
         if project_history_updates or new_project_created:
             sync_save_db()
         else:
             sync_save_db("系统配置")
 
-        st.success(f"待办已保存：保留 {len(todo_all)} 条，删除 {len(delete_ids)} 条，跳过 {skipped} 条空任务。")
+        success_msg = f"待办已保存：保留 {len(todo_all)} 条，删除 {len(delete_ids)} 条，跳过 {skipped} 条空任务。"
+        if removed_todo_events:
+            success_msg += f" 已同步清理 {removed_todo_events} 条旧待办提醒事件。"
+        st.success(success_msg)
         st.rerun()
 
     st.caption("建议：待办先做轻量提醒；图片、附件、流转详情统一在【细分配件交接工作台】里补充。")
