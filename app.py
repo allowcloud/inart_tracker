@@ -1379,6 +1379,7 @@ def _ensure_runtime_state_defaults():
         "current_proj_context": None,
         "form_key": 0,
         "todo_handoff_prefill": None,
+        "dashboard_save_report": None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -10065,9 +10066,9 @@ if menu == MENU_DASHBOARD:
             proj = str(project_name or "").strip()
             msg = str(new_text or "").strip()
             if (not proj) or proj not in db:
-                return False, "\u672a\u9009\u62e9\u6709\u6548\u9879\u76ee\u3002"
+                return False, {"message": "\u672a\u9009\u62e9\u6709\u6548\u9879\u76ee\u3002", "applied_mode": "", "target_component": ""}
             if not msg:
-                return False, "\u52a8\u6001\u5185\u5bb9\u4e0d\u80fd\u4e3a\u7a7a\u3002"
+                return False, {"message": "\u52a8\u6001\u5185\u5bb9\u4e0d\u80fd\u4e3a\u7a7a\u3002", "applied_mode": "", "target_component": ""}
 
             binding = _latest_event_binding(proj)
             comps = db.get(proj, {}).setdefault("\u90e8\u4ef6\u5217\u8868", {})
@@ -10081,7 +10082,11 @@ if menu == MENU_DASHBOARD:
                 binding["log"]["\u4e8b\u4ef6"] = msg
                 if auto_save:
                     sync_save_db(proj)
-                return True, f"\u5df2\u6539\u5199 {proj} \u7684\u5f53\u524d\u6700\u65b0\u52a8\u6001\u3002"
+                return True, {
+                    "message": f"\u5df2\u6539\u5199 {proj} \u7684\u5f53\u524d\u6700\u65b0\u52a8\u6001\u3002",
+                    "applied_mode": "edit_latest",
+                    "target_component": target_comp,
+                }
 
             comp_info = comps[target_comp]
             curr_stage = str(comp_info.get("\u4e3b\u6d41\u7a0b", "")).strip()
@@ -10101,7 +10106,14 @@ if menu == MENU_DASHBOARD:
             comp_info["\u65e5\u5fd7\u6d41"] = sorted(comp_info.get("\u65e5\u5fd7\u6d41", []), key=lambda x: str((x or {}).get("\u65e5\u671f", "")))
             if auto_save:
                 sync_save_db(proj)
-            return True, f"\u5df2\u8ffd\u52a0 {proj} \u7684\u6700\u65b0\u52a8\u6001\u3002"
+            append_msg = f"\u5df2\u8ffd\u52a0 {proj} \u7684\u6700\u65b0\u52a8\u6001\u3002"
+            if mode == "edit_latest":
+                append_msg = f"{proj} \u5f53\u524d\u6ca1\u6709\u53ef\u76f4\u63a5\u6539\u5199\u7684\u9879\u76ee\u65e5\u5fd7\uff0c\u5df2\u6539\u4e3a\u8ffd\u52a0\u65b0\u8bb0\u5f55\u3002"
+            return True, {
+                "message": append_msg,
+                "applied_mode": "append_latest",
+                "target_component": target_comp,
+            }
 
         def _dashboard_dynamic_is_placeholder(text):
             t = norm_text(text)
@@ -10358,6 +10370,52 @@ if menu == MENU_DASHBOARD:
             st.caption("不需要额外写 `--` 标记；像 `植发 / 马海毛 / 毛到货` 会优先理解成头雕相关动作，`彩盒 / 地台贴 / 烫色 / 打样` 会优先理解成包装复样动作。")
             st.caption("示例：`4/20马海毛到货开始植发；地台贴需修改、彩盒需修改烫色，已转交立宇待打样`")
 
+        def _preview_project_names(name_list, limit=6):
+            names = [str(x).strip() for x in (name_list or []) if str(x).strip()]
+            if not names:
+                return ""
+            if len(names) <= limit:
+                return "、".join(names)
+            return "、".join(names[:limit]) + f" 等{len(names)}项"
+
+        dashboard_save_report = st.session_state.get("dashboard_save_report")
+        if isinstance(dashboard_save_report, dict):
+            report_kind = str(dashboard_save_report.get("kind", "")).strip() or "info"
+            report_summary = str(dashboard_save_report.get("summary", "")).strip()
+            saved_at = str(dashboard_save_report.get("saved_at", "")).strip()
+            if report_kind == "success":
+                st.success(report_summary or "上次保存已完成。")
+            elif report_kind == "warning":
+                st.warning(report_summary or "上次保存有提示。")
+            else:
+                st.info(report_summary or "上次保存结果如下。")
+
+            if saved_at:
+                st.caption(f"上次保存时间：{saved_at}")
+            rewritten_preview = _preview_project_names(dashboard_save_report.get("rewrite_projects", []))
+            appended_preview = _preview_project_names(dashboard_save_report.get("append_projects", []))
+            basic_only_preview = _preview_project_names(dashboard_save_report.get("basic_only_projects", []))
+            noop_rewrite_preview = _preview_project_names(dashboard_save_report.get("noop_rewrite_projects", []))
+            fallback_append_preview = _preview_project_names(dashboard_save_report.get("fallback_append_projects", []))
+            if rewritten_preview:
+                st.caption(f"本次已改写历史：{rewritten_preview}")
+            if appended_preview:
+                st.caption(f"本次作为新记录追加：{appended_preview}")
+            if basic_only_preview:
+                st.caption(f"本次只更新基础字段：{basic_only_preview}")
+            if noop_rewrite_preview:
+                st.caption(f"这些项目勾选了改写历史，但文本未变化，所以没有写入：{noop_rewrite_preview}")
+            if fallback_append_preview:
+                st.caption(f"这些项目勾选了改写历史，但当前没有可直接改写的项目日志，已改为追加：{fallback_append_preview}")
+            report_hints = [str(x).strip() for x in (dashboard_save_report.get("hint_lines", []) or []) if str(x).strip()]
+            if report_hints:
+                with st.expander("最近一次识别结果", expanded=False):
+                    st.caption("；".join(report_hints[:8]))
+            report_errors = [str(x).strip() for x in (dashboard_save_report.get("error_msgs", []) or []) if str(x).strip()]
+            if report_errors:
+                with st.expander("最近一次保存提示", expanded=False):
+                    st.warning("\n".join(report_errors[:8]))
+
         editable_cols = ["状态", "项目", "项目当前阶段", "开定时间", "预计发货", "跟单", "最新全盘动态", "断更", "开定延迟预警", "发货延迟预警"]
         editable_df = show_df[editable_cols].copy()
         editable_df["改写历史"] = False
@@ -10438,6 +10496,11 @@ if menu == MENU_DASHBOARD:
             standard_event_dirty = False
             error_msgs = []
             hint_lines = []
+            rewrite_projects = []
+            append_projects = []
+            basic_only_projects = []
+            noop_rewrite_projects = []
+            fallback_append_projects = []
 
             for row in edited_dashboard_df.to_dict("records"):
                 proj = str(row.get("项目", "")).strip()
@@ -10483,12 +10546,15 @@ if menu == MENU_DASHBOARD:
                 base_row = dashboard_edit_snapshot.get(proj, {})
                 latest_raw_before = str(base_row.get("最新全盘动态", "")).strip()
                 latest_raw_after = str(row.get("最新全盘动态", latest_raw_before)).strip()
+                rewrite_requested = bool(row.get("改写历史", False))
+                if rewrite_requested and latest_raw_after == latest_raw_before:
+                    noop_rewrite_projects.append(proj)
                 if latest_raw_after != latest_raw_before:
                     latest_after = _normalize_dashboard_dynamic_input(proj, latest_raw_after)
                     if not latest_after:
                         error_msgs.append(f"{proj}: 最新全盘动态不能为空或无数据。")
                     else:
-                        row_dynamic_mode = "edit_latest" if bool(row.get("改写历史", False)) else "append_latest"
+                        row_dynamic_mode = "edit_latest" if rewrite_requested else "append_latest"
                         parsed_date, parsed_body = _extract_event_date_from_text(latest_after, prefer_past=False)
                         intent = _classify_dynamic_intent(latest_after)
                         today_ref = datetime.date.today()
@@ -10517,11 +10583,13 @@ if menu == MENU_DASHBOARD:
                             raw_text_for_target=latest_raw_after,
                         )
                         if ok:
-                            target_comp = _infer_component_for_dynamic(proj, latest_raw_after)
+                            result_info = msg if isinstance(msg, dict) else {"message": str(msg or "").strip(), "applied_mode": row_dynamic_mode, "target_component": ""}
+                            target_comp = str(result_info.get("target_component", "")).strip() or _infer_component_for_dynamic(proj, latest_raw_after)
+                            applied_dynamic_mode = str(result_info.get("applied_mode", "")).strip() or row_dynamic_mode
                             standard_event_dirty = (
                                 append_standard_event_entry(
                                     source_module="全局大盘",
-                                    action_type="改写最新动态" if row_dynamic_mode == "edit_latest" else "追加最新动态",
+                                    action_type="改写最新动态" if applied_dynamic_mode == "edit_latest" else "追加最新动态",
                                     project_name=proj,
                                     event_date=event_date or datetime.date.today(),
                                     component_name=target_comp,
@@ -10537,12 +10605,16 @@ if menu == MENU_DASHBOARD:
                                     },
                                 ) or standard_event_dirty
                             )
-                            if row_dynamic_mode == "append_latest":
+                            if applied_dynamic_mode == "append_latest":
                                 dynamic_append_updates += 1
+                                append_projects.append(proj)
                             else:
                                 dynamic_rewrite_updates += 1
+                                rewrite_projects.append(proj)
+                            if rewrite_requested and applied_dynamic_mode != "edit_latest":
+                                fallback_append_projects.append(proj)
                             changed_projects.add(proj)
-                            if row_dynamic_mode == "append_latest":
+                            if applied_dynamic_mode == "append_latest":
                                 todo_result = {"status": "", "todo_ids": [], "items": [], "created": 0, "updated": 0, "exists": 0}
                                 has_multi_todo_segments = len([x for x in re.split(r"[;；\n]+", str(latest_after or "")) if str(x).strip()]) > 1
                                 if date_bucket == "future" and isinstance(parsed_date, datetime.date):
@@ -10610,7 +10682,8 @@ if menu == MENU_DASHBOARD:
                                             ) or standard_event_dirty
                                         )
                         else:
-                            error_msgs.append(f"{proj}: {msg}")
+                            err_msg = msg.get("message", "") if isinstance(msg, dict) else str(msg or "")
+                            error_msgs.append(f"{proj}: {err_msg}")
 
                 if basic_changed:
                     basic_updates += 1
@@ -10621,26 +10694,61 @@ if menu == MENU_DASHBOARD:
                     sync_save_db(proj)
                 if standard_event_dirty:
                     sync_save_db("系统配置")
+                dynamic_handled = set(rewrite_projects + append_projects)
+                basic_only_projects = [proj for proj in sorted(changed_projects, key=lambda p: project_rank_map.get(str(p), 999999)) if proj not in dynamic_handled]
                 todo_bits = []
                 if todo_created:
                     todo_bits.append(f"待办新建 {todo_created} 条")
                 if todo_updated:
                     todo_bits.append(f"待办更新 {todo_updated} 条")
                 todo_suffix = ("；" + "，".join(todo_bits)) if todo_bits else ""
-                st.success(
-                    f"已保存 {len(changed_projects)} 个项目：基础字段 {basic_updates} 条，"
-                    f"动态新增 {dynamic_append_updates} 条，动态改写 {dynamic_rewrite_updates} 条{todo_suffix}。"
-                )
-                if hint_lines:
-                    st.caption("识别结果：" + " ； ".join(hint_lines[:4]))
-                if error_msgs:
-                    st.warning("\n".join(error_msgs[:6]))
+                st.session_state.dashboard_save_report = {
+                    "kind": "success",
+                    "summary": (
+                        f"已保存 {len(changed_projects)} 个项目：基础字段 {basic_updates} 条，"
+                        f"动态新增 {dynamic_append_updates} 条，动态改写 {dynamic_rewrite_updates} 条{todo_suffix}。"
+                    ),
+                    "saved_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "rewrite_projects": list(dict.fromkeys(rewrite_projects)),
+                    "append_projects": list(dict.fromkeys(append_projects)),
+                    "basic_only_projects": list(dict.fromkeys(basic_only_projects)),
+                    "noop_rewrite_projects": list(dict.fromkeys(noop_rewrite_projects)),
+                    "fallback_append_projects": list(dict.fromkeys(fallback_append_projects)),
+                    "hint_lines": list(dict.fromkeys([x for x in hint_lines if x]))[:8],
+                    "error_msgs": error_msgs[:8],
+                }
                 st.rerun()
             else:
                 if error_msgs:
-                    st.warning("\n".join(error_msgs[:6]))
+                    st.session_state.dashboard_save_report = {
+                        "kind": "warning",
+                        "summary": "这次保存没有成功写入，请看下方提示。",
+                        "saved_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "rewrite_projects": [],
+                        "append_projects": [],
+                        "basic_only_projects": [],
+                        "noop_rewrite_projects": list(dict.fromkeys(noop_rewrite_projects)),
+                        "fallback_append_projects": [],
+                        "hint_lines": [],
+                        "error_msgs": error_msgs[:8],
+                    }
                 else:
-                    st.info("未检测到可保存的变更。")
+                    summary = "未检测到可保存的变更。"
+                    if noop_rewrite_projects:
+                        summary = "勾选了改写历史，但文本没有变化，所以没有写入。"
+                    st.session_state.dashboard_save_report = {
+                        "kind": "info",
+                        "summary": summary,
+                        "saved_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "rewrite_projects": [],
+                        "append_projects": [],
+                        "basic_only_projects": [],
+                        "noop_rewrite_projects": list(dict.fromkeys(noop_rewrite_projects)),
+                        "fallback_append_projects": [],
+                        "hint_lines": [],
+                        "error_msgs": error_msgs[:8],
+                    }
+                st.rerun()
 
         st.caption("提示：默认作为新记录；勾选【改写历史】后会覆盖该项目当前最新动态。")
         if st.button("💾 修改动态并保存", type="primary", key="btn_dash_save_dynamic"):
