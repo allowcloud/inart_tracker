@@ -125,24 +125,52 @@ class DesktopServiceTest(unittest.TestCase):
         self.assertTrue(any("补打印确认" in line for line in detail.todo_lines))
 
     def test_add_project_log_persists_and_updates_project_state(self):
-        detail = self.service.add_project_log(
+        result = self.service.add_project_log(
             project_name="Project Beta",
             component_name="全局进度",
             stage_name="立项",
             event_text="桌面版录入了第一条项目日志",
             event_date=datetime.date(2026, 3, 24),
+            sync_todos=False,
         )
+        detail = result["detail"]
 
         self.assertEqual(detail.summary.name, "Project Beta")
         self.assertEqual(detail.summary.current_stage, "立项")
         self.assertEqual(detail.summary.log_count, 1)
         self.assertEqual(detail.summary.latest_log_event, "桌面版录入了第一条项目日志")
+        self.assertEqual(result["todo_results"], [])
+        self.assertEqual(result["todo_link_updates"], 0)
 
         stored = json.loads(self.data_path.read_text(encoding="utf-8"))
         beta = stored["Project Beta"]
         self.assertEqual(beta["Milestone"], "待立项")
         self.assertEqual(beta["部件列表"]["全局进度"]["主流程"], "立项")
         self.assertEqual(beta["部件列表"]["全局进度"]["日志流"][-1]["事件"], "桌面版录入了第一条项目日志")
+
+    def test_add_project_log_can_auto_create_and_link_todo(self):
+        result = self.service.add_project_log(
+            project_name="Project Alpha",
+            component_name="全局进度",
+            stage_name="建模(含打印/签样)",
+            event_text="3/28 待打印确认头雕效果",
+            event_date=datetime.date(2026, 3, 24),
+            sync_todos=True,
+        )
+        detail = result["detail"]
+
+        self.assertEqual(detail.summary.pending_todo_count, 2)
+        self.assertEqual(len(result["todo_results"]), 1)
+        self.assertEqual(result["todo_results"][0]["status"], "created")
+
+        stored = json.loads(self.data_path.read_text(encoding="utf-8"))
+        todos = stored["系统配置"]["PM_TODO_LIST"]
+        created = next(td for td in todos if td["任务"] == "待打印确认头雕效果")
+        self.assertEqual(created["DDL"], "2026-03-28")
+        self.assertEqual(created["默认落地部件"], "全局进度")
+        self.assertEqual(created["默认落地阶段"], "建模(含打印/签样)")
+        self.assertEqual(created["最近联动项目"], "Project Alpha")
+        self.assertEqual(created["最近联动部件"], "全局进度")
 
 
     def test_desktop_summary_mode_runs_as_script(self):

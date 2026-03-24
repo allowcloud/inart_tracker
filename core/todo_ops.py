@@ -309,7 +309,11 @@ def todo_matches_project(td, proj_name, alias_map=None, canonicalize_project_nam
     else:
         project_canon = str(alias_lookup.get(project) or alias_lookup.get(norm_text(project)) or project).strip()
 
-    ref_projects = todo_project_list(td_obj)
+    ref_projects = todo_project_list(
+        td_obj,
+        alias_map=alias_lookup,
+        canonicalize=canonicalize_project_name,
+    )
     for ref_proj in ref_projects:
         ref_text = str(ref_proj or "").strip()
         if not ref_text:

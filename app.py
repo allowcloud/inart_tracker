@@ -1798,103 +1798,20 @@ def restore_attachments_from_zip(db_obj, zf):
 
 
 def refresh_project_todo_links(proj_name):
-    proj = str(proj_name or "").strip()
+    from core.todo_ops import refresh_project_todo_links as _impl
+
     db_obj = st.session_state.db if isinstance(st.session_state.get("db"), dict) else {}
-    if not proj or proj == "\u7cfb\u7edf\u914d\u7f6e" or proj not in db_obj:
-        return 0
-
-    todo_all = db_obj.get("\u7cfb\u7edf\u914d\u7f6e", {}).get("PM_TODO_LIST", [])
-    todo_items = [
-        td for td in todo_all
-        if todo_matches_project(td, proj) and str((td or {}).get("\u4efb\u52a1", "")).strip()
-    ]
-    if not todo_items:
-        return 0
-
-    logs = []
-    for comp_name, comp_info in db_obj.get(proj, {}).get("\u90e8\u4ef6\u5217\u8868", {}).items():
-        for lg in (comp_info or {}).get("\u65e5\u5fd7\u6d41", []):
-            if is_hidden_system_log(lg):
-                continue
-            evt = str((lg or {}).get("\u4e8b\u4ef6", "")).strip()
-            if not evt:
-                continue
-            d_txt = str((lg or {}).get("\u65e5\u671f", "")).strip()
-            try:
-                d_obj = datetime.datetime.strptime(d_txt, "%Y-%m-%d").date()
-            except Exception:
-                d_obj = datetime.date.min
-            logs.append({
-                "dt": d_obj,
-                "date": d_txt,
-                "component": str(comp_name),
-                "stage": str((lg or {}).get("\u5de5\u5e8f", "")).strip(),
-                "event": evt,
-                "event_norm": norm_text(evt),
-            })
-
-    if not logs:
-        return 0
-
-    logs.sort(key=lambda x: (x.get("dt") or datetime.date.min, x.get("date", ""), x.get("component", "")), reverse=True)
-
-    def _safe_date(s):
-        try:
-            return datetime.datetime.strptime(str(s or "").strip(), "%Y-%m-%d").date()
-        except Exception:
-            return None
-
-    write_ts = datetime.datetime.now().isoformat(timespec="seconds")
-    updated = 0
-
-    for td in todo_items:
-        task = str((td or {}).get("\u4efb\u52a1", "")).strip()
-        task_norm = norm_text(task)
-        if len(task_norm) < 2:
-            continue
-
-        short_task = task[:8].strip()
-        short_norm = norm_text(short_task)
-        hit = None
-        for item in logs:
-            evt = item["event"]
-            evt_norm = item["event_norm"]
-            matched = False
-            if ("[\u5173\u8054To do]" in evt or "[\u5173\u8054\u5f85\u529e]" in evt) and (task in evt or (task_norm and task_norm in evt_norm)):
-                matched = True
-            elif len(task_norm) >= 4 and task_norm in evt_norm:
-                matched = True
-            elif short_norm and len(short_norm) >= 4 and short_norm in evt_norm:
-                matched = True
-            if matched:
-                hit = item
-                break
-
-        if not hit:
-            continue
-
-        cur_dt = _safe_date(td.get("\u6700\u8fd1\u8054\u52a8\u65e5\u671f", ""))
-        hit_dt = hit.get("dt") if hit.get("dt") != datetime.date.min else None
-        if cur_dt and hit_dt and hit_dt < cur_dt:
-            continue
-
-        desired = {
-            "\u6700\u8fd1\u8054\u52a8\u6a21\u5757": "\u65e5\u5fd7\u8054\u52a8\u56de\u586b",
-            "\u6700\u8fd1\u8054\u52a8\u65e5\u671f": hit.get("date", ""),
-            "\u6700\u8fd1\u8054\u52a8\u9879\u76ee": proj,
-            "\u6700\u8fd1\u8054\u52a8\u90e8\u4ef6": hit.get("component", ""),
-            "\u6700\u8fd1\u8054\u52a8\u9636\u6bb5": hit.get("stage", ""),
-            "\u6700\u8fd1\u8054\u52a8\u5199\u5165\u65f6\u95f4": write_ts,
-        }
-        changed = False
-        for k, v in desired.items():
-            if str(td.get(k, "")) != str(v):
-                td[k] = v
-                changed = True
-        if changed:
-            updated += 1
-
-    return updated
+    alias_map = db_obj.get("系统配置", {}).get("项目别名", {}) if isinstance(db_obj, dict) else {}
+    return _impl(
+        db_obj,
+        proj_name,
+        alias_map=alias_map,
+        canonicalize_project_name=lambda name: canonicalize_project_name(
+            name,
+            valid_projs=[p for p in db_obj.keys() if p != "系统配置"] if isinstance(db_obj, dict) else [],
+            alias_map=alias_map,
+        ),
+    )
 
 
 def auto_sync_milestone(proj_name):
@@ -2361,102 +2278,26 @@ def extract_deadline_from_text(text, ref_date=None):
 
 
 def clean_auto_todo_task_text(raw_text):
-    txt = str(raw_text or "").strip()
-    if not txt:
-        return ""
-    txt = re.sub(r"^(?:\[[^\]]+\]\s*){1,6}", "", txt).strip()
-    txt = re.sub(r"\s+", " ", txt).strip(" ，,;；|")
-    txt = re.sub(r"^(预计|计划|大概|约)\s*", "", txt)
-    txt = re.sub(r"\s*(左右|前后)\s*", " ", txt)
-    txt = re.sub(r"(^|[\s，,;；|])(?:CP|DDL)(?=[\s，,;；|]|$)", " ", txt, flags=re.I)
-    for noise in get_recognition_keywords("日期噪音词"):
-        if not noise:
-            continue
-        txt = re.sub(rf"(^|[\s，,;；|]){re.escape(str(noise))}(?=[\s，,;；|]|$)", " ", txt)
-    txt = re.sub(r"\s+", " ", txt).strip(" ，,;；|")
-    return txt
+    from core.todo_ops import clean_auto_todo_task_text as _impl
+
+    return _impl(raw_text, noise_keywords=get_recognition_keywords("日期噪音词"))
 
 
 def normalize_todo_cpddl_for_storage(cpddl_text, task_text="", due_dt=None):
-    raw = str(cpddl_text or "").strip()
-    task = clean_auto_todo_task_text(task_text)
-    if not raw:
-        return f"{due_dt.month}/{due_dt.day}" if isinstance(due_dt, datetime.date) else ""
-    due = due_dt if isinstance(due_dt, datetime.date) else extract_deadline_from_text(raw)
-    if not due:
-        cleaned_raw = clean_auto_todo_task_text(raw)
-        if task and (cleaned_raw == task or cleaned_raw in task or task in cleaned_raw):
-            return ""
-        return cleaned_raw
-    body = re.sub(r"(20\d{2})[-/](\d{1,2})[-/](\d{1,2})", " ", raw)
-    body = re.sub(r"(?<!\d)(\d{1,2})[\/\-](\d{1,2})(?!\d)", " ", body)
-    body = re.sub(r"(?<!\d)(\d{1,2})月(\d{1,2})日?", " ", body)
-    body = clean_auto_todo_task_text(body)
-    if not body:
-        return f"{due.month}/{due.day}"
-    if task and (body == task or body in task or task in body):
-        return f"{due.month}/{due.day}"
-    return f"{due.month}/{due.day} {body}".strip()
+    from core.todo_ops import normalize_todo_cpddl_for_storage as _impl
+
+    return _impl(cpddl_text, task_text=task_text, due_dt=due_dt)
 
 
 def extract_event_date_and_body(text, ref_date=None, prefer_past=False):
-    s = str(text or "").strip()
-    if not s:
-        return None, s
-    ref = ref_date or datetime.date.today()
+    from core.todo_ops import extract_event_date_and_body as _impl
 
-    def _clean_event_body(raw):
-        body = str(raw or "").strip()
-        body = re.sub(r"^(?:\[[^\]]+\]\s*){1,6}", "", body).strip()
-        body = re.sub(r"\s+", " ", body).strip(" ，,;；|")
-        for noise in get_recognition_keywords("日期噪音词"):
-            if not noise:
-                continue
-            body = re.sub(rf"(^|\s){re.escape(str(noise))}(?=\s|$)", " ", body)
-        body = re.sub(r"\s*(左右|前后)\s*", " ", body)
-        body = re.sub(r"^(大约|约)\s*", "", body)
-        body = re.sub(r"\s+", " ", body).strip(" ，,;；|")
-        return body
-
-    full_patterns = [
-        r"(20\d{2})[-/／\.](\d{1,2})[-/／\.](\d{1,2})",
-        r"(20\d{2})年\s*(\d{1,2})月\s*(\d{1,2})日?",
-    ]
-    for pat in full_patterns:
-        m = re.search(pat, s)
-        if not m:
-            continue
-        try:
-            y = int(m.group(1)); mm = int(m.group(2)); dd = int(m.group(3))
-            dt = datetime.date(y, mm, dd)
-            cleaned = _clean_event_body((s[:m.start()] + " " + s[m.end():]))
-            return dt, (cleaned or s)
-        except Exception:
-            pass
-
-    md_patterns = [
-        r"(?<!\d)(\d{1,2})[\/／](\d{1,2})(?!\d)",
-        r"(?<!\d)(\d{1,2})-(\d{1,2})(?!\d)",
-        r"(?<!\d)(\d{1,2})月(\d{1,2})日?",
-    ]
-    for pat in md_patterns:
-        m = re.search(pat, s)
-        if not m:
-            continue
-        try:
-            mm = int(m.group(1)); dd = int(m.group(2))
-            y = ref.year
-            cand = datetime.date(y, mm, dd)
-            if prefer_past and cand > ref + datetime.timedelta(days=30):
-                cand = datetime.date(y - 1, mm, dd)
-            if (not prefer_past) and cand < ref - datetime.timedelta(days=30):
-                cand = datetime.date(y + 1, mm, dd)
-            cleaned = _clean_event_body((s[:m.start()] + " " + s[m.end():]))
-            return cand, (cleaned or s)
-        except Exception:
-            pass
-
-    return None, (_clean_event_body(s) or s)
+    return _impl(
+        text,
+        ref_date=ref_date,
+        prefer_past=prefer_past,
+        noise_keywords=get_recognition_keywords("日期噪音词"),
+    )
 
 
 def classify_text_intent(text):
@@ -3344,60 +3185,19 @@ def todo_append_history_version(td_obj, actor="系统"):
         "完成": bool(td.get("完成", False)),
     })
 def todo_matches_project(td, proj_name):
-    td_obj = td or {}
-    proj = str(proj_name or "").strip()
-    if not proj:
-        return False
+    from core.todo_ops import todo_matches_project as _impl
 
     alias_map = db.get("系统配置", {}).get("项目别名", {})
-    proj_canon = resolve_alias_project(proj, alias_map)
-
-    ref_projects = todo_project_list(td_obj)
-    for ref_proj in ref_projects:
-        ref_canon = resolve_alias_project(ref_proj, alias_map)
-        if ref_proj in [proj, proj_canon] or ref_canon in [proj, proj_canon]:
-            return True
-
-    linked_projects = normalize_todo_project_list(td_obj.get("最近联动项目", ""))
-    for linked_proj in linked_projects:
-        linked_canon = resolve_alias_project(linked_proj, alias_map)
-        if linked_proj in [proj, proj_canon] or linked_canon in [proj, proj_canon]:
-            return True
-
-    txt = f"{str(td_obj.get('任务', '')).strip()} {todo_cpddl_text(td_obj)}".strip()
-    txt_norm = norm_text(txt)
-
-    candidates = set()
-    candidates.add(proj)
-    candidates.add(proj_canon)
-
-    def _add_proj_forms(name):
-        s = str(name or "").strip()
-        if not s:
-            return
-        candidates.add(s)
-        short = re.sub(r'^(1/6|1/4|1/12|1/3|1/1)\s*', '', s).strip()
-        if short:
-            candidates.add(short)
-
-    _add_proj_forms(proj)
-    _add_proj_forms(proj_canon)
-
-    for a in alias_map.keys():
-        a_canon = resolve_alias_project(a, alias_map)
-        if a_canon in [proj, proj_canon]:
-            _add_proj_forms(a)
-
-    for token in candidates:
-        t = str(token or "").strip()
-        if not t:
-            continue
-        if t in txt:
-            return True
-        tn = norm_text(t)
-        if tn and tn in txt_norm:
-            return True
-    return False
+    return _impl(
+        td,
+        proj_name,
+        alias_map=alias_map,
+        canonicalize_project_name=lambda name: canonicalize_project_name(
+            name,
+            valid_projs=[p for p in db.keys() if p != "系统配置"],
+            alias_map=alias_map,
+        ),
+    )
 
 
 def infer_todo_projects_from_text(td, valid_projs):
