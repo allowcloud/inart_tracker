@@ -5214,6 +5214,40 @@ def build_history_day_scope_rows(scope_projects):
     }
 
 
+def collect_history_done_project_todos(project_name):
+    proj = str(project_name or "").strip()
+    if not proj:
+        return []
+    rows = [
+        td for td in db.get("系统配置", {}).get("PM_TODO_LIST", [])
+        if td.get("完成")
+        and todo_matches_project(td, proj)
+        and str(td.get("完成时间", "")).strip()
+    ]
+    return sorted(rows, key=lambda x: str(x.get("完成时间", "")), reverse=True)
+
+
+def collect_history_project_todos(project_name):
+    proj = str(project_name or "").strip()
+    if not proj:
+        return []
+    rows = [
+        td for td in db.get("系统配置", {}).get("PM_TODO_LIST", [])
+        if todo_matches_project(td, proj)
+    ]
+    return sorted(rows, key=lambda x: str(x.get("创建", "")), reverse=True)
+
+
+def collect_history_project_standard_events(project_name):
+    proj = str(project_name or "").strip()
+    if not proj:
+        return []
+    return [
+        evt for evt in db.get("系统配置", {}).get("标准事件流", [])
+        if str(evt.get("项目", "")).strip() == proj
+    ]
+
+
 def analyze_standard_event_confidence(evt_obj):
     evt = evt_obj if isinstance(evt_obj, dict) else {}
     score = 100
@@ -12740,242 +12774,246 @@ elif menu == MENU_HISTORY:
             "图片": all_imgs
         })
 
-    done_todos = [
-        td for td in db.get("系统配置", {}).get("PM_TODO_LIST", [])
-        if td.get("完成")
-        and todo_matches_project(td, sel_proj)
-        and str(td.get("完成时间", "")).strip()
-    ]
-
     st.divider()
-    st.subheader("✅ 已完成待办记录（关联此项目）")
-    if done_todos:
-        done_rows = []
-        for td in sorted(done_todos, key=lambda x: x.get("完成时间", ""), reverse=True):
-            done_rows.append({
-                "完成时间": td.get("完成时间", ""),
-                "任务": td.get("任务", ""),
-                "CP/DDL": todo_cpddl_text(td),
-                "关联人员": td.get("关联人员", ""),
-                "创建": td.get("创建", ""),
-            })
-        st.dataframe(pd.DataFrame(done_rows), width="stretch", hide_index=True)
-    else:
-        st.caption("暂无已完成并关联此项目的待办记录。")
-
-    project_todos = [
-        td for td in db.get("系统配置", {}).get("PM_TODO_LIST", [])
-        if todo_matches_project(td, sel_proj)
-    ]
-
-    st.divider()
-    st.subheader("🕒 待办历史演进（关联此项目）")
-    if project_todos:
-        for td in sorted(project_todos, key=lambda x: str(x.get("创建", "")), reverse=True):
-            task_title = str(td.get("任务", "")).strip() or "(空任务)"
-            item_id = str(td.get("_id", "")).strip()
-            scope_txt = todo_scope_of(td)
-            proj_txt = todo_project_text(td) or "(不关联项目)"
-            done_txt = "已完成" if bool(td.get("完成")) else "未完成"
-            with st.expander(f"{task_title} ｜ {done_txt} ｜ {proj_txt}", expanded=False):
-                hist_rows = []
-                for hv in td.get("历史版本", []):
-                    if not isinstance(hv, dict):
-                        continue
-                    hv_proj = normalize_todo_project_list(hv.get("关联项目列表", []))
-                    hist_rows.append({
-                        "版本": "历史",
-                        "时间": str(hv.get("时间", "")).strip(),
-                        "操作者": str(hv.get("操作者", "")).strip() or "系统",
-                        "任务": str(hv.get("任务", "")).strip(),
-                        "CP/DDL": str(hv.get("CPDDL", "")).strip(),
-                        "关联项目": " / ".join(hv_proj) if hv_proj else "(不关联项目)",
-                        "关联人员": str(hv.get("关联人员", "")).strip(),
-                        "所属视角": str(hv.get("所属视角", "")).strip() or scope_txt,
-                        "完成": "是" if bool(hv.get("完成", False)) else "否",
-                    })
-                hist_rows.append({
-                    "版本": "当前",
-                    "时间": str(td.get("完成时间", "")).strip() if bool(td.get("完成")) else str(td.get("创建", "")).strip(),
-                    "操作者": "-",
-                    "任务": task_title,
+    st.subheader("🕒 待办关联历史（关联此项目）")
+    load_todo_history = st.checkbox(
+        "加载待办关联历史（含已完成记录 / 演进）",
+        value=False,
+        key=f"hist_todo_load_{norm_text(sel_proj)}",
+        help="默认延迟加载，避免每次切项目都先遍历整份待办列表。",
+    )
+    if load_todo_history:
+        done_todos = collect_history_done_project_todos(sel_proj)
+        st.markdown("**✅ 已完成待办记录（关联此项目）**")
+        if done_todos:
+            done_rows = []
+            for td in done_todos:
+                done_rows.append({
+                    "完成时间": td.get("完成时间", ""),
+                    "任务": td.get("任务", ""),
                     "CP/DDL": todo_cpddl_text(td),
-                    "关联项目": proj_txt,
-                    "关联人员": str(td.get("关联人员", "")).strip(),
-                    "所属视角": scope_txt,
-                    "完成": "是" if bool(td.get("完成")) else "否",
+                    "关联人员": td.get("关联人员", ""),
+                    "创建": td.get("创建", ""),
                 })
-                st.caption(f"待办 ID: {item_id}")
-                st.dataframe(pd.DataFrame(hist_rows), width="stretch", hide_index=True)
-    else:
-        st.caption("暂无关联此项目的待办历史。")
+            st.dataframe(pd.DataFrame(done_rows), width="stretch", hide_index=True)
+        else:
+            st.caption("暂无已完成并关联此项目的待办记录。")
 
-    standard_events = [
-        evt for evt in db.get("系统配置", {}).get("标准事件流", [])
-        if str(evt.get("项目", "")).strip() == str(sel_proj).strip()
-    ]
+        project_todos = collect_history_project_todos(sel_proj)
+        st.markdown("**🕒 待办历史演进（关联此项目）**")
+        if project_todos:
+            for td in project_todos:
+                task_title = str(td.get("任务", "")).strip() or "(空任务)"
+                item_id = str(td.get("_id", "")).strip()
+                scope_txt = todo_scope_of(td)
+                proj_txt = todo_project_text(td) or "(不关联项目)"
+                done_txt = "已完成" if bool(td.get("完成")) else "未完成"
+                with st.expander(f"{task_title} ｜ {done_txt} ｜ {proj_txt}", expanded=False):
+                    hist_rows = []
+                    for hv in td.get("历史版本", []):
+                        if not isinstance(hv, dict):
+                            continue
+                        hv_proj = normalize_todo_project_list(hv.get("关联项目列表", []))
+                        hist_rows.append({
+                            "版本": "历史",
+                            "时间": str(hv.get("时间", "")).strip(),
+                            "操作者": str(hv.get("操作者", "")).strip() or "系统",
+                            "任务": str(hv.get("任务", "")).strip(),
+                            "CP/DDL": str(hv.get("CPDDL", "")).strip(),
+                            "关联项目": " / ".join(hv_proj) if hv_proj else "(不关联项目)",
+                            "关联人员": str(hv.get("关联人员", "")).strip(),
+                            "所属视角": str(hv.get("所属视角", "")).strip() or scope_txt,
+                            "完成": "是" if bool(hv.get("完成", False)) else "否",
+                        })
+                    hist_rows.append({
+                        "版本": "当前",
+                        "时间": str(td.get("完成时间", "")).strip() if bool(td.get("完成")) else str(td.get("创建", "")).strip(),
+                        "操作者": "-",
+                        "任务": task_title,
+                        "CP/DDL": todo_cpddl_text(td),
+                        "关联项目": proj_txt,
+                        "关联人员": str(td.get("关联人员", "")).strip(),
+                        "所属视角": scope_txt,
+                        "完成": "是" if bool(td.get("完成")) else "否",
+                    })
+                    st.caption(f"待办 ID: {item_id}")
+                    st.dataframe(pd.DataFrame(hist_rows), width="stretch", hide_index=True)
+        else:
+            st.caption("暂无关联此项目的待办历史。")
+    else:
+        st.caption("待办关联历史已改成延迟加载；需要时再勾选，切项目和切部件会轻很多。")
 
     st.divider()
     st.subheader("🔗 统一事件时间线（跨入口互通视图）")
     st.caption("这里会把 To-do、全局大盘、PM 工作台等不同入口的写入，收束成同一种事件结构，便于你回看系统是怎么理解和联动的。")
-    if standard_events:
-        event_source_opts = ["全部来源"] + sorted({
-            str(evt.get("来源", "")).strip() for evt in standard_events if str(evt.get("来源", "")).strip()
-        })
-        event_action_opts = ["全部动作"] + sorted({
-            str(evt.get("动作", "")).strip() for evt in standard_events if str(evt.get("动作", "")).strip()
-        })
-        event_comp_opts = ["全部部件"] + sorted({
-            str(evt.get("部件", "")).strip() for evt in standard_events if str(evt.get("部件", "")).strip()
-        })
+    load_standard_events = st.checkbox(
+        "加载统一事件时间线",
+        value=False,
+        key=f"hist_std_evt_load_{norm_text(sel_proj)}",
+        help="默认延迟加载，避免历史页每次重跑都先扫标准事件流和筛选大表。",
+    )
+    if load_standard_events:
+        standard_events = collect_history_project_standard_events(sel_proj)
+        if standard_events:
+            event_source_opts = ["全部来源"] + sorted({
+                str(evt.get("来源", "")).strip() for evt in standard_events if str(evt.get("来源", "")).strip()
+            })
+            event_action_opts = ["全部动作"] + sorted({
+                str(evt.get("动作", "")).strip() for evt in standard_events if str(evt.get("动作", "")).strip()
+            })
+            event_comp_opts = ["全部部件"] + sorted({
+                str(evt.get("部件", "")).strip() for evt in standard_events if str(evt.get("部件", "")).strip()
+            })
 
-        e1, e2, e3 = st.columns([1, 1, 1.2])
-        with e1:
-            sel_event_source = st.selectbox("来源筛选", event_source_opts, key=f"std_evt_src_{norm_text(sel_proj)}")
-        with e2:
-            sel_event_action = st.selectbox("动作筛选", event_action_opts, key=f"std_evt_act_{norm_text(sel_proj)}")
-        with e3:
-            sel_event_comp = st.selectbox("部件筛选", event_comp_opts, key=f"std_evt_comp_{norm_text(sel_proj)}")
+            e1, e2, e3 = st.columns([1, 1, 1.2])
+            with e1:
+                sel_event_source = st.selectbox("来源筛选", event_source_opts, key=f"std_evt_src_{norm_text(sel_proj)}")
+            with e2:
+                sel_event_action = st.selectbox("动作筛选", event_action_opts, key=f"std_evt_act_{norm_text(sel_proj)}")
+            with e3:
+                sel_event_comp = st.selectbox("部件筛选", event_comp_opts, key=f"std_evt_comp_{norm_text(sel_proj)}")
 
-        filtered_events = []
-        for evt in standard_events:
-            src = str(evt.get("来源", "")).strip()
-            act = str(evt.get("动作", "")).strip()
-            comp = str(evt.get("部件", "")).strip()
-            if sel_event_source != "全部来源" and src != sel_event_source:
-                continue
-            if sel_event_action != "全部动作" and act != sel_event_action:
-                continue
-            if sel_event_comp != "全部部件" and comp != sel_event_comp:
-                continue
-            filtered_events.append(evt)
+            filtered_events = []
+            for evt in standard_events:
+                src = str(evt.get("来源", "")).strip()
+                act = str(evt.get("动作", "")).strip()
+                comp = str(evt.get("部件", "")).strip()
+                if sel_event_source != "全部来源" and src != sel_event_source:
+                    continue
+                if sel_event_action != "全部动作" and act != sel_event_action:
+                    continue
+                if sel_event_comp != "全部部件" and comp != sel_event_comp:
+                    continue
+                filtered_events.append(evt)
 
-        filtered_events = sorted(
-            filtered_events,
-            key=lambda x: (
-                str(x.get("日期", "")),
-                str(x.get("写入时间", "")),
-                str(x.get("_id", "")),
-            ),
-            reverse=True,
-        )
+            filtered_events = sorted(
+                filtered_events,
+                key=lambda x: (
+                    str(x.get("日期", "")),
+                    str(x.get("写入时间", "")),
+                    str(x.get("_id", "")),
+                ),
+                reverse=True,
+            )
 
-        st.caption(f"当前命中 {len(filtered_events)} 条统一事件。适合排查“这条信息从哪里写入、系统为什么生成待办/历史”。")
-        if filtered_events:
-            event_rows = []
-            for evt in filtered_events:
-                todo_links = [str(x).strip() for x in (evt.get("关联待办", []) or []) if str(x).strip()]
-                display_people = get_standard_event_display_people(evt, sel_proj) or "-"
-                event_rows.append({
-                    "日期": str(evt.get("日期", "")),
-                    "来源": str(evt.get("来源", "")),
-                    "动作": str(evt.get("动作", "")),
-                    "部件": str(evt.get("部件", "")) or "-",
-                    "阶段": str(evt.get("阶段", "")) or "-",
-                    "内容": str(evt.get("内容", "")),
-                    "原始文本": str(evt.get("原始文本", "")),
-                    "关联人员": display_people,
-                    "关联待办": " / ".join(todo_links) if todo_links else "-",
-                    "意图": str(evt.get("意图", "")) or "-",
-                    "操作者": str(evt.get("操作者", "")) or "-",
-                    "写入时间": str(evt.get("写入时间", "")) or "-",
-                })
-            st.dataframe(pd.DataFrame(event_rows), width="stretch", hide_index=True)
+            st.caption(f"当前命中 {len(filtered_events)} 条统一事件。适合排查“这条信息从哪里写入、系统为什么生成待办/历史”。")
+            if filtered_events:
+                event_rows = []
+                for evt in filtered_events:
+                    todo_links = [str(x).strip() for x in (evt.get("关联待办", []) or []) if str(x).strip()]
+                    display_people = get_standard_event_display_people(evt, sel_proj) or "-"
+                    event_rows.append({
+                        "日期": str(evt.get("日期", "")),
+                        "来源": str(evt.get("来源", "")),
+                        "动作": str(evt.get("动作", "")),
+                        "部件": str(evt.get("部件", "")) or "-",
+                        "阶段": str(evt.get("阶段", "")) or "-",
+                        "内容": str(evt.get("内容", "")),
+                        "原始文本": str(evt.get("原始文本", "")),
+                        "关联人员": display_people,
+                        "关联待办": " / ".join(todo_links) if todo_links else "-",
+                        "意图": str(evt.get("意图", "")) or "-",
+                        "操作者": str(evt.get("操作者", "")) or "-",
+                        "写入时间": str(evt.get("写入时间", "")) or "-",
+                    })
+                st.dataframe(pd.DataFrame(event_rows), width="stretch", hide_index=True)
 
-            with st.expander("🛠️ 修正这条统一事件并让系统学习", expanded=False):
-                event_pick_options = []
-                event_pick_map = {}
-                for evt in filtered_events[:50]:
-                    evt_id = str(evt.get("_id", "")).strip()
-                    evt_label = " | ".join([
-                        str(evt.get("日期", "")).strip() or "-",
-                        str(evt.get("来源", "")).strip() or "-",
-                        str(evt.get("部件", "")).strip() or "-",
-                        (str(evt.get("内容", "")).strip() or str(evt.get("原始文本", "")).strip() or "-")[:36],
-                    ])
-                    if evt_label in event_pick_map:
-                        evt_label = f"{evt_label} [{evt_id[:4]}]"
-                    event_pick_options.append(evt_label)
-                    event_pick_map[evt_label] = evt
+                with st.expander("🛠️ 修正这条统一事件并让系统学习", expanded=False):
+                    event_pick_options = []
+                    event_pick_map = {}
+                    for evt in filtered_events[:50]:
+                        evt_id = str(evt.get("_id", "")).strip()
+                        evt_label = " | ".join([
+                            str(evt.get("日期", "")).strip() or "-",
+                            str(evt.get("来源", "")).strip() or "-",
+                            str(evt.get("部件", "")).strip() or "-",
+                            (str(evt.get("内容", "")).strip() or str(evt.get("原始文本", "")).strip() or "-")[:36],
+                        ])
+                        if evt_label in event_pick_map:
+                            evt_label = f"{evt_label} [{evt_id[:4]}]"
+                        event_pick_options.append(evt_label)
+                        event_pick_map[evt_label] = evt
 
-                picked_evt_label = st.selectbox(
-                    "选择一条统一事件",
-                    event_pick_options,
-                    key=f"std_evt_pick_{norm_text(sel_proj)}",
-                )
-                picked_evt = event_pick_map.get(picked_evt_label, {})
-                picked_proj = str(picked_evt.get("项目", "")).strip() or sel_proj
-                picked_comp = str(picked_evt.get("部件", "")).strip() or "全局进度"
-                picked_raw = str(picked_evt.get("原始文本", "")).strip()
-                picked_content = str(picked_evt.get("内容", "")).strip()
-
-                corr_project_options = list(dict.fromkeys([sel_proj] + valid_p))
-                corr_component_options = list(dict.fromkeys(
-                    ["全局进度"] + STD_COMPONENTS + list(db.get(sel_proj, {}).get("部件列表", {}).keys())
-                ))
-
-                c1, c2 = st.columns([1.2, 1.2])
-                with c1:
-                    corrected_proj = st.selectbox(
-                        "修正项目",
-                        corr_project_options,
-                        index=corr_project_options.index(picked_proj) if picked_proj in corr_project_options else 0,
-                        key=f"std_evt_fix_proj_{norm_text(sel_proj)}",
+                    picked_evt_label = st.selectbox(
+                        "选择一条统一事件",
+                        event_pick_options,
+                        key=f"std_evt_pick_{norm_text(sel_proj)}",
                     )
-                with c2:
-                    corrected_comp = st.selectbox(
-                        "修正部件",
-                        corr_component_options,
-                        index=corr_component_options.index(picked_comp) if picked_comp in corr_component_options else 0,
-                        key=f"std_evt_fix_comp_{norm_text(sel_proj)}",
+                    picked_evt = event_pick_map.get(picked_evt_label, {})
+                    picked_proj = str(picked_evt.get("项目", "")).strip() or sel_proj
+                    picked_comp = str(picked_evt.get("部件", "")).strip() or "全局进度"
+                    picked_raw = str(picked_evt.get("原始文本", "")).strip()
+                    picked_content = str(picked_evt.get("内容", "")).strip()
+
+                    corr_project_options = list(dict.fromkeys([sel_proj] + valid_p))
+                    corr_component_options = list(dict.fromkeys(
+                        ["全局进度"] + STD_COMPONENTS + list(db.get(sel_proj, {}).get("部件列表", {}).keys())
+                    ))
+
+                    c1, c2 = st.columns([1.2, 1.2])
+                    with c1:
+                        corrected_proj = st.selectbox(
+                            "修正项目",
+                            corr_project_options,
+                            index=corr_project_options.index(picked_proj) if picked_proj in corr_project_options else 0,
+                            key=f"std_evt_fix_proj_{norm_text(sel_proj)}",
+                        )
+                    with c2:
+                        corrected_comp = st.selectbox(
+                            "修正部件",
+                            corr_component_options,
+                            index=corr_component_options.index(picked_comp) if picked_comp in corr_component_options else 0,
+                            key=f"std_evt_fix_comp_{norm_text(sel_proj)}",
+                        )
+
+                    st.caption(f"原始文本：{picked_raw or '-'}")
+                    st.caption(f"当前内容：{picked_content or '-'}")
+
+                    learn_alias = st.checkbox("把这次修正记为项目别名学习", value=(corrected_proj != picked_proj), key=f"std_evt_learn_alias_{norm_text(sel_proj)}")
+                    alias_phrase = st.text_input(
+                        "项目别名关键词（可选）",
+                        value="",
+                        key=f"std_evt_alias_phrase_{norm_text(sel_proj)}",
+                        placeholder="例：6威龙 / 超女 / 小比例neo",
+                    )
+                    learn_comp_kw = st.checkbox("把这次修正记为部件关键词学习", value=(corrected_comp != picked_comp), key=f"std_evt_learn_comp_{norm_text(sel_proj)}")
+                    comp_phrase = st.text_input(
+                        "部件关键词（可选）",
+                        value="",
+                        key=f"std_evt_comp_phrase_{norm_text(sel_proj)}",
+                        placeholder="例：头发 -> 植发；脸/眼 -> 头雕(表情)",
                     )
 
-                st.caption(f"原始文本：{picked_raw or '-'}")
-                st.caption(f"当前内容：{picked_content or '-'}")
+                    if st.button("💾 应用修正并学习", key=f"std_evt_apply_fix_{norm_text(sel_proj)}", type="primary"):
+                        changed_any = False
+                        if picked_evt:
+                            if str(picked_evt.get("项目", "")).strip() != corrected_proj:
+                                picked_evt["项目"] = corrected_proj
+                                changed_any = True
+                            if str(picked_evt.get("部件", "")).strip() != corrected_comp:
+                                picked_evt["部件"] = corrected_comp
+                                changed_any = True
 
-                learn_alias = st.checkbox("把这次修正记为项目别名学习", value=(corrected_proj != picked_proj), key=f"std_evt_learn_alias_{norm_text(sel_proj)}")
-                alias_phrase = st.text_input(
-                    "项目别名关键词（可选）",
-                    value="",
-                    key=f"std_evt_alias_phrase_{norm_text(sel_proj)}",
-                    placeholder="例：6威龙 / 超女 / 小比例neo",
-                )
-                learn_comp_kw = st.checkbox("把这次修正记为部件关键词学习", value=(corrected_comp != picked_comp), key=f"std_evt_learn_comp_{norm_text(sel_proj)}")
-                comp_phrase = st.text_input(
-                    "部件关键词（可选）",
-                    value="",
-                    key=f"std_evt_comp_phrase_{norm_text(sel_proj)}",
-                    placeholder="例：头发 -> 植发；脸/眼 -> 头雕(表情)",
-                )
-
-                if st.button("💾 应用修正并学习", key=f"std_evt_apply_fix_{norm_text(sel_proj)}", type="primary"):
-                    changed_any = False
-                    if picked_evt:
-                        if str(picked_evt.get("项目", "")).strip() != corrected_proj:
-                            picked_evt["项目"] = corrected_proj
+                        sys_cfg = db.setdefault("系统配置", {})
+                        if learn_alias and alias_phrase.strip() and corrected_proj:
+                            sys_cfg.setdefault("项目别名", {})[norm_text(alias_phrase)] = corrected_proj
                             changed_any = True
-                        if str(picked_evt.get("部件", "")).strip() != corrected_comp:
-                            picked_evt["部件"] = corrected_comp
+                        if learn_comp_kw and comp_phrase.strip() and corrected_comp:
+                            sys_cfg.setdefault("AI_COMP_KW", {})[comp_phrase.strip()] = corrected_comp
                             changed_any = True
 
-                    sys_cfg = db.setdefault("系统配置", {})
-                    if learn_alias and alias_phrase.strip() and corrected_proj:
-                        sys_cfg.setdefault("项目别名", {})[norm_text(alias_phrase)] = corrected_proj
-                        changed_any = True
-                    if learn_comp_kw and comp_phrase.strip() and corrected_comp:
-                        sys_cfg.setdefault("AI_COMP_KW", {})[comp_phrase.strip()] = corrected_comp
-                        changed_any = True
-
-                    if changed_any:
-                        sync_save_db("系统配置")
-                        st.success("已应用修正，并保存学习结果。")
-                        st.rerun()
-                    else:
-                        st.info("没有检测到需要保存的修正。")
+                        if changed_any:
+                            sync_save_db("系统配置")
+                            st.success("已应用修正，并保存学习结果。")
+                            st.rerun()
+                        else:
+                            st.info("没有检测到需要保存的修正。")
+            else:
+                st.caption("当前筛选条件下暂无统一事件。")
         else:
-            st.caption("当前筛选条件下暂无统一事件。")
+            st.caption("这个项目还没有统一事件记录。后续从 To-do / 全局大盘 / PM 工作台写入后，会自动在这里汇总。")
     else:
-        st.caption("这个项目还没有统一事件记录。后续从 To-do / 全局大盘 / PM 工作台写入后，会自动在这里汇总。")
+        st.caption("统一事件时间线已改成延迟加载；需要排查串联时再勾选即可。")
 
     if flat_data:
         df_logs = pd.DataFrame(flat_data).sort_values(by="日期", ascending=False).reset_index(drop=True)

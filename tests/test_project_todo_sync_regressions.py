@@ -1032,5 +1032,45 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         self.assertEqual(result["comp_map"][result["rows"][0]["_id"]], "头雕(表情)")
         self.assertEqual(result["seeded_projects"], {"1/6超女"})
 
+    def test_collect_history_project_todos_filters_and_sorts_related_items(self) -> None:
+        ns = load_app_functions("collect_history_done_project_todos", "collect_history_project_todos")
+        globals_map = ns.collect_history_project_todos.__globals__
+        globals_map["todo_matches_project"] = lambda td, proj: proj in list(td.get("关联项目列表", []) or [td.get("关联项目", "")])
+        ns.db.update(
+            {
+                "系统配置": {
+                    "PM_TODO_LIST": [
+                        {"任务": "先建旧记录", "创建": "2026-03-01", "完成": False, "关联项目列表": ["1/6超女"]},
+                        {"任务": "后建已完成", "创建": "2026-03-10", "完成": True, "完成时间": "2026-03-22", "关联项目列表": ["1/6超女"]},
+                        {"任务": "别的项目", "创建": "2026-03-20", "完成": True, "完成时间": "2026-03-23", "关联项目列表": ["1/6马尔福"]},
+                    ]
+                }
+            }
+        )
+
+        all_rows = ns.collect_history_project_todos("1/6超女")
+        done_rows = ns.collect_history_done_project_todos("1/6超女")
+
+        self.assertEqual([row["任务"] for row in all_rows], ["后建已完成", "先建旧记录"])
+        self.assertEqual([row["任务"] for row in done_rows], ["后建已完成"])
+
+    def test_collect_history_project_standard_events_filters_current_project(self) -> None:
+        ns = load_app_functions("collect_history_project_standard_events")
+        ns.db.update(
+            {
+                "系统配置": {
+                    "标准事件流": [
+                        {"项目": "1/6超女", "内容": "头雕待收件"},
+                        {"项目": "1/6马尔福", "内容": "官图推进"},
+                    ]
+                }
+            }
+        )
+
+        rows = ns.collect_history_project_standard_events("1/6超女")
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["内容"], "头雕待收件")
+
 if __name__ == "__main__":
     unittest.main()
