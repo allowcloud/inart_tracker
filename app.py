@@ -1977,7 +1977,7 @@ def persist_db_scope(changed_proj=None):
         db_manager.save(st.session_state.db)
 
 
-def sync_save_db(changed_proj=None):
+def sync_save_db(changed_proj=None, recompute_scope="auto"):
     """
     changed_proj: save one project key when provided.
     otherwise save all projects.
@@ -1988,10 +1988,18 @@ def sync_save_db(changed_proj=None):
     canonicalize_all_project_references()
     if changed_proj and changed_proj not in st.session_state.db:
         changed_proj = None
-    if changed_proj and changed_proj in st.session_state.db and changed_proj != "\u7cfb\u7edf\u914d\u7f6e":
-        recompute_project_derived_state(changed_proj)
-    else:
+
+    scope = str(recompute_scope or "auto").strip() or "auto"
+    if scope == "all":
         recompute_all_project_derived_states()
+    elif scope == "project":
+        if changed_proj and changed_proj in st.session_state.db and changed_proj != "\u7cfb\u7edf\u914d\u7f6e":
+            recompute_project_derived_state(changed_proj)
+    elif scope != "none":
+        if changed_proj and changed_proj in st.session_state.db and changed_proj != "\u7cfb\u7edf\u914d\u7f6e":
+            recompute_project_derived_state(changed_proj)
+        elif not changed_proj:
+            recompute_all_project_derived_states()
     persist_db_scope(changed_proj)
 
 
@@ -5145,6 +5153,65 @@ def append_history_refresh_standard_event(project_name, actor="系统"):
         actor=actor,
         extra_payload={"来源流转": str(lg.get("流转", "")).strip()},
     )
+
+
+def build_history_day_scope_rows(scope_projects):
+    rows = []
+    log_ref = {}
+    proj_map = {}
+    comp_map = {}
+    seeded_projects = set()
+
+    for p_name in [p for p in (scope_projects or []) if p in db and p != "系统配置"]:
+        p_data = db.get(p_name, {})
+        for c_name, c_info in p_data.get("部件列表", {}).items():
+            for lg in c_info.get("日志流", []):
+                if is_hidden_system_log(lg):
+                    continue
+                if ("_id" not in lg) or (not str(lg.get("_id", "")).strip()):
+                    lg["_id"] = str(uuid.uuid4())
+                    seeded_projects.add(p_name)
+
+                lid = str(lg.get("_id", "")).strip()
+                if not lid:
+                    continue
+
+                log_ref[lid] = lg
+                proj_map[lid] = p_name
+                comp_map[lid] = c_name
+
+                rv_type = normalize_review_type(lg.get("提审类型", "(无)") or "(无)")
+                rv_res = str(lg.get("提审结果", "(无)") or "(无)")
+                if rv_type == "(无)" and rv_res == "(无)":
+                    rv_state = "(无)"
+                elif rv_type != "(无)" and rv_res == "(无)":
+                    rv_state = f"{rv_type} / 待补结果"
+                elif rv_type == "(无)" and rv_res != "(无)":
+                    rv_state = f"仅结果:{rv_res}"
+                else:
+                    rv_state = f"{rv_type} / {rv_res}"
+
+                rows.append({
+                    "_id": lid,
+                    "项目": p_name,
+                    "部件": c_name,
+                    "日期": str(lg.get("日期", "")),
+                    "工序": str(lg.get("工序", "")),
+                    "类型": str(lg.get("流转", "")),
+                    "事件": str(lg.get("事件", "")),
+                    "提审类型": rv_type,
+                    "提审结果": rv_res,
+                    "提审状态": rv_state,
+                    "提审轮次": normalize_review_round(lg.get("提审轮次", "")),
+                })
+
+    return {
+        "rows": rows,
+        "log_ref": log_ref,
+        "proj_map": proj_map,
+        "comp_map": comp_map,
+        "seeded_projects": seeded_projects,
+    }
 
 
 def analyze_standard_event_confidence(evt_obj):
@@ -12918,227 +12985,193 @@ elif menu == MENU_HISTORY:
         if not scope_projects:
             scope_projects = valid_p
 
-        day_global_rows = []
-        day_global_log_ref = {}
-        day_global_proj_map = {}
-        day_global_comp_map = {}
-        seeded_projects = set()
+        load_day_tool = st.checkbox(
+            "加载跨项目按日修正工具",
+            value=False,
+            key=f"hist_day_load_{norm_text(current_pm)}_{norm_text(sel_proj)}",
+            help="这个工具会遍历当前视角下多项目日志，默认延迟加载，避免历史页每次重跑都先扫全量。",
+        )
 
-        for p_name in scope_projects:
-            p_data = db.get(p_name, {})
-            for c_name, c_info in p_data.get("部件列表", {}).items():
-                for lg in c_info.get("日志流", []):
-                    if is_hidden_system_log(lg):
-                        continue
-                    if ("_id" not in lg) or (not str(lg.get("_id", "")).strip()):
-                        lg["_id"] = str(uuid.uuid4())
-                        seeded_projects.add(p_name)
+        if load_day_tool:
+            day_scope_state = build_history_day_scope_rows(scope_projects)
+            day_global_log_ref = day_scope_state["log_ref"]
+            day_global_proj_map = day_scope_state["proj_map"]
+            day_global_comp_map = day_scope_state["comp_map"]
 
-                    lid = str(lg.get("_id", "")).strip()
-                    if not lid:
-                        continue
+            if day_scope_state["seeded_projects"]:
+                for p_name in sorted(day_scope_state["seeded_projects"]):
+                    sync_save_db(p_name)
 
-                    day_global_log_ref[lid] = lg
-                    day_global_proj_map[lid] = p_name
-                    day_global_comp_map[lid] = c_name
-
-                    rv_type = normalize_review_type(lg.get("提审类型", "(无)") or "(无)")
-                    rv_res = str(lg.get("提审结果", "(无)") or "(无)")
-                    if rv_type == "(无)" and rv_res == "(无)":
-                        rv_state = "(无)"
-                    elif rv_type != "(无)" and rv_res == "(无)":
-                        rv_state = f"{rv_type} / 待补结果"
-                    elif rv_type == "(无)" and rv_res != "(无)":
-                        rv_state = f"仅结果:{rv_res}"
-                    else:
-                        rv_state = f"{rv_type} / {rv_res}"
-
-                    day_global_rows.append({
-                        "_id": lid,
-                        "项目": p_name,
-                        "部件": c_name,
-                        "日期": str(lg.get("日期", "")),
-                        "工序": str(lg.get("工序", "")),
-                        "类型": str(lg.get("流转", "")),
-                        "事件": str(lg.get("事件", "")),
-                        "提审类型": rv_type,
-                        "提审结果": rv_res,
-                        "提审状态": rv_state,
-                        "提审轮次": normalize_review_round(lg.get("提审轮次", "")),
-                    })
-
-        if seeded_projects:
-            for p_name in sorted(seeded_projects):
-                sync_save_db(p_name)
-
-        day_global_df = pd.DataFrame(day_global_rows)
-        with st.expander("📅 按日查看 / 修正操作历史", expanded=False):
-            day_scope_key = norm_text(current_pm)
-            day_scope_mode = st.radio(
-                "查看范围",
-                ["当前项目", "当前视角全项目"],
-                horizontal=True,
-                key=f"hist_day_scope_mode_{day_scope_key}_{norm_text(sel_proj)}",
-            )
-
-            if day_scope_mode == "当前项目":
-                day_base_df = day_global_df[day_global_df["项目"].astype(str) == str(sel_proj)].copy() if not day_global_df.empty else pd.DataFrame()
-                if sel_comp != "🌐 全部展示" and (not day_base_df.empty):
-                    day_base_df = day_base_df[day_base_df["部件"].astype(str) == str(sel_comp)].copy()
-                st.caption("这里和下方历史日志保持同一项目上下文；如果上面还筛了特定部件，这里也会一起跟随。")
-                day_empty_text = "当前项目在该过滤范围下暂无可按日查看的历史记录。"
-                day_save_scope_label = "当前项目"
-            else:
-                day_base_df = day_global_df.copy()
-                st.caption("这里是当前视角下的全项目工具，不受上方项目/部件筛选限制，适合做跨项目的同日修正。")
-                day_empty_text = "当前视角下无可按日查看的历史记录。"
-                day_save_scope_label = "当前视角全项目"
-
-            day_date_values = day_base_df["日期"].tolist() if "日期" in day_base_df.columns else []
-            day_options = sorted(
-                {str(x).strip() for x in day_date_values if str(x).strip()},
-                reverse=True,
-            )
-            if day_options:
-                sel_day = st.selectbox("选择日期", day_options, key=f"hist_day_pick_scope_{day_scope_key}_{norm_text(sel_proj)}_{day_scope_mode}")
-                day_source_df = day_base_df[day_base_df["日期"].astype(str) == str(sel_day)].copy()
-                day_source_df = day_source_df.sort_values(by=["项目", "部件", "日期"]).reset_index(drop=True)
-                if day_scope_mode == "当前项目":
-                    st.caption(f"当前项目在 {sel_day} 共 {len(day_source_df)} 条记录。支持编辑或勾选删除。")
-                else:
-                    st.caption(f"当前视角下 {sel_day} 共 {len(day_source_df)} 条记录。支持编辑或勾选删除。")
-
-                day_edit_df = day_source_df.drop(columns=["_id"]).copy()
-                day_edit_df["删除"] = False
-                st.caption("如果要改之前写过的提审补充说明，请直接修改下方“事件 / 提审补充说明”这一列；提审类型/结果/轮次改右侧对应列。")
-                day_edited_df = st.data_editor(
-                    day_edit_df,
-                    column_config={
-                        "项目": st.column_config.TextColumn(disabled=True),
-                        "部件": st.column_config.TextColumn(disabled=True),
-                        "日期": st.column_config.TextColumn("日期"),
-                        "工序": st.column_config.SelectboxColumn("工序", options=STAGES_UNIFIED, required=True),
-                        "类型": st.column_config.TextColumn("类型"),
-                        "事件": st.column_config.TextColumn("事件 / 提审补充说明"),
-                        "提审类型": st.column_config.SelectboxColumn("提审类型", options=REVIEW_TYPE_OPTIONS, required=True),
-                        "提审结果": st.column_config.SelectboxColumn("提审结果", options=REVIEW_RESULT_OPTIONS, required=True),
-                        "提审状态": st.column_config.TextColumn("提审状态", disabled=True),
-                        "提审轮次": st.column_config.NumberColumn("提审轮次", min_value=1, step=1),
-                        "删除": st.column_config.CheckboxColumn("删除"),
-                    },
-                    num_rows="fixed",
-                    width='stretch',
-                    key=f"hist_day_editor_scope_{day_scope_key}_{norm_text(sel_proj)}_{sel_day}_{day_scope_mode}",
+            day_global_df = pd.DataFrame(day_scope_state["rows"])
+            with st.expander("📅 按日查看 / 修正操作历史", expanded=True):
+                day_scope_key = norm_text(current_pm)
+                day_scope_mode = st.radio(
+                    "查看范围",
+                    ["当前项目", "当前视角全项目"],
+                    horizontal=True,
+                    key=f"hist_day_scope_mode_{day_scope_key}_{norm_text(sel_proj)}",
                 )
 
-                if st.button(f"💾 保存当日修正（{day_save_scope_label}）", type="primary", key=f"btn_hist_day_save_scope_{day_scope_key}_{norm_text(sel_proj)}_{sel_day}_{day_scope_mode}"):
-                    touched_projects = set()
-                    update_count = 0
-                    delete_count = 0
-                    day_errors = []
-                    delete_ids = set()
+                if day_scope_mode == "当前项目":
+                    day_base_df = day_global_df[day_global_df["项目"].astype(str) == str(sel_proj)].copy() if not day_global_df.empty else pd.DataFrame()
+                    if sel_comp != "🌐 全部展示" and (not day_base_df.empty):
+                        day_base_df = day_base_df[day_base_df["部件"].astype(str) == str(sel_comp)].copy()
+                    st.caption("这里和下方历史日志保持同一项目上下文；如果上面还筛了特定部件，这里也会一起跟随。")
+                    day_empty_text = "当前项目在该过滤范围下暂无可按日查看的历史记录。"
+                    day_save_scope_label = "当前项目"
+                else:
+                    day_base_df = day_global_df.copy()
+                    st.caption("这里是当前视角下的全项目工具，不受上方项目/部件筛选限制，适合做跨项目的同日修正。")
+                    day_empty_text = "当前视角下无可按日查看的历史记录。"
+                    day_save_scope_label = "当前视角全项目"
 
-                    for ridx, row in day_edited_df.iterrows():
-                        lid = str(day_source_df.at[ridx, "_id"]).strip() if ridx in day_source_df.index else ""
-                        if not lid:
-                            continue
+                day_date_values = day_base_df["日期"].tolist() if "日期" in day_base_df.columns else []
+                day_options = sorted(
+                    {str(x).strip() for x in day_date_values if str(x).strip()},
+                    reverse=True,
+                )
+                if day_options:
+                    sel_day = st.selectbox("选择日期", day_options, key=f"hist_day_pick_scope_{day_scope_key}_{norm_text(sel_proj)}_{day_scope_mode}")
+                    day_source_df = day_base_df[day_base_df["日期"].astype(str) == str(sel_day)].copy()
+                    day_source_df = day_source_df.sort_values(by=["项目", "部件", "日期"]).reset_index(drop=True)
+                    if day_scope_mode == "当前项目":
+                        st.caption(f"当前项目在 {sel_day} 共 {len(day_source_df)} 条记录。支持编辑或勾选删除。")
+                    else:
+                        st.caption(f"当前视角下 {sel_day} 共 {len(day_source_df)} 条记录。支持编辑或勾选删除。")
 
-                        proj_name = str(day_global_proj_map.get(lid, "")).strip()
+                    day_edit_df = day_source_df.drop(columns=["_id"]).copy()
+                    day_edit_df["删除"] = False
+                    st.caption("如果要改之前写过的提审补充说明，请直接修改下方“事件 / 提审补充说明”这一列；提审类型/结果/轮次改右侧对应列。")
+                    day_edited_df = st.data_editor(
+                        day_edit_df,
+                        column_config={
+                            "项目": st.column_config.TextColumn(disabled=True),
+                            "部件": st.column_config.TextColumn(disabled=True),
+                            "日期": st.column_config.TextColumn("日期"),
+                            "工序": st.column_config.SelectboxColumn("工序", options=STAGES_UNIFIED, required=True),
+                            "类型": st.column_config.TextColumn("类型"),
+                            "事件": st.column_config.TextColumn("事件 / 提审补充说明"),
+                            "提审类型": st.column_config.SelectboxColumn("提审类型", options=REVIEW_TYPE_OPTIONS, required=True),
+                            "提审结果": st.column_config.SelectboxColumn("提审结果", options=REVIEW_RESULT_OPTIONS, required=True),
+                            "提审状态": st.column_config.TextColumn("提审状态", disabled=True),
+                            "提审轮次": st.column_config.NumberColumn("提审轮次", min_value=1, step=1),
+                            "删除": st.column_config.CheckboxColumn("删除"),
+                        },
+                        num_rows="fixed",
+                        width='stretch',
+                        key=f"hist_day_editor_scope_{day_scope_key}_{norm_text(sel_proj)}_{sel_day}_{day_scope_mode}",
+                    )
 
-                        if bool(row.get("删除", False)):
-                            delete_ids.add(lid)
-                            if proj_name:
-                                touched_projects.add(proj_name)
-                            continue
+                    if st.button(f"💾 保存当日修正（{day_save_scope_label}）", type="primary", key=f"btn_hist_day_save_scope_{day_scope_key}_{norm_text(sel_proj)}_{sel_day}_{day_scope_mode}"):
+                        touched_projects = set()
+                        update_count = 0
+                        delete_count = 0
+                        day_errors = []
+                        delete_ids = set()
 
-                        new_date = str(row.get("日期", "")).strip() or str(day_source_df.at[ridx, "日期"]).strip()
-                        if parse_date_safe(new_date) is None:
-                            day_errors.append(f"{proj_name or '-'}: 无效日期 {new_date}")
-                            continue
+                        for ridx, row in day_edited_df.iterrows():
+                            lid = str(day_source_df.at[ridx, "_id"]).strip() if ridx in day_source_df.index else ""
+                            if not lid:
+                                continue
 
-                        new_stage = str(row.get("工序", "")).strip() or str(day_source_df.at[ridx, "工序"]).strip()
-                        if new_stage not in STAGES_UNIFIED:
-                            new_stage = str(day_source_df.at[ridx, "工序"]).strip()
+                            proj_name = str(day_global_proj_map.get(lid, "")).strip()
 
-                        new_type = str(row.get("类型", "")).strip() or str(day_source_df.at[ridx, "类型"]).strip()
-                        new_event = str(row.get("事件", "")).strip() or str(day_source_df.at[ridx, "事件"]).strip()
+                            if bool(row.get("删除", False)):
+                                delete_ids.add(lid)
+                                if proj_name:
+                                    touched_projects.add(proj_name)
+                                continue
 
-                        new_rt = normalize_review_type(row.get("提审类型", "(无)")) or "(无)"
-                        if new_rt not in REVIEW_TYPE_OPTIONS:
-                            new_rt = "(无)"
-                        new_rr = str(row.get("提审结果", "(无)")).strip() or "(无)"
-                        if new_rr not in REVIEW_RESULT_OPTIONS:
-                            new_rr = "(无)"
-                        new_round = normalize_review_round(row.get("提审轮次", "")) if new_rt != "(无)" else ""
+                            new_date = str(row.get("日期", "")).strip() or str(day_source_df.at[ridx, "日期"]).strip()
+                            if parse_date_safe(new_date) is None:
+                                day_errors.append(f"{proj_name or '-'}: 无效日期 {new_date}")
+                                continue
 
-                        lg = day_global_log_ref.get(lid)
-                        if not isinstance(lg, dict):
-                            continue
+                            new_stage = str(row.get("工序", "")).strip() or str(day_source_df.at[ridx, "工序"]).strip()
+                            if new_stage not in STAGES_UNIFIED:
+                                new_stage = str(day_source_df.at[ridx, "工序"]).strip()
 
-                        changed = False
-                        if str(lg.get("日期", "")) != new_date:
-                            lg["日期"] = new_date
-                            changed = True
-                        if str(lg.get("工序", "")) != new_stage:
-                            lg["工序"] = new_stage
-                            changed = True
-                        if str(lg.get("流转", "")) != new_type:
-                            lg["流转"] = new_type
-                            changed = True
-                        if str(lg.get("事件", "")) != new_event:
-                            lg["事件"] = new_event
-                            changed = True
-                        if normalize_review_type(lg.get("提审类型", "(无)")) != new_rt:
-                            lg["提审类型"] = new_rt
-                            changed = True
-                        if str(lg.get("提审结果", "(无)")) != new_rr:
-                            lg["提审结果"] = new_rr
-                            changed = True
-                        if str(lg.get("提审轮次", "")) != str(new_round):
-                            lg["提审轮次"] = new_round
-                            changed = True
+                            new_type = str(row.get("类型", "")).strip() or str(day_source_df.at[ridx, "类型"]).strip()
+                            new_event = str(row.get("事件", "")).strip() or str(day_source_df.at[ridx, "事件"]).strip()
 
-                        if changed:
-                            update_count += 1
-                            if proj_name:
-                                touched_projects.add(proj_name)
+                            new_rt = normalize_review_type(row.get("提审类型", "(无)")) or "(无)"
+                            if new_rt not in REVIEW_TYPE_OPTIONS:
+                                new_rt = "(无)"
+                            new_rr = str(row.get("提审结果", "(无)")).strip() or "(无)"
+                            if new_rr not in REVIEW_RESULT_OPTIONS:
+                                new_rr = "(无)"
+                            new_round = normalize_review_round(row.get("提审轮次", "")) if new_rt != "(无)" else ""
 
-                    if delete_ids:
-                        for proj_name in sorted({day_global_proj_map.get(lid, "") for lid in delete_ids if day_global_proj_map.get(lid, "")}):
-                            for c_name, c_info in db.get(proj_name, {}).get("部件列表", {}).items():
-                                logs_old = c_info.get("日志流", [])
-                                logs_new = [lg for lg in logs_old if str((lg or {}).get("_id", "")).strip() not in delete_ids]
-                                removed = len(logs_old) - len(logs_new)
-                                if removed > 0:
-                                    c_info["日志流"] = logs_new
-                                    delete_count += removed
+                            lg = day_global_log_ref.get(lid)
+                            if not isinstance(lg, dict):
+                                continue
+
+                            changed = False
+                            if str(lg.get("日期", "")) != new_date:
+                                lg["日期"] = new_date
+                                changed = True
+                            if str(lg.get("工序", "")) != new_stage:
+                                lg["工序"] = new_stage
+                                changed = True
+                            if str(lg.get("流转", "")) != new_type:
+                                lg["流转"] = new_type
+                                changed = True
+                            if str(lg.get("事件", "")) != new_event:
+                                lg["事件"] = new_event
+                                changed = True
+                            if normalize_review_type(lg.get("提审类型", "(无)")) != new_rt:
+                                lg["提审类型"] = new_rt
+                                changed = True
+                            if str(lg.get("提审结果", "(无)")) != new_rr:
+                                lg["提审结果"] = new_rr
+                                changed = True
+                            if str(lg.get("提审轮次", "")) != str(new_round):
+                                lg["提审轮次"] = new_round
+                                changed = True
+
+                            if changed:
+                                update_count += 1
+                                if proj_name:
                                     touched_projects.add(proj_name)
 
-                    if touched_projects:
-                        history_event_dirty = False
-                        for proj_name in sorted(touched_projects):
-                            for c_info in db.get(proj_name, {}).get("部件列表", {}).values():
-                                c_info["日志流"] = sorted(c_info.get("日志流", []), key=lambda x: str((x or {}).get("日期", "")))
-                            sync_save_db(proj_name)
-                            history_event_dirty = append_history_refresh_standard_event(
-                                proj_name,
-                                actor=current_pm if current_pm != "所有人" else "系统",
-                            ) or history_event_dirty
-                        if history_event_dirty:
-                            sync_save_db("系统配置")
+                        if delete_ids:
+                            for proj_name in sorted({day_global_proj_map.get(lid, "") for lid in delete_ids if day_global_proj_map.get(lid, "")}):
+                                for c_name, c_info in db.get(proj_name, {}).get("部件列表", {}).items():
+                                    logs_old = c_info.get("日志流", [])
+                                    logs_new = [lg for lg in logs_old if str((lg or {}).get("_id", "")).strip() not in delete_ids]
+                                    removed = len(logs_old) - len(logs_new)
+                                    if removed > 0:
+                                        c_info["日志流"] = logs_new
+                                        delete_count += removed
+                                        touched_projects.add(proj_name)
 
-                        msg = f"当日修正已保存：更新 {update_count} 条，删除 {delete_count} 条，影响 {len(touched_projects)} 个项目，并已刷新当前解释 / To-do 最近联动。"
-                        if day_errors:
-                            msg += f" 另有 {len(day_errors)} 条日期无效已跳过。"
-                        st.success(msg)
-                        st.rerun()
-                    else:
-                        if day_errors:
-                            st.warning("\n".join(day_errors[:8]))
+                        if touched_projects:
+                            history_event_dirty = False
+                            for proj_name in sorted(touched_projects):
+                                for c_info in db.get(proj_name, {}).get("部件列表", {}).values():
+                                    c_info["日志流"] = sorted(c_info.get("日志流", []), key=lambda x: str((x or {}).get("日期", "")))
+                                sync_save_db(proj_name)
+                                history_event_dirty = append_history_refresh_standard_event(
+                                    proj_name,
+                                    actor=current_pm if current_pm != "所有人" else "系统",
+                                ) or history_event_dirty
+                            if history_event_dirty:
+                                sync_save_db("系统配置")
+
+                            msg = f"当日修正已保存：更新 {update_count} 条，删除 {delete_count} 条，影响 {len(touched_projects)} 个项目，并已刷新当前解释 / To-do 最近联动。"
+                            if day_errors:
+                                msg += f" 另有 {len(day_errors)} 条日期无效已跳过。"
+                            st.success(msg)
+                            st.rerun()
                         else:
-                            st.info("当日无可保存变更。")
-            else:
-                st.caption(day_empty_text)
+                            if day_errors:
+                                st.warning("\n".join(day_errors[:8]))
+                            else:
+                                st.info("当日无可保存变更。")
+                else:
+                    st.caption(day_empty_text)
+        else:
+            st.caption("跨项目按日修正工具已改成延迟加载；需要时再勾选，上面的历史页会顺很多。")
 
         review_ctx = df_logs["事件"].astype(str).str.contains(r"提审|过审|review|打回|驳回|退回|待反馈|2d|3d|二维|三维|实物提审|产品图提审|官图提审|包装提审", case=False, regex=True)
         mismatch_mask = (df_logs['提审类型'].astype(str) == '(无)') & (df_logs['提审结果'].astype(str).isin(['待反馈', '通过', '打回'])) & (~review_ctx)
