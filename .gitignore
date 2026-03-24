@@ -1,2 +1,8 @@
 tracker_data_web_v20.json
 tracker_data_web_v20.json.migrated
+__pycache__/
+*/__pycache__/
+*.py[cod]
+_tmp/
+build/
+dist/

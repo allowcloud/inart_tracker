@@ -803,12 +803,12 @@ PRINT_TRACK_SOURCE_LABELS = {
 }
 DEFAULT_COMPONENT_KEYWORDS = {
     "头雕": "头雕(表情)", "表情": "头雕(表情)", "头": "头雕(表情)", "眼": "头雕(表情)", "脸": "头雕(表情)",
-    "植发": "植发", "头发": "植发", "发": "植发",
+    "植发": "植发", "头发": "植发", "发": "植发", "马海毛": "头雕(表情)", "毛到货": "头雕(表情)",
     "手": "手型", "手型": "手型",
     "衣": "服装", "服": "服装", "服装": "服装", "鞋": "服装", "鞋子": "服装", "靴": "服装", "靴子": "服装",
     "包": "包装", "盒": "包装", "包装": "包装",
     "地台": "地台",
-    "扣": "配件", "法杖": "配件", "杯": "配件", "剑": "配件", "配件": "配件",
+    "扣": "配件", "扣子": "配件", "桩位": "配件", "卡位": "配件", "法杖": "配件", "杯": "配件", "剑": "配件", "配件": "配件",
 }
 DEFAULT_STAGE_KEYWORDS = {
     "定价": "立项", "评估": "立项", "开定": "立项",
@@ -825,6 +825,8 @@ DEFAULT_COMPONENT_SPLIT_KEYWORDS = {
     "头雕": "头雕(表情)",
     "表情": "头雕(表情)",
     "脸": "头雕(表情)",
+    "马海毛": "头雕(表情)",
+    "毛到货": "头雕(表情)",
     "植发": "植发",
     "头发": "植发",
     "手型": "手型",
@@ -833,6 +835,8 @@ DEFAULT_COMPONENT_SPLIT_KEYWORDS = {
     "靴子": "服装",
     "包装": "包装",
     "地台": "地台",
+    "扣子": "配件",
+    "桩位": "配件",
     "配件": "配件",
 }
 DEFAULT_RECOGNITION_DICT = {
@@ -867,9 +871,9 @@ def _deep_copy_obj(obj):
 
 
 def compute_stale_doc_keys(existing_keys, target_keys):
-    existing = [str(x).strip() for x in (existing_keys or []) if str(x).strip()]
-    target = {str(x).strip() for x in (target_keys or []) if str(x).strip()}
-    return [key for key in existing if key not in target]
+    from core.shared_logic import compute_stale_doc_keys as _impl
+
+    return _impl(existing_keys, target_keys)
 
 
 def get_recognition_dict():
@@ -1265,75 +1269,18 @@ def _get_cached_mongo_manager(uri, cache_buster=DB_MANAGER_CACHE_BUSTER):
 
 
 def _build_db_manager(force_local=False):
-    if os.environ.get("INART_ALLOW_MEMORY_DB", "").strip() == "1":
-        return _MemoryDBManager()
-    if force_local:
-        raise RuntimeError("当前版本已禁用本地 JSON 存储，仅支持 MongoDB。")
+    from core.storage import build_storage_manager
 
-    mongo_uri = _get_mongo_uri()
-    if not mongo_uri:
-        return _MongoDBManager(mongo_uri)
-
-    manager = _get_cached_mongo_manager(mongo_uri, DB_MANAGER_CACHE_BUSTER)
-    required_methods = ["load", "save", "save_one", "save_file_bytes", "read_file_bytes", "import_file_bytes"]
-    missing = [name for name in required_methods if not hasattr(manager, name)]
-    if missing:
-        st.warning(f"数据库管理器缺少必要方法，已重建实例：{', '.join(missing)}")
-        manager = _MongoDBManager(mongo_uri)
-
-    if isinstance(manager, _MongoDBManager):
-        manager.PyMongoError = getattr(manager, "PyMongoError", Exception)
-        manager.NoFile = getattr(manager, "NoFile", FileNotFoundError)
-        manager.ObjectId = getattr(manager, "ObjectId", (lambda raw: raw))
-        manager.init_error = str(getattr(manager, "init_error", "") or "")
-        manager.client = getattr(manager, "client", None)
-        manager.col = getattr(manager, "col", None)
-        manager.fs = getattr(manager, "fs", None)
-
-    return manager
+    return build_storage_manager(
+        force_local=force_local,
+        json_path="tracker_data_web_v20.json",
+        mongo_uri=_get_mongo_uri(),
+        prefer_local=True,
+    )
 def _ensure_db_shape(db_obj):
-    if not isinstance(db_obj, dict):
-        db_obj = {}
-    cfg_key = "系统配置"
-    cfg = db_obj.get(cfg_key)
-    if not isinstance(cfg, dict):
-        db_obj[cfg_key] = {}
-        cfg = db_obj[cfg_key]
-    for k, v in DEFAULT_SYS_CFG.items():
-        if k not in cfg:
-            cfg[k] = _deep_copy_obj(v)
-    if not isinstance(cfg.get("\u6253\u5370\u8ffd\u8e2a\u5217\u8868"), list):
-        cfg["\u6253\u5370\u8ffd\u8e2a\u5217\u8868"] = []
-    if not isinstance(cfg.get("\u6253\u5370\u5730\u70b9\u9009\u9879"), list):
-        cfg["\u6253\u5370\u5730\u70b9\u9009\u9879"] = PRINT_TRACK_LOCATION_DEFAULTS.copy()
-    for p, d in list(db_obj.items()):
-        if p == cfg_key:
-            continue
-        if not isinstance(d, dict):
-            db_obj[p] = {}
-            d = db_obj[p]
-        d.setdefault("负责人", "")
-        d.setdefault("跟单", "")
-        d.setdefault("Milestone", "待立项")
-        d.setdefault("Target", "TBD")
-        d.setdefault("发货区间", "")
-        d.setdefault("ratio_preset", "1/6")
-        d.setdefault("ip_owner", "")
-        if not isinstance(d.get("计划排期"), list):
-            d["计划排期"] = []
-        if not isinstance(d.get("周会备注"), list):
-            d["周会备注"] = []
-        if not isinstance(d.get("部件列表"), dict):
-            d["部件列表"] = {}
-        if not isinstance(d.get("发货数据"), dict):
-            d["发货数据"] = {}
-        if not isinstance(d.get("成本数据"), dict):
-            d["成本数据"] = {}
-        if not isinstance(d.get("print_tracking"), list):
-            d["print_tracking"] = []
-        if not isinstance(d.get("garment_flow"), dict):
-            d["garment_flow"] = {}
-    return db_obj
+    from core.storage import ensure_db_shape as _impl
+
+    return _impl(db_obj)
 
 
 
@@ -1344,8 +1291,8 @@ def _load_db_or_fallback():
     try:
         loaded = db_manager.load()
     except Exception as e:
-        st.error(f"MongoDB 数据库不可用：{e}")
-        st.info("当前版本已切换为 Mongo-only，请检查 MONGO_URI / Mongo 网络连通性 / GridFS 依赖。")
+        st.error(f"数据库加载失败：{e}")
+        st.info("可检查本地 JSON 文件、Mongo 配置，或显式设置 INART_STORAGE_BACKEND。")
         st.stop()
     return _ensure_db_shape(loaded)
 
@@ -1353,11 +1300,11 @@ def _load_db_or_fallback():
 # db_manager 全局实例（用于附件与持久化接口）
 db_manager = _build_db_manager(force_local=False)
 if (
-    getattr(db_manager, "backend_name", "") != "Memory"
+    getattr(db_manager, "backend_name", "") == "MongoDB"
     and (getattr(db_manager, "col", None) is None or getattr(db_manager, "fs", None) is None)
 ):
     st.error(f"MongoDB 数据库不可用：{getattr(db_manager, 'init_error', '') or '未完成初始化'}")
-    st.info("当前版本已切换为 Mongo-only，请检查 MONGO_URI / Mongo 网络连通性 / GridFS 依赖。")
+    st.info("当前会优先走本地 JSON；若需要 Mongo，请检查 MONGO_URI / Mongo 网络连通性 / GridFS 依赖。")
     st.stop()
 
 if "db" not in st.session_state:
@@ -1421,6 +1368,7 @@ _ensure_runtime_state_defaults()
 SYS_CFG = st.session_state.db.setdefault("系统配置", {})
 STAGES_UNIFIED = list(SYS_CFG.get("标准阶段", DEFAULT_SYS_CFG["标准阶段"]))
 STD_COMPONENTS = list(SYS_CFG.get("标准部件", DEFAULT_SYS_CFG["标准部件"]))
+MATRIX_FOLLOW_COMPONENTS = ["头雕(表情)", "素体", "手型", "配件", "地台"]
 MACRO_STAGES = list(SYS_CFG.get("宏观阶段", DEFAULT_SYS_CFG["宏观阶段"]))
 
 
@@ -1546,6 +1494,140 @@ def collect_project_review_rows(project_name):
     return rows
 
 
+def component_matrix_follows_global_progress(component_name, component_info, global_info):
+    comp_name = str(component_name or "").strip()
+    if (not comp_name) or ("全局" in comp_name):
+        return False
+
+    global_data = global_info if isinstance(global_info, dict) else {}
+    global_stage = str(global_data.get("主流程", "")).strip()
+    if not global_stage:
+        return False
+
+    info = component_info if isinstance(component_info, dict) else {}
+    raw_logs = [log for log in info.get("日志流", []) if not is_hidden_system_log(log)]
+    if raw_logs:
+        return False
+
+    stage = str(info.get("主流程", "")).strip()
+    if (not stage) or (stage == global_stage):
+        return True
+
+    default_stage = STAGES_UNIFIED[0] if STAGES_UNIFIED else ""
+    return bool(default_stage and stage == default_stage)
+
+
+def build_project_progress_matrix_rows(project_data):
+    proj = project_data if isinstance(project_data, dict) else {}
+    comps = proj.get("部件列表", {})
+    if not isinstance(comps, dict) or not comps:
+        return []
+
+    global_key = next((k for k in comps.keys() if "全局" in str(k)), "")
+    global_info = comps.get(global_key, {}) if global_key else {}
+
+    ordered_names = []
+    if global_key:
+        ordered_names.append(global_key)
+        for comp_name in MATRIX_FOLLOW_COMPONENTS:
+            if comp_name not in ordered_names:
+                ordered_names.append(comp_name)
+    for comp_name in comps.keys():
+        if comp_name not in ordered_names:
+            ordered_names.append(comp_name)
+
+    rows = []
+    for comp_name in ordered_names:
+        own_info = comps.get(comp_name, {})
+        inherit_global = bool(
+            global_key
+            and comp_name != global_key
+            and comp_name in MATRIX_FOLLOW_COMPONENTS
+            and component_matrix_follows_global_progress(comp_name, own_info, global_info)
+        )
+        source_info = global_info if inherit_global else (own_info if isinstance(own_info, dict) else {})
+        if not isinstance(source_info, dict):
+            source_info = {}
+
+        owner = ""
+        if isinstance(own_info, dict):
+            owner = str(own_info.get("负责人", "")).strip()
+
+        rows.append({
+            "component": str(comp_name).strip() or "全局进度",
+            "owner": owner,
+            "info": source_info,
+            "inherits_global": inherit_global,
+            "source_component": global_key if inherit_global else str(comp_name).strip() or "全局进度",
+        })
+    return rows
+
+
+def build_project_review_matrix_state(project_name, review_rows=None):
+    proj = str(project_name or "").strip()
+    rows = list(review_rows) if isinstance(review_rows, list) else collect_project_review_rows(proj)
+    if not rows:
+        return {"component_rows": [], "latest_map": {}}
+
+    base_rows = build_project_progress_matrix_rows(db.get(proj, {}))
+    component_rows = []
+    seen_components = set()
+
+    for row in base_rows:
+        comp_name = str(row.get("component", "")).strip() or "全局进度"
+        if comp_name in seen_components:
+            continue
+        component_rows.append({
+            "component": comp_name,
+            "inherits_global": bool(row.get("inherits_global")),
+            "source_component": str(row.get("source_component", "")).strip() or comp_name,
+        })
+        seen_components.add(comp_name)
+
+    for row in rows:
+        comp_name = str(row.get("部件", "")).strip() or "全局进度"
+        if comp_name in seen_components:
+            continue
+        component_rows.append({
+            "component": comp_name,
+            "inherits_global": False,
+            "source_component": comp_name,
+        })
+        seen_components.add(comp_name)
+
+    latest_map = {}
+    result_rank = {"待反馈": 1, "通过": 2, "打回": 3, "(无)": 0, "": 0}
+    for row in rows:
+        comp_name = str(row.get("部件", "")).strip() or "全局进度"
+        rv_type = str(row.get("提审类型", "")).strip()
+        day = parse_date_safe(row.get("日期", "")) or datetime.date.min
+        rnd = normalize_review_round(row.get("轮次", "")) or 0
+        res = str(row.get("提审结果", "")).strip() or "(无)"
+        rank = (day.toordinal(), rnd, result_rank.get(res, 0))
+        key = (comp_name, rv_type)
+        prev = latest_map.get(key)
+        if (prev is None) or (rank >= prev["rank"]):
+            latest_map[key] = {"rank": rank, "row": row}
+
+    return {"component_rows": component_rows, "latest_map": latest_map}
+
+
+def pick_review_matrix_cell_row(component_name, review_type, latest_map, inherits_global=False, source_component=""):
+    picked = latest_map.get((str(component_name or "").strip(), str(review_type or "").strip()), {})
+    row = picked.get("row", {}) if isinstance(picked, dict) else {}
+    if row:
+        return row, False
+
+    source_comp = str(source_component or "").strip()
+    if inherits_global and source_comp and source_comp != str(component_name or "").strip():
+        picked = latest_map.get((source_comp, str(review_type or "").strip()), {})
+        row = picked.get("row", {}) if isinstance(picked, dict) else {}
+        if row:
+            return row, True
+
+    return {}, False
+
+
 def render_project_review_progress_matrix(project_name):
     review_rows = collect_project_review_rows(project_name)
     review_types = list(REVIEW_TYPE_CANONICAL)
@@ -1553,9 +1635,10 @@ def render_project_review_progress_matrix(project_name):
         st.caption("当前项目暂无版权提审记录。")
         return
 
-    comp_order = []
-    latest_map = {}
-    result_rank = {"待反馈": 1, "通过": 2, "打回": 3, "(无)": 0, "": 0}
+    matrix_state = build_project_review_matrix_state(project_name, review_rows=review_rows)
+    component_rows = matrix_state.get("component_rows", []) if isinstance(matrix_state, dict) else []
+    latest_map = matrix_state.get("latest_map", {}) if isinstance(matrix_state, dict) else {}
+    comp_order = [str(row.get("component", "")).strip() or "全局进度" for row in component_rows]
     status_val = {"(无)": 0, "": 0, "待反馈": 1, "通过": 2, "打回": 3}
     status_text = {0: "", 1: "待", 2: "过", 3: "回"}
     colorscale = [
@@ -1569,42 +1652,38 @@ def render_project_review_progress_matrix(project_name):
         [1.00, "#FCA5A5"],
     ]
 
-    for row in review_rows:
-        comp_name = str(row.get("部件", "")).strip() or "全局进度"
-        if comp_name not in comp_order:
-            comp_order.append(comp_name)
-        rv_type = str(row.get("提审类型", "")).strip()
-        if rv_type not in review_types:
-            continue
-        day = parse_date_safe(row.get("日期", "")) or datetime.date.min
-        rnd = normalize_review_round(row.get("轮次", "")) or 0
-        res = str(row.get("提审结果", "")).strip() or "(无)"
-        rank = (day.toordinal(), rnd, result_rank.get(res, 0))
-        key = (comp_name, rv_type)
-        prev = latest_map.get(key)
-        if (prev is None) or (rank >= prev["rank"]):
-            latest_map[key] = {"rank": rank, "row": row}
-
     z = []
     text = []
     hover = []
-    for comp_name in comp_order:
+    for comp_row in component_rows:
+        comp_name = str(comp_row.get("component", "")).strip() or "全局进度"
+        inherit_global = bool(comp_row.get("inherits_global"))
+        source_component = str(comp_row.get("source_component", "")).strip() or comp_name
         z_row = []
         text_row = []
         hover_row = []
         for rv_type in review_types:
-            picked = latest_map.get((comp_name, rv_type), {})
-            row = picked.get("row", {})
+            row, inherited = pick_review_matrix_cell_row(
+                comp_name,
+                rv_type,
+                latest_map,
+                inherits_global=inherit_global,
+                source_component=source_component,
+            )
             res = str(row.get("提审结果", "")).strip() if row else ""
             cell_val = status_val.get(res, 0)
             z_row.append(cell_val)
             text_row.append(status_text.get(cell_val, ""))
             if row:
+                inherited_note = ""
+                if inherited:
+                    inherited_note = f"<br>矩阵状态: 默认跟随{source_component}提审结果"
                 hover_row.append(
                     f"部件: {comp_name}<br>提审类型: {rv_type}<br>结果: {res or '(无)'}"
                     f"<br>日期: {str(row.get('日期', '')).strip() or '-'}"
                     f"<br>轮次: {str(row.get('轮次', '')).strip() or '-'}"
                     f"<br>事件: {str(row.get('事件', '')).strip() or '-'}"
+                    f"{inherited_note}"
                 )
             else:
                 hover_row.append(f"部件: {comp_name}<br>提审类型: {rv_type}<br>状态: 未开始")
@@ -1851,159 +1930,27 @@ def restore_attachments_from_zip(db_obj, zf):
 
 
 def refresh_project_todo_links(proj_name):
-    proj = str(proj_name or "").strip()
+    from core.todo_ops import refresh_project_todo_links as _impl
+
     db_obj = st.session_state.db if isinstance(st.session_state.get("db"), dict) else {}
-    if not proj or proj == "\u7cfb\u7edf\u914d\u7f6e" or proj not in db_obj:
-        return 0
-
-    todo_all = db_obj.get("\u7cfb\u7edf\u914d\u7f6e", {}).get("PM_TODO_LIST", [])
-    todo_items = [
-        td for td in todo_all
-        if todo_matches_project(td, proj) and str((td or {}).get("\u4efb\u52a1", "")).strip()
-    ]
-    if not todo_items:
-        return 0
-
-    logs = []
-    for comp_name, comp_info in db_obj.get(proj, {}).get("\u90e8\u4ef6\u5217\u8868", {}).items():
-        for lg in (comp_info or {}).get("\u65e5\u5fd7\u6d41", []):
-            if is_hidden_system_log(lg):
-                continue
-            evt = str((lg or {}).get("\u4e8b\u4ef6", "")).strip()
-            if not evt:
-                continue
-            d_txt = str((lg or {}).get("\u65e5\u671f", "")).strip()
-            try:
-                d_obj = datetime.datetime.strptime(d_txt, "%Y-%m-%d").date()
-            except Exception:
-                d_obj = datetime.date.min
-            logs.append({
-                "dt": d_obj,
-                "date": d_txt,
-                "component": str(comp_name),
-                "stage": str((lg or {}).get("\u5de5\u5e8f", "")).strip(),
-                "event": evt,
-                "event_norm": norm_text(evt),
-            })
-
-    if not logs:
-        return 0
-
-    logs.sort(key=lambda x: (x.get("dt") or datetime.date.min, x.get("date", ""), x.get("component", "")), reverse=True)
-
-    def _safe_date(s):
-        try:
-            return datetime.datetime.strptime(str(s or "").strip(), "%Y-%m-%d").date()
-        except Exception:
-            return None
-
-    write_ts = datetime.datetime.now().isoformat(timespec="seconds")
-    updated = 0
-
-    for td in todo_items:
-        task = str((td or {}).get("\u4efb\u52a1", "")).strip()
-        task_norm = norm_text(task)
-        if len(task_norm) < 2:
-            continue
-
-        short_task = task[:8].strip()
-        short_norm = norm_text(short_task)
-        hit = None
-        for item in logs:
-            evt = item["event"]
-            evt_norm = item["event_norm"]
-            matched = False
-            if ("[\u5173\u8054To do]" in evt or "[\u5173\u8054\u5f85\u529e]" in evt) and (task in evt or (task_norm and task_norm in evt_norm)):
-                matched = True
-            elif len(task_norm) >= 4 and task_norm in evt_norm:
-                matched = True
-            elif short_norm and len(short_norm) >= 4 and short_norm in evt_norm:
-                matched = True
-            if matched:
-                hit = item
-                break
-
-        if not hit:
-            continue
-
-        cur_dt = _safe_date(td.get("\u6700\u8fd1\u8054\u52a8\u65e5\u671f", ""))
-        hit_dt = hit.get("dt") if hit.get("dt") != datetime.date.min else None
-        if cur_dt and hit_dt and hit_dt < cur_dt:
-            continue
-
-        desired = {
-            "\u6700\u8fd1\u8054\u52a8\u6a21\u5757": "\u65e5\u5fd7\u8054\u52a8\u56de\u586b",
-            "\u6700\u8fd1\u8054\u52a8\u65e5\u671f": hit.get("date", ""),
-            "\u6700\u8fd1\u8054\u52a8\u9879\u76ee": proj,
-            "\u6700\u8fd1\u8054\u52a8\u90e8\u4ef6": hit.get("component", ""),
-            "\u6700\u8fd1\u8054\u52a8\u9636\u6bb5": hit.get("stage", ""),
-            "\u6700\u8fd1\u8054\u52a8\u5199\u5165\u65f6\u95f4": write_ts,
-        }
-        changed = False
-        for k, v in desired.items():
-            if str(td.get(k, "")) != str(v):
-                td[k] = v
-                changed = True
-        if changed:
-            updated += 1
-
-    return updated
+    alias_map = db_obj.get("系统配置", {}).get("项目别名", {}) if isinstance(db_obj, dict) else {}
+    return _impl(
+        db_obj,
+        proj_name,
+        alias_map=alias_map,
+        canonicalize_project_name=lambda name: canonicalize_project_name(
+            name,
+            valid_projs=[p for p in db_obj.keys() if p != "系统配置"] if isinstance(db_obj, dict) else [],
+            alias_map=alias_map,
+        ),
+    )
 
 
 def auto_sync_milestone(proj_name):
+    from core.project_ops import auto_sync_milestone as _impl
+
     proj_data = st.session_state.db.get(proj_name)
-    if not isinstance(proj_data, dict):
-        return
-    comps = proj_data.get("部件列表", {})
-    if not isinstance(comps, dict):
-        return
-
-    non_global_items = []
-    for comp_name, info in comps.items():
-        if "全局" in str(comp_name):
-            continue
-        if isinstance(info, dict):
-            non_global_items.append((comp_name, info))
-
-    max_idx = -1
-    max_stage = ""
-    for _, info in non_global_items:
-        stage = str(info.get("主流程", "")).strip()
-        if not stage or is_pause_stage(stage):
-            continue
-        stage_idx = next((i for i, std_stage in enumerate(STAGES_UNIFIED) if stage == std_stage or stage in std_stage or std_stage in stage), -1)
-        if stage_idx > max_idx:
-            max_idx = stage_idx
-            max_stage = STAGES_UNIFIED[stage_idx]
-
-    if max_idx >= 0 and max_stage:
-        global_key = next((k for k in comps.keys() if "全局" in str(k)), "全局进度")
-        if global_key not in comps or not isinstance(comps.get(global_key), dict):
-            comps[global_key] = {"主流程": STAGES_UNIFIED[0], "日志流": []}
-        curr_global_stage = str(comps[global_key].get("主流程", "")).strip()
-        curr_idx = next((i for i, std_stage in enumerate(STAGES_UNIFIED) if curr_global_stage == std_stage or curr_global_stage in std_stage or std_stage in curr_global_stage), -1)
-        if curr_idx < max_idx and not is_pause_stage(curr_global_stage):
-            comps[global_key]["主流程"] = max_stage
-
-    stages = [str(info.get("主流程", "")).strip() for _, info in non_global_items if str(info.get("主流程", "")).strip()]
-    if not stages:
-        global_key = next((k for k in comps.keys() if "全局" in str(k)), "全局进度")
-        global_stage = str(comps.get(global_key, {}).get("主流程", "")).strip()
-        if global_stage:
-            stages = [global_stage]
-
-    cur_ms = str(proj_data.get("Milestone", "")).strip()
-    if stages and all(stage == "✅ 已完成(结束)" for stage in stages):
-        proj_data["Milestone"] = "项目结束撒花🎉"
-    elif any(stage in ["工厂复样(含胶件/上色等)", "大货"] for stage in stages):
-        if cur_ms not in ["生产结束", "项目结束撒花🎉", "暂停研发"]:
-            proj_data["Milestone"] = "生产中"
-    elif any(stage == "开模" for stage in stages):
-        if cur_ms not in ["生产结束", "项目结束撒花🎉", "暂停研发", "生产中"]:
-            proj_data["Milestone"] = "下模中"
-    elif any(stage in ["建模(含打印/签样)", "涂装", "设计", "工程拆件", "手板/结构板", "官图"] for stage in stages):
-        if cur_ms in ["", "待立项"]:
-            proj_data["Milestone"] = "研发中"
+    _impl(proj_data, STAGES_UNIFIED)
 
 
 def recompute_project_derived_state(proj_name):
@@ -2075,44 +2022,45 @@ def normalize_project_name_for_write(raw_name, valid_projs=None, alias_map=None)
 
 
 def ensure_project_component(proj_name, comp_name, default_stage=None):
-    proj = str(proj_name or "").strip()
-    comp = str(comp_name or "").strip() or "全局进度"
-    if (not proj) or proj == "系统配置":
-        return {}
-    proj = canonicalize_project_name(proj, valid_projs=[p for p in db.keys() if p != "系统配置"]) or proj
-    proj_data = db.setdefault(proj, build_project_shell())
-    comp_map = proj_data.setdefault("部件列表", {})
-    if comp not in comp_map:
-        comp_map[comp] = {"主流程": default_stage or (STAGES_UNIFIED[0] if STAGES_UNIFIED else "立项"), "日志流": []}
-    return comp_map[comp]
+    from core.project_ops import ensure_project_component as _impl
+
+    return _impl(
+        db,
+        proj_name,
+        comp_name,
+        default_stage=default_stage,
+        stages=STAGES_UNIFIED,
+        canonicalize_project_name=lambda name: canonicalize_project_name(
+            name,
+            valid_projs=[p for p in db.keys() if p != "系统配置"],
+        ),
+        project_factory=lambda: build_project_shell(),
+    )
 
 
 def normalize_component_log_entry(log_entry, fallback_date=None, write_time=""):
-    entry = dict(log_entry) if isinstance(log_entry, dict) else {}
-    date_txt = str(entry.get("日期", "")).strip()
-    if (not date_txt) and fallback_date:
-        date_txt = str(fallback_date)
-        entry["日期"] = date_txt
-    if not str(entry.get("_id", "")).strip():
-        entry["_id"] = uuid.uuid4().hex[:16]
-    write_ts = str(entry.get("写入时间", "")).strip() or str(write_time or "").strip()
-    if not write_ts:
-        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_txt):
-            write_ts = f"{date_txt}T00:00:00"
-        else:
-            write_ts = datetime.datetime.now().isoformat(timespec="seconds")
-    entry["写入时间"] = write_ts
-    return entry
+    from core.project_ops import normalize_component_log_entry as _impl
+
+    return _impl(log_entry, fallback_date=fallback_date, write_time=write_time)
 
 
 def append_component_log_entry(proj_name, comp_name, log_entry, resulting_stage=None, default_stage=None):
-    comp_data = ensure_project_component(proj_name, comp_name, default_stage=default_stage)
-    if not isinstance(comp_data, dict):
-        return {}
-    comp_data.setdefault("日志流", []).append(normalize_component_log_entry(log_entry))
-    if resulting_stage:
-        comp_data["主流程"] = str(resulting_stage).strip()
-    return comp_data
+    from core.project_ops import append_component_log_entry as _impl
+
+    return _impl(
+        db,
+        proj_name,
+        comp_name,
+        log_entry,
+        resulting_stage=resulting_stage,
+        default_stage=default_stage,
+        stages=STAGES_UNIFIED,
+        canonicalize_project_name=lambda name: canonicalize_project_name(
+            name,
+            valid_projs=[p for p in db.keys() if p != "系统配置"],
+        ),
+        project_factory=lambda: build_project_shell(),
+    )
 
 
 def save_project_scope(proj_name=None):
@@ -2217,14 +2165,14 @@ def get_macro_phase(detail_stage, event_text="", comp_name="", proj_label="", pr
     return "工程"
 
 def is_pause_stage(stage_name):
-    s = str(stage_name).strip()
-    return ("暂停" in s) or ("搁置" in s)
+    from core.project_ops import is_pause_stage as _impl
+
+    return _impl(stage_name)
 
 def get_stage_index(stage_name, stages):
-    s = str(stage_name).strip()
-    if s in stages:
-        return stages.index(s)
-    return next((i for i, std_s in enumerate(stages) if s in std_s or std_s in s), -1)
+    from core.project_ops import get_stage_index as _impl
+
+    return _impl(stage_name, stages)
 
 
 def infer_default_stage_from_project_milestone(proj_data):
@@ -2429,10 +2377,9 @@ def get_stage_delay_set(raw_logs, baseline_days):
     return delayed
 
 def parse_date_safe(date_str):
-    try:
-        return datetime.datetime.strptime(str(date_str), "%Y-%m-%d").date()
-    except:
-        return None
+    from core.shared_logic import parse_date_safe as _impl
+
+    return _impl(date_str)
 
 def extract_deadline_from_text(text, ref_date=None):
     """从 CP/DDL 合并文本提取日期，支持 YYYY-MM-DD / YYYY/MM/DD / M/D。"""
@@ -2463,101 +2410,26 @@ def extract_deadline_from_text(text, ref_date=None):
 
 
 def clean_auto_todo_task_text(raw_text):
-    txt = str(raw_text or "").strip()
-    if not txt:
-        return ""
-    txt = re.sub(r"^(?:\[[^\]]+\]\s*){1,6}", "", txt).strip()
-    txt = re.sub(r"\s+", " ", txt).strip(" ，,;；|")
-    txt = re.sub(r"^(预计|计划|大概|约)\s*", "", txt)
-    txt = re.sub(r"\s*(左右|前后)\s*", " ", txt)
-    for noise in get_recognition_keywords("日期噪音词"):
-        if not noise:
-            continue
-        txt = re.sub(rf"(^|[\s，,;；|]){re.escape(str(noise))}(?=[\s，,;；|]|$)", " ", txt)
-    txt = re.sub(r"\s+", " ", txt).strip(" ，,;；|")
-    return txt
+    from core.todo_ops import clean_auto_todo_task_text as _impl
+
+    return _impl(raw_text, noise_keywords=get_recognition_keywords("日期噪音词"))
 
 
 def normalize_todo_cpddl_for_storage(cpddl_text, task_text="", due_dt=None):
-    raw = str(cpddl_text or "").strip()
-    task = clean_auto_todo_task_text(task_text)
-    if not raw:
-        return f"{due_dt.month}/{due_dt.day}" if isinstance(due_dt, datetime.date) else ""
-    due = due_dt if isinstance(due_dt, datetime.date) else extract_deadline_from_text(raw)
-    if not due:
-        cleaned_raw = clean_auto_todo_task_text(raw)
-        if task and (cleaned_raw == task or cleaned_raw in task or task in cleaned_raw):
-            return ""
-        return cleaned_raw
-    body = re.sub(r"(20\d{2})[-/](\d{1,2})[-/](\d{1,2})", " ", raw)
-    body = re.sub(r"(?<!\d)(\d{1,2})[\/\-](\d{1,2})(?!\d)", " ", body)
-    body = re.sub(r"(?<!\d)(\d{1,2})月(\d{1,2})日?", " ", body)
-    body = clean_auto_todo_task_text(body)
-    if not body:
-        return f"{due.month}/{due.day}"
-    if task and (body == task or body in task or task in body):
-        return f"{due.month}/{due.day}"
-    return f"{due.month}/{due.day} {body}".strip()
+    from core.todo_ops import normalize_todo_cpddl_for_storage as _impl
+
+    return _impl(cpddl_text, task_text=task_text, due_dt=due_dt)
 
 
 def extract_event_date_and_body(text, ref_date=None, prefer_past=False):
-    s = str(text or "").strip()
-    if not s:
-        return None, s
-    ref = ref_date or datetime.date.today()
+    from core.todo_ops import extract_event_date_and_body as _impl
 
-    def _clean_event_body(raw):
-        body = str(raw or "").strip()
-        body = re.sub(r"^(?:\[[^\]]+\]\s*){1,6}", "", body).strip()
-        body = re.sub(r"\s+", " ", body).strip(" ，,;；|")
-        for noise in get_recognition_keywords("日期噪音词"):
-            if not noise:
-                continue
-            body = re.sub(rf"(^|\s){re.escape(str(noise))}(?=\s|$)", " ", body)
-        body = re.sub(r"\s*(左右|前后)\s*", " ", body)
-        body = re.sub(r"^(大约|约)\s*", "", body)
-        body = re.sub(r"\s+", " ", body).strip(" ，,;；|")
-        return body
-
-    full_patterns = [
-        r"(20\d{2})[-/／\.](\d{1,2})[-/／\.](\d{1,2})",
-        r"(20\d{2})年\s*(\d{1,2})月\s*(\d{1,2})日?",
-    ]
-    for pat in full_patterns:
-        m = re.search(pat, s)
-        if not m:
-            continue
-        try:
-            y = int(m.group(1)); mm = int(m.group(2)); dd = int(m.group(3))
-            dt = datetime.date(y, mm, dd)
-            cleaned = _clean_event_body((s[:m.start()] + " " + s[m.end():]))
-            return dt, (cleaned or s)
-        except Exception:
-            pass
-
-    md_patterns = [
-        r"(?<!\d)(\d{1,2})[\/／](\d{1,2})(?!\d)",
-        r"(?<!\d)(\d{1,2})-(\d{1,2})(?!\d)",
-        r"(?<!\d)(\d{1,2})月(\d{1,2})日?",
-    ]
-    for pat in md_patterns:
-        m = re.search(pat, s)
-        if not m:
-            continue
-        try:
-            mm = int(m.group(1)); dd = int(m.group(2))
-            y = ref.year
-            cand = datetime.date(y, mm, dd)
-            if prefer_past and cand > ref + datetime.timedelta(days=30):
-                cand = datetime.date(y - 1, mm, dd)
-            if (not prefer_past) and cand < ref - datetime.timedelta(days=30):
-                cand = datetime.date(y + 1, mm, dd)
-            cleaned = _clean_event_body((s[:m.start()] + " " + s[m.end():]))
-            return cand, (cleaned or s)
-        except Exception:
-            pass
-
-    return None, (_clean_event_body(s) or s)
+    return _impl(
+        text,
+        ref_date=ref_date,
+        prefer_past=prefer_past,
+        noise_keywords=get_recognition_keywords("日期噪音词"),
+    )
 
 
 def classify_text_intent(text):
@@ -2607,6 +2479,125 @@ def classify_temporal_event_route(text, ref_date=None, prefer_past=False):
         "date_bucket": date_bucket,
         "route": route,
     }
+
+
+def extract_followup_todo_clause(text, route_hint=""):
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+
+    future_tokens = [
+        "待确认", "待收件", "待回件", "待反馈", "待修改", "待补", "待回复",
+        "待打样", "待打印", "待审", "待版权", "待做", "待处理", "待跟进",
+        "待跟催", "需要", "需", "跟进", "跟催", "预计", "即将", "待",
+    ]
+    past_tokens = [
+        "已于", "已经", "已安排", "安排了", "已转交", "已交接", "已提交",
+        "已收到", "送去", "转交", "交接", "发给", "交给", "收到", "完成",
+        "通过", "给了", "给出", "先出", "已出",
+    ]
+
+    matches = []
+    for token in future_tokens:
+        idx = raw.find(token)
+        if idx > 0:
+            matches.append((idx, -len(token), token))
+    if not matches:
+        return ""
+
+    idx, _neg_len, _token = sorted(matches)[0]
+    prefix = raw[:idx]
+    if not prefix.strip(" ，,;；|"):
+        return ""
+
+    has_past_context = any(tok in prefix for tok in past_tokens)
+    has_clause_break = bool(re.search(r"[，,;；|、]", prefix))
+    route_txt = str(route_hint or "").strip()
+    if (not has_past_context) and not (route_txt == "past" and has_clause_break):
+        return ""
+
+    tail = raw[idx:].strip(" ，,;；|")
+    tail = re.sub(r"^[，,;；|、]+", "", tail)
+    return tail
+
+
+def refine_dashboard_todo_task_text(raw_text, task_text="", due_dt=None, component_name="", stage_name=""):
+    raw = str(raw_text or "").strip()
+    task = clean_auto_todo_task_text(task_text or raw)
+    if not raw:
+        return task
+
+    def _ordered_hits(tokens):
+        return list(dict.fromkeys([str(tok).strip() for tok in (tokens or []) if str(tok).strip() and str(tok).strip() in raw]))
+
+    hair_hits = _ordered_hits(["马海毛", "毛到货", "头发"])
+    if "到货" in raw and any(tok in raw for tok in ["植发", "种发", "开始植发", "开始种发", "马海毛", "毛到货"]):
+        hair_label = "马海毛"
+        if hair_hits:
+            hair_label = "马海毛" if "马海毛" in hair_hits else hair_hits[0]
+        return f"{hair_label}到货"
+
+    packaging_hits = _ordered_hits(["地台贴", "彩盒", "灰箱", "物流箱", "电影票", "说明书", "内托", "刀线"])
+    packaging_label = "、".join(packaging_hits) if packaging_hits else ""
+    if (not packaging_label) and (str(component_name or "").strip() == "包装"):
+        packaging_label = "包装"
+    if packaging_label and "打样" in raw:
+        assignee = ""
+        assignee_patterns = [
+            r"(?:已)?(?:转交|交给|给|发给)([^，,;；\s]{1,8})待打样",
+            r"待([^，,;；\s]{1,8})打样",
+        ]
+        for pat in assignee_patterns:
+            m = re.search(pat, raw)
+            if m:
+                assignee = str(m.group(1) or "").strip()
+                break
+        if assignee:
+            return f"{packaging_label}待{assignee}打样"
+        return f"{packaging_label}待打样"
+
+    if packaging_label and any(tok in raw for tok in ["需修改", "待修改", "返修", "改稿", "修改"]):
+        return f"{packaging_label}需修改"
+
+    accessory_hits = _ordered_hits(["公文包扣子", "扣子", "桩位", "卡位", "磁吸"])
+    accessory_label = ""
+    if any(tok in raw for tok in ["扣子", "桩位", "卡位", "磁吸"]):
+        if "公文包扣子" in raw:
+            accessory_label = "公文包扣子"
+        elif accessory_hits:
+            accessory_label = accessory_hits[0]
+    if accessory_label and any(tok in raw for tok in ["待确认", "需确认", "确认", "待调整", "待修改", "需修改"]):
+        prefix = str(raw).strip(" ，,;；|")
+        prefix = re.sub(r"(?i)[，,;；|]?\s*(?:CP|DDL)\s*\d{1,2}[/-]\d{1,2}\s*$", "", prefix).strip(" ，,;；|")
+        return clean_auto_todo_task_text(prefix)
+
+    return task
+
+
+def extract_dashboard_people_text(text):
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+
+    stop_words = {
+        "工程", "设计", "版权", "内部", "工厂", "打样", "确认", "反馈",
+        "修改", "处理", "跟进", "待", "回复", "项目",
+    }
+    patterns = [
+        r"(?:已)?(?:转交|交给|发给|给)\s*([A-Za-z0-9_\-]{1,20}|[\u4e00-\u9fa5]{1,6})",
+        r"待([A-Za-z0-9_\-]{1,20}|[\u4e00-\u9fa5]{1,6})打样",
+    ]
+    for pat in patterns:
+        for m in re.finditer(pat, raw):
+            candidate = str(m.group(1) or "").strip(" ，,;；|")
+            if not candidate:
+                continue
+            if candidate in stop_words:
+                continue
+            if re.fullmatch(r"\d{1,2}/\d{1,2}", candidate):
+                continue
+            return candidate
+    return ""
 
 
 def extract_dashboard_todo_segments(text, project_name="", ref_date=None):
@@ -2724,7 +2715,22 @@ def extract_dashboard_todo_segments(text, project_name="", ref_date=None):
             route = "todo"
 
         due_dt, body_without_date = extract_event_date_and_body(body_text, ref_date=ref, prefer_past=False)
-        task = clean_auto_todo_task_text(body_without_date or body_text)
+        task_seed = body_without_date or body_text
+        followup_picker = globals().get("extract_followup_todo_clause")
+        followup_clause = followup_picker(task_seed, route_hint=route) if callable(followup_picker) else ""
+        if followup_clause:
+            follow_due_dt, follow_body_without_date = extract_event_date_and_body(
+                followup_clause,
+                ref_date=ref,
+                prefer_past=False,
+            )
+            task_seed = follow_body_without_date or followup_clause
+            if isinstance(follow_due_dt, datetime.date):
+                due_dt = follow_due_dt
+            elif route == "past":
+                due_dt = None
+            route = "todo"
+        task = clean_auto_todo_task_text(task_seed)
         if not task:
             continue
 
@@ -2774,6 +2780,16 @@ def extract_dashboard_todo_segments(text, project_name="", ref_date=None):
         if component_name == "🌐 全局进度 (Overall)":
             component_name = "全局进度"
 
+        task_refiner = globals().get("refine_dashboard_todo_task_text")
+        if callable(task_refiner):
+            task = task_refiner(
+                seg,
+                task_text=task,
+                due_dt=due_dt if isinstance(due_dt, datetime.date) else None,
+                component_name=component_name,
+                stage_name=stage_name,
+            )
+
         out.append({
             "raw": seg,
             "task": task,
@@ -2788,7 +2804,7 @@ def extract_dashboard_todo_segments(text, project_name="", ref_date=None):
     return out
 
 
-def upsert_todo_from_event_text(project_name, event_text, forced_due_dt=None, forced_task_body="", people_text="", actor="系统", scope_override="", prefer_existing_pending=False, return_payload=False, allow_empty_due=False, forced_component="", forced_stage=""):
+def upsert_todo_from_event_text(project_name, event_text, forced_due_dt=None, forced_task_body="", people_text="", actor="系统", scope_override="", prefer_existing_pending=False, return_payload=False, allow_empty_due=False, forced_component="", forced_stage="", fallback_project_people=True):
     proj = str(project_name or "").strip()
     if (not proj) or proj not in db or proj == "系统配置":
         return ""
@@ -2805,7 +2821,10 @@ def upsert_todo_from_event_text(project_name, event_text, forced_due_dt=None, fo
     proj_data = db.get(proj, {}) if proj in db else {}
     owner = str(proj_data.get("负责人", "")).strip()
     scope = str(scope_override or "").strip() or (owner if owner and owner != "所有人" else "未分配")
-    people = normalize_people_text(people_text or str(proj_data.get("跟单", "")).strip())
+    people_seed = str(people_text or "").strip()
+    if (not people_seed) and fallback_project_people:
+        people_seed = str(proj_data.get("跟单", "")).strip()
+    people = normalize_people_text(people_seed)
     due_txt = str(due_dt) if isinstance(due_dt, datetime.date) else ""
     cpddl_seed = f"{due_dt.month}/{due_dt.day} {task}" if isinstance(due_dt, datetime.date) else task
     cpddl_txt = normalize_todo_cpddl_for_storage(cpddl_seed, task, due_dt=due_dt) if isinstance(due_dt, datetime.date) else ""
@@ -2922,77 +2941,43 @@ def unpack_todo_upsert_result(result):
     return str(result or "").strip(), []
 
 def todo_cpddl_text(td):
-    merged = str((td or {}).get("CPDDL", "")).strip()
-    if merged:
-        return merged
-    cp = str((td or {}).get("CP", "")).strip()
-    ddl = str((td or {}).get("DDL", "")).strip()
-    if cp and ddl:
-        return f"{ddl} | {cp}"
-    return cp or ddl
+    from core.shared_logic import todo_cpddl_text as _impl
+
+    return _impl(td)
 
 def todo_due_date(td):
-    d = parse_date_safe((td or {}).get("DDL", ""))
-    if d:
-        return d
+    from core.shared_logic import todo_due_date as _impl
+
     extract_fn = globals().get("extract_deadline_from_text")
-    if callable(extract_fn):
-        try:
-            return extract_fn(todo_cpddl_text(td))
-        except Exception:
-            return None
-    return None
+    return _impl(td, deadline_extractor=extract_fn if callable(extract_fn) else None)
 def todo_alert_text(td, today=None):
-    today = today or datetime.date.today()
-    if bool((td or {}).get("完成")):
-        return "✅ 已完成"
-    due = todo_due_date(td)
-    if not due:
-        return "🟣 无DDL"
-    diff = (due - today).days
-    if diff < 0:
-        return f"🔴 已逾期{abs(diff)}天"
-    if diff == 0:
-        return "🔴 今日到期"
-    if diff == 1:
-        return "🟧 明日到期"
-    if diff <= 3:
-        return "🟨 近期待办"
-    return "🟢 正常"
+    from core.shared_logic import todo_alert_text as _impl
+
+    extract_fn = globals().get("extract_deadline_from_text")
+    return _impl(td, today=today, deadline_extractor=extract_fn if callable(extract_fn) else None)
 
 def todo_sort_key(td, today=None):
-    today = today or datetime.date.today()
-    completed = bool((td or {}).get("完成"))
-    due = todo_due_date(td)
-    created = parse_date_safe((td or {}).get("创建", "")) or datetime.date.max
-    completed_at = parse_date_safe((td or {}).get("完成时间", "")) or datetime.date.min
-    task = str((td or {}).get("任务", "")).strip()
-    if completed:
-        return (1, 9, -completed_at.toordinal(), created.toordinal(), task)
-    if due:
-        diff = (due - today).days
-        return (0, 0, diff, due.toordinal(), created.toordinal(), task)
-    return (0, 1, 99999, datetime.date.max.toordinal(), created.toordinal(), task)
+    from core.shared_logic import todo_sort_key as _impl
+
+    extract_fn = globals().get("extract_deadline_from_text")
+    return _impl(td, today=today, deadline_extractor=extract_fn if callable(extract_fn) else None)
 
 def todo_scope_of(td):
-    scope = str((td or {}).get("所属视角", "")).strip()
-    if scope and scope != "所有人":
-        return scope
-    creator_scope = str((td or {}).get("创建者视角", "")).strip()
-    if creator_scope and creator_scope != "所有人":
-        return creator_scope
-    return "未分配"
+    from core.shared_logic import todo_scope_of as _impl
+
+    return _impl(td)
 
 
 def todo_visible_for_view(td, pm_view):
-    if pm_view == "所有人":
-        return todo_scope_of(td) == "未分配"
-    scope = todo_scope_of(td)
-    return scope == pm_view
+    from core.shared_logic import todo_visible_for_view as _impl
+
+    return _impl(td, pm_view)
 
 
 def todo_visible_for_sidebar(td, pm_view):
-    return todo_visible_for_view(td, pm_view)
+    from core.shared_logic import todo_visible_for_sidebar as _impl
+
+    return _impl(td, pm_view)
 
 
 def build_todo_scope_options(current_pm):
@@ -3147,59 +3132,42 @@ def fmt_ym(ym):
 
 
 def normalize_todo_project_list(raw_value):
-    if isinstance(raw_value, list):
-        # Some UI paths may already split "1/6 XXX" into ["1", "6 XXX"].
-        # Join back first so the shared ratio-protection branch can repair it.
-        txt = " / ".join([str(x).strip() for x in raw_value if str(x).strip()])
-    else:
-        txt = str(raw_value or "").strip()
+    from core.shared_logic import normalize_todo_project_list as _impl
 
-    if not txt:
-        raw_tokens = []
-    else:
-        # Protect scale fractions like 1/6, 1/12 before splitting by slash.
-        marker = "__RATIO_SLASH__"
-        txt_safe = re.sub(
-            r"(?<!\d)(\d{1,2})\s*/\s*(\d{1,2})(?!\d)",
-            lambda m: f"{m.group(1)}{marker}{m.group(2)}",
-            txt,
-        )
-        raw_tokens = [x.strip() for x in re.split(r"[,\uFF0C;\uFF1B\u3001|/\n]+", txt_safe) if x.strip()]
-        raw_tokens = [re.sub(r"\s*/\s*", "/", x.replace(marker, "/").strip()) for x in raw_tokens]
-
-    out = []
     alias_map = db.get("系统配置", {}).get("项目别名", {}) if isinstance(db, dict) else {}
     valid_projs = [p for p in db.keys() if p != "系统配置"] if isinstance(db, dict) else []
-    for token in raw_tokens:
-        if token in ["(不关联项目)", "-"]:
-            continue
-        # Common split artifact from ratio tokens: standalone digits like "1" / "6".
-        if re.fullmatch(r"\d{1,2}", token or ""):
-            continue
-        token = canonicalize_project_name(token, valid_projs=valid_projs, alias_map=alias_map)
-        if not token or token == "系统配置":
-            continue
-        if token not in out:
-            out.append(token)
-    return out
+    return _impl(
+        raw_value,
+        valid_projects=valid_projs,
+        alias_map=alias_map,
+        canonicalize=canonicalize_project_name,
+    )
 
 
 def todo_project_list(td_obj):
-    td = td_obj or {}
-    lst = normalize_todo_project_list(td.get("关联项目列表", []))
-    if lst:
-        return lst
-    legacy = str(td.get("关联项目", "")).strip()
-    if legacy and legacy not in ["(不关联项目)", "-"]:
-        legacy_list = normalize_todo_project_list([legacy])
-        if legacy_list:
-            return legacy_list
-    return []
+    from core.shared_logic import todo_project_list as _impl
+
+    alias_map = db.get("系统配置", {}).get("项目别名", {}) if isinstance(db, dict) else {}
+    valid_projs = [p for p in db.keys() if p != "系统配置"] if isinstance(db, dict) else []
+    return _impl(
+        td_obj,
+        valid_projects=valid_projs,
+        alias_map=alias_map,
+        canonicalize=canonicalize_project_name,
+    )
 
 
 def todo_project_text(td_obj):
-    projs = todo_project_list(td_obj)
-    return " / ".join(projs)
+    from core.shared_logic import todo_project_text as _impl
+
+    alias_map = db.get("系统配置", {}).get("项目别名", {}) if isinstance(db, dict) else {}
+    valid_projs = [p for p in db.keys() if p != "系统配置"] if isinstance(db, dict) else []
+    return _impl(
+        td_obj,
+        valid_projects=valid_projs,
+        alias_map=alias_map,
+        canonicalize=canonicalize_project_name,
+    )
 
 
 def month_week_to_monday(year, month, week_idx):
@@ -3349,60 +3317,19 @@ def todo_append_history_version(td_obj, actor="系统"):
         "完成": bool(td.get("完成", False)),
     })
 def todo_matches_project(td, proj_name):
-    td_obj = td or {}
-    proj = str(proj_name or "").strip()
-    if not proj:
-        return False
+    from core.todo_ops import todo_matches_project as _impl
 
     alias_map = db.get("系统配置", {}).get("项目别名", {})
-    proj_canon = resolve_alias_project(proj, alias_map)
-
-    ref_projects = todo_project_list(td_obj)
-    for ref_proj in ref_projects:
-        ref_canon = resolve_alias_project(ref_proj, alias_map)
-        if ref_proj in [proj, proj_canon] or ref_canon in [proj, proj_canon]:
-            return True
-
-    linked_projects = normalize_todo_project_list(td_obj.get("最近联动项目", ""))
-    for linked_proj in linked_projects:
-        linked_canon = resolve_alias_project(linked_proj, alias_map)
-        if linked_proj in [proj, proj_canon] or linked_canon in [proj, proj_canon]:
-            return True
-
-    txt = f"{str(td_obj.get('任务', '')).strip()} {todo_cpddl_text(td_obj)}".strip()
-    txt_norm = norm_text(txt)
-
-    candidates = set()
-    candidates.add(proj)
-    candidates.add(proj_canon)
-
-    def _add_proj_forms(name):
-        s = str(name or "").strip()
-        if not s:
-            return
-        candidates.add(s)
-        short = re.sub(r'^(1/6|1/4|1/12|1/3|1/1)\s*', '', s).strip()
-        if short:
-            candidates.add(short)
-
-    _add_proj_forms(proj)
-    _add_proj_forms(proj_canon)
-
-    for a in alias_map.keys():
-        a_canon = resolve_alias_project(a, alias_map)
-        if a_canon in [proj, proj_canon]:
-            _add_proj_forms(a)
-
-    for token in candidates:
-        t = str(token or "").strip()
-        if not t:
-            continue
-        if t in txt:
-            return True
-        tn = norm_text(t)
-        if tn and tn in txt_norm:
-            return True
-    return False
+    return _impl(
+        td,
+        proj_name,
+        alias_map=alias_map,
+        canonicalize_project_name=lambda name: canonicalize_project_name(
+            name,
+            valid_projs=[p for p in db.keys() if p != "系统配置"],
+            alias_map=alias_map,
+        ),
+    )
 
 
 def infer_todo_projects_from_text(td, valid_projs):
@@ -4205,7 +4132,14 @@ def extract_todo_segment_hints(text, project_components=None, comp_kw=None, stag
         seg_norm = norm_text(seg_text_value)
         if _has_packaging_context(seg_text_value) and any(tok in seg_text_value for tok in ["打样", "待打样", "烫色", "修改", "改稿", "返修"]):
             return "工厂复样(含胶件/上色等)"
+        if any(tok in seg_text_value for tok in ["扣子", "桩位", "卡位", "磁吸"]) and any(tok in seg_text_value for tok in ["待确认", "需确认", "确认", "待调整", "待修改", "需修改"]):
+            return "工厂复样(含胶件/上色等)"
         if any(tok in seg_text_value for tok in hair_tokens):
+            if (
+                ("到货" in seg_text_value)
+                and any(tok in seg_text_value for tok in ["马海毛", "毛到货", "植发", "种发", "开始植发", "开始种发"])
+            ):
+                return "大货"
             return "工厂复样(含胶件/上色等)"
         for kw, stage_name in _sorted_kw_items(stage_kw_map):
             kw_norm = norm_text(kw)
@@ -4641,7 +4575,12 @@ def get_latest_project_log_binding(project_name):
             write_ts = str((lg or {}).get("写入时间", "")).strip()
             if (not write_ts) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", d_txt):
                 write_ts = f"{d_txt}T00:00:00"
-            rank = (d_obj.toordinal(), write_ts, log_idx, str((lg or {}).get("_id", "")), str(comp_name))
+            attention = event_attention_priority(
+                content_text=str((lg or {}).get("事件", "")).strip(),
+                action_type=str((lg or {}).get("流转", "")).strip(),
+                source_module=str((lg or {}).get("流转", "")).strip() or "项目日志",
+            )
+            rank = (d_obj.toordinal(), attention, 0, write_ts, log_idx, str((lg or {}).get("_id", "")), str(comp_name))
             if (latest is None) or (rank > latest["rank"]):
                 latest = {"rank": rank, "component": str(comp_name), "log": lg}
     return latest
@@ -4670,8 +4609,15 @@ def get_latest_standard_event_binding(project_name):
         evt_date_txt = str((evt or {}).get("日期", "")).strip()
         evt_date = parse_date_safe(evt_date_txt) or datetime.date.min
         src = str((evt or {}).get("来源", "")).strip()
+        attention = event_attention_priority(
+            content_text=str((evt or {}).get("内容", "")).strip() or str((evt or {}).get("原始文本", "")).strip(),
+            action_type=str((evt or {}).get("动作", "")).strip(),
+            source_module=src,
+            extra_payload=(evt or {}).get("附加信息", {}),
+        )
         rank = (
             evt_date.toordinal(),
+            attention,
             source_weight.get(src, 0),
             str((evt or {}).get("写入时间", "")).strip(),
             str((evt or {}).get("_id", "")).strip(),
@@ -5280,6 +5226,38 @@ def format_event_recognition_hint(project_name="", component_name="", stage_name
     if reminder_text:
         bits.append(f"提醒→{reminder_text[:24]}")
     return " ｜ ".join(bits)
+
+
+def event_attention_priority(content_text="", action_type="", source_module="", extra_payload=None):
+    content = str(content_text or "").strip()
+    action = str(action_type or "").strip()
+    source = str(source_module or "").strip()
+    payload = extra_payload if isinstance(extra_payload, dict) else {}
+
+    pending_tokens = [
+        "待收件", "待确认", "待回件", "待反馈", "待修改", "待打样",
+        "待审", "待回复", "待跟进", "待跟催", "需修改", "需确认", "待处理",
+    ]
+    completed_tokens = [
+        "[打印件已收到]", "打印件已收到", "已收到", "完成待办", "待办完成",
+        "已签板", "反馈已发出", "通过", "已完成", "完成",
+    ]
+
+    if any(tok in content for tok in pending_tokens):
+        return 2
+    if action in ["待办新建", "待办更新", "待办重开", "动态联动待办", "工作台联动待办"]:
+        return 2
+    if source == "打印追踪" and not bool(payload.get("已收到", False)):
+        return 2
+
+    if any(tok in content for tok in completed_tokens):
+        return 0
+    if action in ["待办完成"]:
+        return 0
+    if source == "打印追踪" and bool(payload.get("已收到", False)):
+        return 0
+
+    return 1
 
 
 def summarize_temporal_route_label(text, ref_date=None):
@@ -8375,21 +8353,46 @@ def _merge_print_tracking_rows(stored_rows, auto_rows):
     return _dedupe_print_rows_semantically(merged)
 
 
-def _append_print_received_log(row_obj):
+def _get_print_tracking_status_payload(row_obj, action_type="打印追踪更新"):
+    row = row_obj if isinstance(row_obj, dict) else {}
+    desc = str(row.get("\u63cf\u8ff0", "")).strip() or "(\u65e0\u63cf\u8ff0)"
+    place = str(row.get("\u6253\u5370\u5730\u70b9", "")).strip()
+    recv_flag = bool(row.get("\u5df2\u6536\u5230", False))
+    action = str(action_type or "").strip()
+    canceled = (not recv_flag) and action in ["打印追踪取消收件", "打印追踪撤回收件"]
+
+    if recv_flag:
+        event_day = parse_date_safe(row.get("\u6536\u5230\u65e5\u671f", "")) or parse_date_safe(row.get("\u65e5\u671f", "")) or datetime.date.today()
+        standard_content = f"[\u6253\u5370\u4ef6\u5df2\u6536\u5230] {desc}" + (f" | \u6765\u81ea\uff1a{place}" if place else "")
+        log_content = standard_content
+    elif canceled:
+        event_day = datetime.date.today()
+        standard_content = f"[\u53d6\u6d88\u6536\u4ef6] {desc} | \u91cd\u65b0\u5f85\u6536\u4ef6" + (f" | \u6253\u5370\u5730\u70b9\uff1a{place}" if place else "")
+        log_content = f"[\u53d6\u6d88\u6536\u4ef6] {desc} | \u91cd\u65b0\u5f85\u6536\u4ef6" + (f" | \u6765\u81ea\uff1a{place}" if place else "")
+    else:
+        event_day = parse_date_safe(row.get("\u65e5\u671f", "")) or datetime.date.today()
+        standard_content = desc + (f" | \u6253\u5370\u5730\u70b9\uff1a{place}" if place else "")
+        log_content = standard_content
+
+    return {
+        "event_day": event_day,
+        "desc": desc,
+        "place": place,
+        "received": recv_flag,
+        "canceled": canceled,
+        "standard_content": standard_content,
+        "log_content": log_content,
+    }
+
+
+def _append_print_tracking_status_log(row_obj, action_type="打印追踪更新"):
     row = row_obj if isinstance(row_obj, dict) else {}
     proj = str(row.get("\u9879\u76ee", "")).strip()
     if (not proj) or proj not in db or proj == "\u7cfb\u7edf\u914d\u7f6e":
         return False
 
     comp_name = str(row.get("\u90e8\u4ef6", "")).strip() or "\u5168\u5c40\u8fdb\u5ea6"
-    desc = str(row.get("\u63cf\u8ff0", "")).strip() or "(\u65e0\u63cf\u8ff0)"
-    place = str(row.get("\u6253\u5370\u5730\u70b9", "")).strip() or "\u672a\u586b\u5199"
-
-    recv_date = str(row.get("\u6536\u5230\u65e5\u671f", "")).strip() or str(row.get("\u65e5\u671f", "")).strip() or str(datetime.date.today())
-    try:
-        recv_date = str(datetime.datetime.strptime(recv_date, "%Y-%m-%d").date())
-    except Exception:
-        recv_date = str(datetime.date.today())
+    payload = _get_print_tracking_status_payload(row, action_type=action_type)
 
     proj_data = db.get(proj, {})
     comp_map = proj_data.setdefault("\u90e8\u4ef6\u5217\u8868", {})
@@ -8406,12 +8409,20 @@ def _append_print_received_log(row_obj):
 
     log_list = comp_map[target_comp].setdefault("\u65e5\u5fd7\u6d41", [])
     log_list.append({
-        "\u65e5\u671f": recv_date,
+        "\u65e5\u671f": str(payload["event_day"]),
         "\u6d41\u8f6c": "\u6253\u5370\u8ffd\u8e2a",
         "\u5de5\u5e8f": "\u5efa\u6a21(\u542b\u6253\u5370/\u7b7e\u6837)",
-        "\u4e8b\u4ef6": f"[\u6253\u5370\u4ef6\u5df2\u6536\u5230] {desc} | \u6765\u81ea\uff1a{place}",
+        "\u4e8b\u4ef6": str(payload.get("log_content", "")).strip(),
     })
     return True
+
+
+def _append_print_received_log(row_obj):
+    return _append_print_tracking_status_log(row_obj, action_type="打印追踪更新")
+
+
+def _append_print_unreceived_log(row_obj):
+    return _append_print_tracking_status_log(row_obj, action_type="打印追踪取消收件")
 
 
 def _append_print_tracking_standard_event(row_obj, action_type="打印追踪更新"):
@@ -8420,28 +8431,21 @@ def _append_print_tracking_standard_event(row_obj, action_type="打印追踪更�
     if (not proj) or proj not in db or proj == "系统配置":
         return False
     comp_name = str(row.get("部件", "")).strip() or "全局进度"
-    desc = str(row.get("描述", "")).strip() or "(无描述)"
-    place = str(row.get("打印地点", "")).strip()
-    recv_flag = bool(row.get("已收到", False))
-    event_day = parse_date_safe(row.get("收到日期", "")) or parse_date_safe(row.get("日期", "")) or datetime.date.today()
-    if recv_flag:
-        content = f"[打印件已收到] {desc}" + (f" | 来自：{place}" if place else "")
-    else:
-        content = desc + (f" | 打印地点：{place}" if place else "")
+    payload = _get_print_tracking_status_payload(row, action_type=action_type)
     return append_standard_event_entry(
         source_module="打印追踪",
         action_type=action_type,
         project_name=proj,
-        event_date=event_day,
+        event_date=payload["event_day"],
         component_name=comp_name,
         stage_name="建模(含打印/签样)",
-        content_text=content,
-        raw_text=desc,
+        content_text=str(payload.get("standard_content", "")).strip(),
+        raw_text=str(payload.get("desc", "")).strip(),
         actor="系统",
         intent="past",
         extra_payload={
-            "打印地点": place,
-            "已收到": recv_flag,
+            "打印地点": str(payload.get("place", "")).strip(),
+            "已收到": bool(payload.get("received", False)),
             "收到日期": str(row.get("收到日期", "")).strip(),
         },
     )
@@ -8585,9 +8589,12 @@ def render_print_tracking_board(pm_view, visible_projects, ui_prefix="print_trac
                 "\u6765\u6e90": source_raw if source_raw in PRINT_TRACK_SOURCE_LABELS else "\u624b\u52a8\u5f55\u5165",
             }
             row = _normalize_print_tracking_rows([row])[0]
+            if not row.get("\u5df2\u6536\u5230"):
+                row["\u6536\u5230\u65e5\u671f"] = ""
 
             old_row = old_map.get(rid, {})
             old_recv = bool(old_row.get("\u5df2\u6536\u5230", False))
+            standard_action = "打印追踪更新" if old_row else "打印追踪新增"
             row_changed = any(
                 str(old_row.get(k, "")).strip() != str(row.get(k, "")).strip()
                 for k in ["日期", "项目", "部件", "描述", "打印地点", "收到日期"]
@@ -8597,10 +8604,14 @@ def render_print_tracking_board(pm_view, visible_projects, ui_prefix="print_trac
                     row["\u6536\u5230\u65e5\u671f"] = str(datetime.date.today())
                 if _append_print_received_log(row):
                     changed_projects.add(str(row.get("\u9879\u76ee", "")).strip())
+            elif old_recv and (not row.get("\u5df2\u6536\u5230")):
+                standard_action = "打印追踪取消收件"
+                if _append_print_unreceived_log(row):
+                    changed_projects.add(str(row.get("\u9879\u76ee", "")).strip())
             if row_changed:
                 standard_event_dirty = _append_print_tracking_standard_event(
                     row,
-                    action_type="打印追踪更新" if old_row else "打印追踪新增",
+                    action_type=standard_action,
                 ) or standard_event_dirty
 
             if str(row.get("\u6253\u5370\u5730\u70b9", "")).strip():
@@ -10311,10 +10322,11 @@ if menu == MENU_DASHBOARD:
             proj_data = db.get(project_name, {}) if project_name in db else {}
             owner = str(proj_data.get("负责人", "")).strip()
             scope = owner if owner and owner != "所有人" else "未分配"
-            people = str(proj_data.get("跟单", "")).strip()
             prefer_single_pending = (len(todo_candidates) == 1)
 
             for seg in todo_candidates:
+                people_picker = globals().get("extract_dashboard_people_text")
+                people = people_picker(seg["raw"] or seg["task"]) if callable(people_picker) else ""
                 result = upsert_todo_from_event_text(
                     project_name,
                     seg["raw"] or raw_text,
@@ -10328,6 +10340,7 @@ if menu == MENU_DASHBOARD:
                     allow_empty_due=seg["allow_empty_due"],
                     forced_component=seg["component"],
                     forced_stage=seg["stage"],
+                    fallback_project_people=False,
                 )
                 todo_state, todo_ids = unpack_todo_upsert_result(result)
                 if not todo_state:
@@ -10635,6 +10648,13 @@ if menu == MENU_DASHBOARD:
                                         skip_intent_check=True,
                                         return_payload=True,
                                     )
+                                elif date_bucket == "past":
+                                    todo_result = _sync_todo_checkpoint_from_dynamic(
+                                        proj,
+                                        latest_after,
+                                        return_payload=True,
+                                        skip_intent_check=True,
+                                    )
                                 elif not date_bucket:
                                     todo_result = _sync_todo_checkpoint_from_dynamic(proj, latest_after, return_payload=True)
 
@@ -10882,12 +10902,25 @@ elif menu == MENU_SPECIFIC:
             st.caption("先看这个项目现在整体走到哪一步，再决定要不要补记录或进专项模块。")
             st.markdown("**🔬 项目进度透视矩阵 (并行连消追踪)**")
             st.caption("颜色说明：🟩 已完成 ｜ 🟦 进行中/生产中 ｜ ⬛ 暂停前已流转 ｜ 🟨 Delay ｜ ⬜ 未流转")
+            st.caption("默认模块（头雕/素体/手型/配件/地台）在没有单独推进前，会跟随全局进度点亮；单独改了模块进度后，再按模块自身显示。")
             comps = db[sel_proj].get('部件列表', {})
             if not comps:
                 st.warning("暂无录入部件明细。请在更新区先补一条项目记录。")
             else:
                 z_data = []
-                y_labels = list(comps.keys())
+                matrix_rows = build_project_progress_matrix_rows(db.get(sel_proj, {}))
+                if not matrix_rows:
+                    matrix_rows = [
+                        {
+                            "component": str(comp_name).strip() or "全局进度",
+                            "owner": str((comp_info or {}).get("负责人", "")).strip() if isinstance(comp_info, dict) else "",
+                            "info": comp_info if isinstance(comp_info, dict) else {},
+                            "inherits_global": False,
+                            "source_component": str(comp_name).strip() or "全局进度",
+                        }
+                        for comp_name, comp_info in comps.items()
+                    ]
+                y_labels = [row.get("component", "全局进度") for row in matrix_rows]
                 y_labels_display = []
                 hover_text = []
                 global_comp_key = next((k for k in comps.keys() if "全局" in k), "全局进度")
@@ -10896,16 +10929,19 @@ elif menu == MENU_SPECIFIC:
                 factory_idx = STAGES_UNIFIED.index("工厂复样(含胶件/上色等)") if "工厂复样(含胶件/上色等)" in STAGES_UNIFIED else None
                 project_in_production = str(db[sel_proj].get("Milestone", "")).strip() == "生产中"
                 production_start_date = get_project_production_start_date(db.get(sel_proj, {})) if project_in_production else None
-                for comp_name in y_labels:
-                    owner_str = comps[comp_name].get('负责人', '').strip()
+                for matrix_row in matrix_rows:
+                    comp_name = str(matrix_row.get("component", "")).strip() or "全局进度"
+                    comp_info = matrix_row.get("info", {}) if isinstance(matrix_row.get("info", {}), dict) else {}
+                    owner_str = str(matrix_row.get("owner", "")).strip()
+                    inherit_global = bool(matrix_row.get("inherits_global"))
                     display_name = f"{comp_name} 👤 {owner_str}" if owner_str and owner_str != '未分配' else comp_name
                     y_labels_display.append(display_name)
-                    cur_stage = comps[comp_name].get('主流程', STAGES_UNIFIED[0])
+                    cur_stage = comp_info.get('主流程', STAGES_UNIFIED[0])
                     c_idx = STAGES_UNIFIED.index(cur_stage) if cur_stage in STAGES_UNIFIED else 0
                     active_stages = set()
                     completed_stages = set()
                     stage_recent_logs = {}
-                    raw_logs = [log for log in comps[comp_name].get('日志流', []) if not is_hidden_system_log(log)]
+                    raw_logs = [log for log in comp_info.get('日志流', []) if not is_hidden_system_log(log)]
                     sorted_logs_desc = sorted(raw_logs, key=lambda x: x.get('日期', ''), reverse=True)
                     for log in sorted_logs_desc:
                         stg = log.get('工序', '')
@@ -10916,7 +10952,7 @@ elif menu == MENU_SPECIFIC:
 
                     active_stages, completed_stages = collect_stage_activity(raw_logs, STAGES_UNIFIED)
                     delayed_stages = get_stage_delay_set(raw_logs, SYS_CFG.get("排期基线", {}))
-                    cur_is_paused = is_pause_stage(cur_stage) or (global_is_paused and "全局" not in comp_name)
+                    cur_is_paused = is_pause_stage(cur_stage) or (global_is_paused and "全局" not in comp_name and inherit_global)
                     if cur_is_paused:
                         pause_anchor_idx = None
                         parsed_logs = []
@@ -10963,6 +10999,8 @@ elif menu == MENU_SPECIFIC:
                     for i in range(len(STAGES_UNIFIED)):
                         stg = STAGES_UNIFIED[i]
                         hover_base = f"部件: {comp_name}<br>负责人: {owner_str or '未分配'}<br>工序: {stg}"
+                        if inherit_global:
+                            hover_base += "<br>矩阵状态: 默认跟随全局进度"
                         recent = stage_recent_logs.get(stg, [])
                         if recent:
                             hover_base += "<br>最近日志:<br>• " + "<br>• ".join(recent)
@@ -13089,7 +13127,7 @@ elif menu == MENU_HISTORY:
                         if history_event_dirty:
                             sync_save_db("系统配置")
 
-                        msg = f"当日修正已保存：更新 {update_count} 条，删除 {delete_count} 条，影响 {len(touched_projects)} 个项目。"
+                        msg = f"当日修正已保存：更新 {update_count} 条，删除 {delete_count} 条，影响 {len(touched_projects)} 个项目，并已刷新当前解释 / To-do 最近联动。"
                         if day_errors:
                             msg += f" 另有 {len(day_errors)} 条日期无效已跳过。"
                         st.success(msg)
@@ -13159,7 +13197,7 @@ elif menu == MENU_HISTORY:
             sync_save_db(sel_proj)
             if append_history_refresh_standard_event(sel_proj, actor=current_pm if current_pm != "所有人" else "系统"):
                 sync_save_db("系统配置")
-            st.success("✅ 历史记录已更新！")
+            st.success("✅ 历史记录已更新，已刷新当前解释 / To-do 最近联动！")
             st.rerun()
 
         st.divider()
