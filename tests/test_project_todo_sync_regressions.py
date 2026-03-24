@@ -137,6 +137,77 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         self.assertFalse(ns._contains_print_tracking_signal("[待办完成] 小比例Neo尼奥安排打印并涂装"))
         self.assertTrue(ns._contains_print_tracking_signal("第一版头雕已拆眼睛已安排内部打印"))
 
+    def test_get_print_tracking_status_payload_marks_cancelled_receipt_as_pending_today(self) -> None:
+        ns = load_app_functions(
+            "parse_date_safe",
+            "_get_print_tracking_status_payload",
+        )
+
+        payload = ns._get_print_tracking_status_payload(
+            {
+                "日期": "2026-03-10",
+                "描述": "第二版头雕",
+                "打印地点": "内部",
+                "已收到": False,
+                "收到日期": "2026-03-20",
+            },
+            action_type="打印追踪取消收件",
+        )
+
+        self.assertEqual(payload["event_day"], datetime.date.today())
+        self.assertIn("[取消收件]", payload["standard_content"])
+        self.assertIn("重新待收件", payload["standard_content"])
+        self.assertEqual(payload["place"], "内部")
+
+    def test_cancel_received_print_log_becomes_latest_pending_history(self) -> None:
+        ns = load_app_functions(
+            "norm_text",
+            "parse_date_safe",
+            "event_attention_priority",
+            "get_latest_project_log_binding",
+            "_get_print_tracking_status_payload",
+            "_append_print_tracking_status_log",
+            "_append_print_unreceived_log",
+        )
+        globals_map = ns.get_latest_project_log_binding.__globals__
+        globals_map["is_hidden_system_log"] = lambda log_obj: False
+        ns.db.update(
+            {
+                "1/6超女": {
+                    "部件列表": {
+                        "头雕(表情)": {
+                            "主流程": "建模(含打印/签样)",
+                            "日志流": [
+                                {
+                                    "日期": "2026-03-20",
+                                    "流转": "打印追踪",
+                                    "工序": "建模(含打印/签样)",
+                                    "事件": "[打印件已收到] 第二版头雕 | 来自：内部",
+                                }
+                            ],
+                        }
+                    }
+                }
+            }
+        )
+
+        appended = ns._append_print_unreceived_log(
+            {
+                "项目": "1/6超女",
+                "部件": "头雕(表情)",
+                "描述": "第二版头雕",
+                "打印地点": "内部",
+                "已收到": False,
+            }
+        )
+        latest = ns.get_latest_project_log_binding("1/6超女")
+
+        self.assertTrue(appended)
+        self.assertEqual(latest["component"], "头雕(表情)")
+        self.assertEqual(latest["log"]["日期"], str(datetime.date.today()))
+        self.assertIn("[取消收件]", latest["log"]["事件"])
+        self.assertIn("重新待收件", latest["log"]["事件"])
+
     def test_get_standard_event_display_people_hides_dashboard_followup_person(self) -> None:
         ns = load_app_functions(
             "norm_text",

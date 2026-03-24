@@ -8353,21 +8353,46 @@ def _merge_print_tracking_rows(stored_rows, auto_rows):
     return _dedupe_print_rows_semantically(merged)
 
 
-def _append_print_received_log(row_obj):
+def _get_print_tracking_status_payload(row_obj, action_type="打印追踪更新"):
+    row = row_obj if isinstance(row_obj, dict) else {}
+    desc = str(row.get("\u63cf\u8ff0", "")).strip() or "(\u65e0\u63cf\u8ff0)"
+    place = str(row.get("\u6253\u5370\u5730\u70b9", "")).strip()
+    recv_flag = bool(row.get("\u5df2\u6536\u5230", False))
+    action = str(action_type or "").strip()
+    canceled = (not recv_flag) and action in ["打印追踪取消收件", "打印追踪撤回收件"]
+
+    if recv_flag:
+        event_day = parse_date_safe(row.get("\u6536\u5230\u65e5\u671f", "")) or parse_date_safe(row.get("\u65e5\u671f", "")) or datetime.date.today()
+        standard_content = f"[\u6253\u5370\u4ef6\u5df2\u6536\u5230] {desc}" + (f" | \u6765\u81ea\uff1a{place}" if place else "")
+        log_content = standard_content
+    elif canceled:
+        event_day = datetime.date.today()
+        standard_content = f"[\u53d6\u6d88\u6536\u4ef6] {desc} | \u91cd\u65b0\u5f85\u6536\u4ef6" + (f" | \u6253\u5370\u5730\u70b9\uff1a{place}" if place else "")
+        log_content = f"[\u53d6\u6d88\u6536\u4ef6] {desc} | \u91cd\u65b0\u5f85\u6536\u4ef6" + (f" | \u6765\u81ea\uff1a{place}" if place else "")
+    else:
+        event_day = parse_date_safe(row.get("\u65e5\u671f", "")) or datetime.date.today()
+        standard_content = desc + (f" | \u6253\u5370\u5730\u70b9\uff1a{place}" if place else "")
+        log_content = standard_content
+
+    return {
+        "event_day": event_day,
+        "desc": desc,
+        "place": place,
+        "received": recv_flag,
+        "canceled": canceled,
+        "standard_content": standard_content,
+        "log_content": log_content,
+    }
+
+
+def _append_print_tracking_status_log(row_obj, action_type="打印追踪更新"):
     row = row_obj if isinstance(row_obj, dict) else {}
     proj = str(row.get("\u9879\u76ee", "")).strip()
     if (not proj) or proj not in db or proj == "\u7cfb\u7edf\u914d\u7f6e":
         return False
 
     comp_name = str(row.get("\u90e8\u4ef6", "")).strip() or "\u5168\u5c40\u8fdb\u5ea6"
-    desc = str(row.get("\u63cf\u8ff0", "")).strip() or "(\u65e0\u63cf\u8ff0)"
-    place = str(row.get("\u6253\u5370\u5730\u70b9", "")).strip() or "\u672a\u586b\u5199"
-
-    recv_date = str(row.get("\u6536\u5230\u65e5\u671f", "")).strip() or str(row.get("\u65e5\u671f", "")).strip() or str(datetime.date.today())
-    try:
-        recv_date = str(datetime.datetime.strptime(recv_date, "%Y-%m-%d").date())
-    except Exception:
-        recv_date = str(datetime.date.today())
+    payload = _get_print_tracking_status_payload(row, action_type=action_type)
 
     proj_data = db.get(proj, {})
     comp_map = proj_data.setdefault("\u90e8\u4ef6\u5217\u8868", {})
@@ -8384,12 +8409,20 @@ def _append_print_received_log(row_obj):
 
     log_list = comp_map[target_comp].setdefault("\u65e5\u5fd7\u6d41", [])
     log_list.append({
-        "\u65e5\u671f": recv_date,
+        "\u65e5\u671f": str(payload["event_day"]),
         "\u6d41\u8f6c": "\u6253\u5370\u8ffd\u8e2a",
         "\u5de5\u5e8f": "\u5efa\u6a21(\u542b\u6253\u5370/\u7b7e\u6837)",
-        "\u4e8b\u4ef6": f"[\u6253\u5370\u4ef6\u5df2\u6536\u5230] {desc} | \u6765\u81ea\uff1a{place}",
+        "\u4e8b\u4ef6": str(payload.get("log_content", "")).strip(),
     })
     return True
+
+
+def _append_print_received_log(row_obj):
+    return _append_print_tracking_status_log(row_obj, action_type="打印追踪更新")
+
+
+def _append_print_unreceived_log(row_obj):
+    return _append_print_tracking_status_log(row_obj, action_type="打印追踪取消收件")
 
 
 def _append_print_tracking_standard_event(row_obj, action_type="打印追踪更新"):
@@ -8398,28 +8431,21 @@ def _append_print_tracking_standard_event(row_obj, action_type="打印追踪更�
     if (not proj) or proj not in db or proj == "系统配置":
         return False
     comp_name = str(row.get("部件", "")).strip() or "全局进度"
-    desc = str(row.get("描述", "")).strip() or "(无描述)"
-    place = str(row.get("打印地点", "")).strip()
-    recv_flag = bool(row.get("已收到", False))
-    event_day = parse_date_safe(row.get("收到日期", "")) or parse_date_safe(row.get("日期", "")) or datetime.date.today()
-    if recv_flag:
-        content = f"[打印件已收到] {desc}" + (f" | 来自：{place}" if place else "")
-    else:
-        content = desc + (f" | 打印地点：{place}" if place else "")
+    payload = _get_print_tracking_status_payload(row, action_type=action_type)
     return append_standard_event_entry(
         source_module="打印追踪",
         action_type=action_type,
         project_name=proj,
-        event_date=event_day,
+        event_date=payload["event_day"],
         component_name=comp_name,
         stage_name="建模(含打印/签样)",
-        content_text=content,
-        raw_text=desc,
+        content_text=str(payload.get("standard_content", "")).strip(),
+        raw_text=str(payload.get("desc", "")).strip(),
         actor="系统",
         intent="past",
         extra_payload={
-            "打印地点": place,
-            "已收到": recv_flag,
+            "打印地点": str(payload.get("place", "")).strip(),
+            "已收到": bool(payload.get("received", False)),
             "收到日期": str(row.get("收到日期", "")).strip(),
         },
     )
@@ -8563,9 +8589,12 @@ def render_print_tracking_board(pm_view, visible_projects, ui_prefix="print_trac
                 "\u6765\u6e90": source_raw if source_raw in PRINT_TRACK_SOURCE_LABELS else "\u624b\u52a8\u5f55\u5165",
             }
             row = _normalize_print_tracking_rows([row])[0]
+            if not row.get("\u5df2\u6536\u5230"):
+                row["\u6536\u5230\u65e5\u671f"] = ""
 
             old_row = old_map.get(rid, {})
             old_recv = bool(old_row.get("\u5df2\u6536\u5230", False))
+            standard_action = "打印追踪更新" if old_row else "打印追踪新增"
             row_changed = any(
                 str(old_row.get(k, "")).strip() != str(row.get(k, "")).strip()
                 for k in ["日期", "项目", "部件", "描述", "打印地点", "收到日期"]
@@ -8575,10 +8604,14 @@ def render_print_tracking_board(pm_view, visible_projects, ui_prefix="print_trac
                     row["\u6536\u5230\u65e5\u671f"] = str(datetime.date.today())
                 if _append_print_received_log(row):
                     changed_projects.add(str(row.get("\u9879\u76ee", "")).strip())
+            elif old_recv and (not row.get("\u5df2\u6536\u5230")):
+                standard_action = "打印追踪取消收件"
+                if _append_print_unreceived_log(row):
+                    changed_projects.add(str(row.get("\u9879\u76ee", "")).strip())
             if row_changed:
                 standard_event_dirty = _append_print_tracking_standard_event(
                     row,
-                    action_type="打印追踪更新" if old_row else "打印追踪新增",
+                    action_type=standard_action,
                 ) or standard_event_dirty
 
             if str(row.get("\u6253\u5370\u5730\u70b9", "")).strip():
@@ -13094,7 +13127,7 @@ elif menu == MENU_HISTORY:
                         if history_event_dirty:
                             sync_save_db("系统配置")
 
-                        msg = f"当日修正已保存：更新 {update_count} 条，删除 {delete_count} 条，影响 {len(touched_projects)} 个项目。"
+                        msg = f"当日修正已保存：更新 {update_count} 条，删除 {delete_count} 条，影响 {len(touched_projects)} 个项目，并已刷新当前解释 / To-do 最近联动。"
                         if day_errors:
                             msg += f" 另有 {len(day_errors)} 条日期无效已跳过。"
                         st.success(msg)
@@ -13164,7 +13197,7 @@ elif menu == MENU_HISTORY:
             sync_save_db(sel_proj)
             if append_history_refresh_standard_event(sel_proj, actor=current_pm if current_pm != "所有人" else "系统"):
                 sync_save_db("系统配置")
-            st.success("✅ 历史记录已更新！")
+            st.success("✅ 历史记录已更新，已刷新当前解释 / To-do 最近联动！")
             st.rerun()
 
         st.divider()
