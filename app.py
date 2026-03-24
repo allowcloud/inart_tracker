@@ -1368,6 +1368,7 @@ _ensure_runtime_state_defaults()
 SYS_CFG = st.session_state.db.setdefault("系统配置", {})
 STAGES_UNIFIED = list(SYS_CFG.get("标准阶段", DEFAULT_SYS_CFG["标准阶段"]))
 STD_COMPONENTS = list(SYS_CFG.get("标准部件", DEFAULT_SYS_CFG["标准部件"]))
+MATRIX_FOLLOW_COMPONENTS = ["头雕(表情)", "素体", "手型", "配件", "地台"]
 MACRO_STAGES = list(SYS_CFG.get("宏观阶段", DEFAULT_SYS_CFG["宏观阶段"]))
 
 
@@ -1490,6 +1491,75 @@ def collect_project_review_rows(project_name):
                 "轮次": review_round if review_round else "",
                 "事件": str(lg.get("事件", "")).strip(),
             })
+    return rows
+
+
+def component_matrix_follows_global_progress(component_name, component_info, global_info):
+    comp_name = str(component_name or "").strip()
+    if (not comp_name) or ("全局" in comp_name):
+        return False
+
+    global_data = global_info if isinstance(global_info, dict) else {}
+    global_stage = str(global_data.get("主流程", "")).strip()
+    if not global_stage:
+        return False
+
+    info = component_info if isinstance(component_info, dict) else {}
+    raw_logs = [log for log in info.get("日志流", []) if not is_hidden_system_log(log)]
+    if raw_logs:
+        return False
+
+    stage = str(info.get("主流程", "")).strip()
+    if (not stage) or (stage == global_stage):
+        return True
+
+    default_stage = STAGES_UNIFIED[0] if STAGES_UNIFIED else ""
+    return bool(default_stage and stage == default_stage)
+
+
+def build_project_progress_matrix_rows(project_data):
+    proj = project_data if isinstance(project_data, dict) else {}
+    comps = proj.get("部件列表", {})
+    if not isinstance(comps, dict) or not comps:
+        return []
+
+    global_key = next((k for k in comps.keys() if "全局" in str(k)), "")
+    global_info = comps.get(global_key, {}) if global_key else {}
+
+    ordered_names = []
+    if global_key:
+        ordered_names.append(global_key)
+        for comp_name in MATRIX_FOLLOW_COMPONENTS:
+            if comp_name not in ordered_names:
+                ordered_names.append(comp_name)
+    for comp_name in comps.keys():
+        if comp_name not in ordered_names:
+            ordered_names.append(comp_name)
+
+    rows = []
+    for comp_name in ordered_names:
+        own_info = comps.get(comp_name, {})
+        inherit_global = bool(
+            global_key
+            and comp_name != global_key
+            and comp_name in MATRIX_FOLLOW_COMPONENTS
+            and component_matrix_follows_global_progress(comp_name, own_info, global_info)
+        )
+        source_info = global_info if inherit_global else (own_info if isinstance(own_info, dict) else {})
+        if not isinstance(source_info, dict):
+            source_info = {}
+
+        owner = ""
+        if isinstance(own_info, dict):
+            owner = str(own_info.get("负责人", "")).strip()
+
+        rows.append({
+            "component": str(comp_name).strip() or "全局进度",
+            "owner": owner,
+            "info": source_info,
+            "inherits_global": inherit_global,
+            "source_component": global_key if inherit_global else str(comp_name).strip() or "全局进度",
+        })
     return rows
 
 
@@ -10737,12 +10807,25 @@ elif menu == MENU_SPECIFIC:
             st.caption("先看这个项目现在整体走到哪一步，再决定要不要补记录或进专项模块。")
             st.markdown("**🔬 项目进度透视矩阵 (并行连消追踪)**")
             st.caption("颜色说明：🟩 已完成 ｜ 🟦 进行中/生产中 ｜ ⬛ 暂停前已流转 ｜ 🟨 Delay ｜ ⬜ 未流转")
+            st.caption("默认模块（头雕/素体/手型/配件/地台）在没有单独推进前，会跟随全局进度点亮；单独改了模块进度后，再按模块自身显示。")
             comps = db[sel_proj].get('部件列表', {})
             if not comps:
                 st.warning("暂无录入部件明细。请在更新区先补一条项目记录。")
             else:
                 z_data = []
-                y_labels = list(comps.keys())
+                matrix_rows = build_project_progress_matrix_rows(db.get(sel_proj, {}))
+                if not matrix_rows:
+                    matrix_rows = [
+                        {
+                            "component": str(comp_name).strip() or "全局进度",
+                            "owner": str((comp_info or {}).get("负责人", "")).strip() if isinstance(comp_info, dict) else "",
+                            "info": comp_info if isinstance(comp_info, dict) else {},
+                            "inherits_global": False,
+                            "source_component": str(comp_name).strip() or "全局进度",
+                        }
+                        for comp_name, comp_info in comps.items()
+                    ]
+                y_labels = [row.get("component", "全局进度") for row in matrix_rows]
                 y_labels_display = []
                 hover_text = []
                 global_comp_key = next((k for k in comps.keys() if "全局" in k), "全局进度")
@@ -10751,16 +10834,19 @@ elif menu == MENU_SPECIFIC:
                 factory_idx = STAGES_UNIFIED.index("工厂复样(含胶件/上色等)") if "工厂复样(含胶件/上色等)" in STAGES_UNIFIED else None
                 project_in_production = str(db[sel_proj].get("Milestone", "")).strip() == "生产中"
                 production_start_date = get_project_production_start_date(db.get(sel_proj, {})) if project_in_production else None
-                for comp_name in y_labels:
-                    owner_str = comps[comp_name].get('负责人', '').strip()
+                for matrix_row in matrix_rows:
+                    comp_name = str(matrix_row.get("component", "")).strip() or "全局进度"
+                    comp_info = matrix_row.get("info", {}) if isinstance(matrix_row.get("info", {}), dict) else {}
+                    owner_str = str(matrix_row.get("owner", "")).strip()
+                    inherit_global = bool(matrix_row.get("inherits_global"))
                     display_name = f"{comp_name} 👤 {owner_str}" if owner_str and owner_str != '未分配' else comp_name
                     y_labels_display.append(display_name)
-                    cur_stage = comps[comp_name].get('主流程', STAGES_UNIFIED[0])
+                    cur_stage = comp_info.get('主流程', STAGES_UNIFIED[0])
                     c_idx = STAGES_UNIFIED.index(cur_stage) if cur_stage in STAGES_UNIFIED else 0
                     active_stages = set()
                     completed_stages = set()
                     stage_recent_logs = {}
-                    raw_logs = [log for log in comps[comp_name].get('日志流', []) if not is_hidden_system_log(log)]
+                    raw_logs = [log for log in comp_info.get('日志流', []) if not is_hidden_system_log(log)]
                     sorted_logs_desc = sorted(raw_logs, key=lambda x: x.get('日期', ''), reverse=True)
                     for log in sorted_logs_desc:
                         stg = log.get('工序', '')
@@ -10771,7 +10857,7 @@ elif menu == MENU_SPECIFIC:
 
                     active_stages, completed_stages = collect_stage_activity(raw_logs, STAGES_UNIFIED)
                     delayed_stages = get_stage_delay_set(raw_logs, SYS_CFG.get("排期基线", {}))
-                    cur_is_paused = is_pause_stage(cur_stage) or (global_is_paused and "全局" not in comp_name)
+                    cur_is_paused = is_pause_stage(cur_stage) or (global_is_paused and "全局" not in comp_name and inherit_global)
                     if cur_is_paused:
                         pause_anchor_idx = None
                         parsed_logs = []
@@ -10818,6 +10904,8 @@ elif menu == MENU_SPECIFIC:
                     for i in range(len(STAGES_UNIFIED)):
                         stg = STAGES_UNIFIED[i]
                         hover_base = f"部件: {comp_name}<br>负责人: {owner_str or '未分配'}<br>工序: {stg}"
+                        if inherit_global:
+                            hover_base += "<br>矩阵状态: 默认跟随全局进度"
                         recent = stage_recent_logs.get(stg, [])
                         if recent:
                             hover_base += "<br>最近日志:<br>• " + "<br>• ".join(recent)

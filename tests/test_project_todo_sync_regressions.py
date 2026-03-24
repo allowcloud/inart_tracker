@@ -724,5 +724,95 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         self.assertEqual(latest["component"], head_component)
         self.assertEqual(latest["log"]["\u4e8b\u4ef6"], "\u7b2c\u4e8c\u7248\u5934\u96d53/23\u5df2\u5b89\u6392\u6253\u5370\uff0c\u5f85\u6536\u4ef6")
 
+    def test_build_project_progress_matrix_rows_seeds_default_follow_components_from_global(self) -> None:
+        ns = load_app_functions(
+            "component_matrix_follows_global_progress",
+            "build_project_progress_matrix_rows",
+        )
+        globals_map = ns.build_project_progress_matrix_rows.__globals__
+        globals_map["STAGES_UNIFIED"] = [
+            "\u7acb\u9879",
+            "\u5efa\u6a21(\u542b\u6253\u5370/\u7b7e\u6837)",
+            "\u5b98\u56fe",
+            "\u5de5\u5382\u590d\u6837(\u542b\u80f6\u4ef6/\u4e0a\u8272\u7b49)",
+            "\u5927\u8d27",
+            "\u23f8\ufe0f \u6682\u505c/\u6401\u7f6e",
+            "\u2705 \u5df2\u5b8c\u6210(\u7ed3\u675f)",
+        ]
+        globals_map["MATRIX_FOLLOW_COMPONENTS"] = [
+            "\u5934\u96d5(\u8868\u60c5)",
+            "\u7d20\u4f53",
+            "\u624b\u578b",
+            "\u914d\u4ef6",
+            "\u5730\u53f0",
+        ]
+        globals_map["is_hidden_system_log"] = lambda log_obj: False
+
+        rows = ns.build_project_progress_matrix_rows(
+            {
+                "\u90e8\u4ef6\u5217\u8868": {
+                    "\u5168\u5c40\u8fdb\u5ea6": {
+                        "\u4e3b\u6d41\u7a0b": "\u5b98\u56fe",
+                        "\u65e5\u5fd7\u6d41": [{"\u65e5\u671f": "2026-03-24", "\u5de5\u5e8f": "\u5b98\u56fe", "\u4e8b\u4ef6": "\u9879\u76ee\u63a8\u8fdb"}],
+                    }
+                }
+            }
+        )
+
+        self.assertEqual(
+            [row["component"] for row in rows],
+            [
+                "\u5168\u5c40\u8fdb\u5ea6",
+                "\u5934\u96d5(\u8868\u60c5)",
+                "\u7d20\u4f53",
+                "\u624b\u578b",
+                "\u914d\u4ef6",
+                "\u5730\u53f0",
+            ],
+        )
+        follower = next(row for row in rows if row["component"] == "\u5934\u96d5(\u8868\u60c5)")
+        self.assertTrue(follower["inherits_global"])
+        self.assertEqual(follower["source_component"], "\u5168\u5c40\u8fdb\u5ea6")
+        self.assertEqual(follower["info"]["\u4e3b\u6d41\u7a0b"], "\u5b98\u56fe")
+
+    def test_component_matrix_follows_global_progress_keeps_unedited_seed_component_following_global(self) -> None:
+        ns = load_app_functions("component_matrix_follows_global_progress")
+        globals_map = ns.component_matrix_follows_global_progress.__globals__
+        globals_map["STAGES_UNIFIED"] = [
+            "\u7acb\u9879",
+            "\u5efa\u6a21(\u542b\u6253\u5370/\u7b7e\u6837)",
+            "\u5b98\u56fe",
+        ]
+        globals_map["is_hidden_system_log"] = lambda log_obj: False
+
+        follows = ns.component_matrix_follows_global_progress(
+            "\u624b\u578b",
+            {"\u8d1f\u8d23\u4eba": "Mo", "\u4e3b\u6d41\u7a0b": "\u7acb\u9879", "\u65e5\u5fd7\u6d41": []},
+            {"\u4e3b\u6d41\u7a0b": "\u5b98\u56fe", "\u65e5\u5fd7\u6d41": [{"\u65e5\u671f": "2026-03-24", "\u5de5\u5e8f": "\u5b98\u56fe"}]},
+        )
+
+        self.assertTrue(follows)
+
+    def test_component_matrix_follows_global_progress_respects_explicit_component_override(self) -> None:
+        ns = load_app_functions("component_matrix_follows_global_progress")
+        globals_map = ns.component_matrix_follows_global_progress.__globals__
+        globals_map["STAGES_UNIFIED"] = [
+            "\u7acb\u9879",
+            "\u5efa\u6a21(\u542b\u6253\u5370/\u7b7e\u6837)",
+            "\u5b98\u56fe",
+        ]
+        globals_map["is_hidden_system_log"] = lambda log_obj: False
+
+        follows = ns.component_matrix_follows_global_progress(
+            "\u624b\u578b",
+            {
+                "\u4e3b\u6d41\u7a0b": "\u5efa\u6a21(\u542b\u6253\u5370/\u7b7e\u6837)",
+                "\u65e5\u5fd7\u6d41": [{"\u65e5\u671f": "2026-03-24", "\u5de5\u5e8f": "\u5efa\u6a21(\u542b\u6253\u5370/\u7b7e\u6837)", "\u4e8b\u4ef6": "\u624b\u578b\u5f85\u786e\u8ba4"}],
+            },
+            {"\u4e3b\u6d41\u7a0b": "\u5b98\u56fe", "\u65e5\u5fd7\u6d41": [{"\u65e5\u671f": "2026-03-24", "\u5de5\u5e8f": "\u5b98\u56fe"}]},
+        )
+
+        self.assertFalse(follows)
+
 if __name__ == "__main__":
     unittest.main()
