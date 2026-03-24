@@ -362,7 +362,7 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         self.assertEqual(todo_row["最近联动部件"], "全局进度")
         self.assertEqual(todo_row["最近联动阶段"], "官图")
 
-    def test_extract_dashboard_todo_segments_infers_component_and_stage_from_natural_text(self) -> None:
+    def check_extract_dashboard_todo_segments_infers_component_and_stage_from_natural_text(self) -> None:
         ns = load_app_functions("extract_dashboard_todo_segments", "extract_todo_segment_hints")
         globals_map = ns.extract_dashboard_todo_segments.__globals__
         globals_map["db"].update(
@@ -428,6 +428,182 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         self.assertIsNone(rows[1]["due_dt"])
         self.assertTrue(rows[1]["allow_empty_due"])
 
+    def test_extract_dashboard_todo_segments_infers_component_and_stage_from_natural_text_v2(self) -> None:
+        ns = load_app_functions(
+            "clean_auto_todo_task_text",
+            "refine_dashboard_todo_task_text",
+            "extract_dashboard_todo_segments",
+            "extract_todo_segment_hints",
+        )
+        globals_map = ns.extract_dashboard_todo_segments.__globals__
+        project_name = "1/6\u9a6c\u5c14\u798f"
+        head_component = "\u5934\u96d5(\u8868\u60c5)"
+        packaging_component = "\u5305\u88c5"
+        globals_map["db"].update(
+            {
+                project_name: {
+                    "\u90e8\u4ef6\u5217\u8868": {
+                        head_component: {},
+                        packaging_component: {},
+                        "\u5168\u5c40\u8fdb\u5ea6": {},
+                    }
+                }
+            }
+        )
+        globals_map["norm_text"] = lambda text: str(text or "").strip().lower().replace(" ", "")
+        globals_map["classify_temporal_event_route"] = (
+            lambda text, ref_date=None, prefer_past=False: {
+                "route": "todo",
+                "date": None,
+                "body": str(text or "").strip(),
+                "intent": "todo",
+                "date_bucket": "",
+            }
+        )
+
+        def _extract_date(text, ref_date=None, prefer_past=False):
+            raw = str(text or "").strip()
+            m = re.search(r"(\d{1,2})/(\d{1,2})", raw)
+            if not m:
+                return None, raw
+            mm = int(m.group(1))
+            dd = int(m.group(2))
+            body = (raw[:m.start()] + " " + raw[m.end():]).strip()
+            return datetime.date(2026, mm, dd), body
+
+        globals_map["extract_event_date_and_body"] = _extract_date
+        globals_map["clean_auto_todo_task_text"] = lambda text: re.sub(r"\s+", " ", str(text or "").strip())
+        globals_map["get_component_keyword_map"] = lambda: {
+            "\u690d\u53d1": "\u690d\u53d1",
+            "\u9a6c\u6d77\u6bdb": "\u690d\u53d1",
+            "\u5f69\u76d2": packaging_component,
+            "\u5730\u53f0\u8d34": packaging_component,
+        }
+        globals_map["get_stage_keyword_map"] = lambda: {
+            "\u6253\u6837": "\u5efa\u6a21(\u542b\u6253\u5370/\u7b7e\u6837)",
+            "\u4fee\u6539": "\u5efa\u6a21(\u542b\u6253\u5370/\u7b7e\u6837)",
+        }
+        globals_map["infer_todo_handoff_prefill"] = lambda td, proj_name: {}
+
+        rows = ns.extract_dashboard_todo_segments(
+            "\u9a6c\u6d77\u6bdb\u9884\u8ba14/20\u5230\u8d27\u5f00\u59cb\u690d\u53d1\uff1b\u5730\u53f0\u8d34\u9700\u4fee\u6539\u3001\u5f69\u76d2\u9700\u4fee\u6539\u70eb\u8272\uff0c\u5df2\u8f6c\u4ea4\u7acb\u5b87\u5f85\u6253\u6837",
+            project_name=project_name,
+            ref_date=datetime.date(2026, 3, 23),
+        )
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["task"], "\u9a6c\u6d77\u6bdb\u5230\u8d27")
+        self.assertEqual(rows[0]["component"], head_component)
+        self.assertEqual(rows[0]["stage"], "\u5927\u8d27")
+        self.assertEqual(rows[0]["due_dt"], datetime.date(2026, 4, 20))
+        self.assertEqual(rows[1]["task"], "\u5730\u53f0\u8d34\u3001\u5f69\u76d2\u5f85\u7acb\u5b87\u6253\u6837")
+        self.assertEqual(rows[1]["component"], packaging_component)
+        self.assertEqual(rows[1]["stage"], "\u5de5\u5382\u590d\u6837(\u542b\u80f6\u4ef6/\u4e0a\u8272\u7b49)")
+        self.assertIsNone(rows[1]["due_dt"])
+        self.assertTrue(rows[1]["allow_empty_due"])
+
+    def test_extract_dashboard_todo_segments_keeps_followup_todo_after_past_progress(self) -> None:
+        ns = load_app_functions(
+            "clean_auto_todo_task_text",
+            "extract_event_date_and_body",
+            "classify_text_intent",
+            "classify_temporal_event_route",
+            "extract_followup_todo_clause",
+            "extract_dashboard_todo_segments",
+            "extract_todo_segment_hints",
+        )
+        globals_map = ns.extract_dashboard_todo_segments.__globals__
+        project_name = "1/6\u9a6c\u5c14\u798f"
+        head_component = "\u5934\u96d5(\u8868\u60c5)"
+        globals_map["db"].update(
+            {
+                project_name: {
+                    "\u90e8\u4ef6\u5217\u8868": {
+                        head_component: {},
+                        "\u5168\u5c40\u8fdb\u5ea6": {},
+                    }
+                }
+            }
+        )
+        globals_map["norm_text"] = lambda text: str(text or "").strip().lower().replace(" ", "")
+        globals_map["get_recognition_keywords"] = lambda key: {
+            "\u672a\u6765\u610f\u56fe\u8bcd": ["\u5f85", "\u5f85\u529e", "\u9700\u8981", "\u9700", "\u9884\u8ba1", "cp"],
+            "\u8fc7\u53bb\u610f\u56fe\u8bcd": ["\u5df2", "\u5df2\u7ecf", "\u5b8c\u6210", "\u6536\u5230", "\u5b89\u6392\u4e86", "\u5df2\u5b89\u6392"],
+            "\u65e5\u671f\u566a\u97f3\u8bcd": ["\u9884\u8ba1", "\u5de6\u53f3", "\u5927\u6982", "\u7ea6"],
+        }.get(key, [])
+        globals_map["get_component_keyword_map"] = lambda: {
+            "\u5934\u96d5": head_component,
+            "\u8138": head_component,
+        }
+        globals_map["get_stage_keyword_map"] = lambda: {
+            "\u6253\u5370": "\u5efa\u6a21(\u542b\u6253\u5370/\u7b7e\u6837)",
+        }
+        globals_map["infer_todo_handoff_prefill"] = lambda td, proj_name: {}
+
+        rows = ns.extract_dashboard_todo_segments(
+            "\u7b2c\u4e8c\u7248\u5934\u96d53/23\u5df2\u5b89\u6392\u6253\u5370\uff0c\u5f85\u6536\u4ef6",
+            project_name=project_name,
+            ref_date=datetime.date(2026, 3, 24),
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["task"], "\u5f85\u6536\u4ef6")
+        self.assertEqual(rows[0]["route"], "todo")
+        self.assertIsNone(rows[0]["due_dt"])
+        self.assertTrue(rows[0]["allow_empty_due"])
+        self.assertEqual(rows[0]["component"], head_component)
+        self.assertEqual(rows[0]["stage"], "\u5efa\u6a21(\u542b\u6253\u5370/\u7b7e\u6837)")
+
+    def test_extract_dashboard_todo_segments_strips_cp_tail_and_keeps_due_date(self) -> None:
+        ns = load_app_functions(
+            "clean_auto_todo_task_text",
+            "refine_dashboard_todo_task_text",
+            "extract_event_date_and_body",
+            "classify_text_intent",
+            "classify_temporal_event_route",
+            "extract_followup_todo_clause",
+            "extract_dashboard_todo_segments",
+            "extract_todo_segment_hints",
+        )
+        globals_map = ns.extract_dashboard_todo_segments.__globals__
+        project_name = "1/6\u9a6c\u5c14\u798f"
+        globals_map["db"].update(
+            {
+                project_name: {
+                    "\u90e8\u4ef6\u5217\u8868": {
+                        "\u914d\u4ef6": {},
+                        "\u5168\u5c40\u8fdb\u5ea6": {},
+                    }
+                }
+            }
+        )
+        globals_map["norm_text"] = lambda text: str(text or "").strip().lower().replace(" ", "")
+        globals_map["get_recognition_keywords"] = lambda key: {
+            "\u672a\u6765\u610f\u56fe\u8bcd": ["\u5f85", "\u5f85\u529e", "\u9700\u8981", "\u9700", "\u9884\u8ba1", "cp"],
+            "\u8fc7\u53bb\u610f\u56fe\u8bcd": ["\u5df2", "\u5df2\u7ecf", "\u5b8c\u6210", "\u6536\u5230", "\u5b89\u6392\u4e86", "\u5df2\u5b89\u6392"],
+            "\u65e5\u671f\u566a\u97f3\u8bcd": ["\u9884\u8ba1", "\u5de6\u53f3", "\u5927\u6982", "\u7ea6"],
+        }.get(key, [])
+        globals_map["get_component_keyword_map"] = lambda: {
+            "\u6263\u5b50": "\u914d\u4ef6",
+            "\u516c\u6587\u5305": "\u914d\u4ef6",
+        }
+        globals_map["get_stage_keyword_map"] = lambda: {}
+        globals_map["infer_todo_handoff_prefill"] = lambda td, proj_name: {}
+
+        rows = ns.extract_dashboard_todo_segments(
+            "\u516c\u6587\u5305\u6263\u5b50\u5df2\u7ecf17\uff0c\u5f85\u786e\u8ba4\u62c9\u4f4d\uff0cCP3/25",
+            project_name=project_name,
+            ref_date=datetime.date(2026, 3, 24),
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["task"], "\u516c\u6587\u5305\u6263\u5b50\u5df2\u7ecf17\uff0c\u5f85\u786e\u8ba4\u62c9\u4f4d")
+        self.assertEqual(rows[0]["route"], "todo")
+        self.assertEqual(rows[0]["due_dt"], datetime.date(2026, 3, 25))
+        self.assertFalse(rows[0]["allow_empty_due"])
+        self.assertEqual(rows[0]["component"], "\u914d\u4ef6")
+        self.assertEqual(rows[0]["stage"], "\u5de5\u5382\u590d\u6837(\u542b\u80f6\u4ef6/\u4e0a\u8272\u7b49)")
+
     def test_upsert_todo_from_event_text_keeps_undated_dashboard_todo_hints(self) -> None:
         ns = load_app_functions("upsert_todo_from_event_text")
         globals_map = ns.upsert_todo_from_event_text.__globals__
@@ -467,6 +643,86 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         self.assertEqual(todo_row["默认落地部件"], "包装")
         self.assertEqual(todo_row["默认落地阶段"], "工厂复样(含胶件/上色等)")
 
+
+    def test_upsert_todo_from_event_text_can_skip_project_follow_people_fallback(self) -> None:
+        ns = load_app_functions("upsert_todo_from_event_text")
+        globals_map = ns.upsert_todo_from_event_text.__globals__
+        project_name = "1/6\u9a6c\u5c14\u798f"
+        globals_map["db"].update(
+            {
+                "\u7cfb\u7edf\u914d\u7f6e": {"PM_TODO_LIST": []},
+                project_name: {"\u8d1f\u8d23\u4eba": "\u8881", "\u8ddf\u5355": "\u6d6a"},
+            }
+        )
+        globals_map["extract_event_date_and_body"] = (
+            lambda text, ref_date=None, prefer_past=False: (datetime.date(2026, 3, 25), "\u516c\u6587\u5305\u6263\u5b50\u5df2\u7ed917\uff0c\u5f85\u786e\u8ba4\u6869\u4f4d")
+        )
+        globals_map["clean_auto_todo_task_text"] = lambda text: str(text or "").strip()
+        globals_map["normalize_people_text"] = lambda text: str(text or "").strip()
+        globals_map["normalize_todo_cpddl_for_storage"] = lambda cpddl_text, task_text="", due_dt=None: str(cpddl_text or "").strip()
+        globals_map["norm_text"] = lambda text: str(text or "").strip().lower()
+        globals_map["todo_matches_project"] = lambda td, proj: proj in (td.get("\u5173\u8054\u9879\u76ee\u5217\u8868", []) or []) or str(td.get("\u5173\u8054\u9879\u76ee", "")).strip() == proj
+        globals_map["todo_project_list"] = (
+            lambda td: [str(x).strip() for x in (td.get("\u5173\u8054\u9879\u76ee\u5217\u8868", []) or []) if str(x).strip()]
+            or ([str(td.get("\u5173\u8054\u9879\u76ee", "")).strip()] if str(td.get("\u5173\u8054\u9879\u76ee", "")).strip() else [])
+        )
+        globals_map["todo_append_history_version"] = lambda td, actor="\u7cfb\u7edf": None
+
+        result = ns.upsert_todo_from_event_text(
+            project_name,
+            "\u516c\u6587\u5305\u6263\u5b50\u5df2\u7ed917\uff0c\u5f85\u786e\u8ba4\u6869\u4f4d\uff0cCP3/25",
+            forced_due_dt=datetime.date(2026, 3, 25),
+            forced_task_body="\u516c\u6587\u5305\u6263\u5b50\u5df2\u7ed917\uff0c\u5f85\u786e\u8ba4\u6869\u4f4d",
+            return_payload=True,
+            forced_component="\u914d\u4ef6",
+            forced_stage="\u5de5\u5382\u590d\u6837(\u542b\u80f6\u4ef6/\u4e0a\u8272\u7b49)",
+            fallback_project_people=False,
+        )
+
+        self.assertEqual(result["status"], "created")
+        todo_row = globals_map["db"]["\u7cfb\u7edf\u914d\u7f6e"]["PM_TODO_LIST"][0]
+        self.assertEqual(todo_row["\u5173\u8054\u4eba\u5458"], "")
+
+    def test_get_latest_project_log_binding_prefers_pending_log_over_received_print_same_day(self) -> None:
+        ns = load_app_functions(
+            "norm_text",
+            "parse_date_safe",
+            "event_attention_priority",
+            "get_latest_project_log_binding",
+        )
+        globals_map = ns.get_latest_project_log_binding.__globals__
+        globals_map["is_hidden_system_log"] = lambda log_obj: False
+        project_name = "1/6\u8d85\u5973"
+        head_component = "\u5934\u96d5(\u8868\u60c5)"
+        globals_map["db"].update(
+            {
+                project_name: {
+                    "\u90e8\u4ef6\u5217\u8868": {
+                        head_component: {
+                            "\u65e5\u5fd7\u6d41": [
+                                {
+                                    "\u65e5\u671f": "2026-03-23",
+                                    "\u6d41\u8f6c": "\u6253\u5370\u8ffd\u8e2a",
+                                    "\u5de5\u5e8f": "\u5efa\u6a21(\u542b\u6253\u5370/\u7b7e\u6837)",
+                                    "\u4e8b\u4ef6": "[\u6253\u5370\u4ef6\u5df2\u6536\u5230] \u7b2c\u4e00\u7248\u5934\u96d5\u5df2\u62c6\u773c\u775b\u5df2\u5b89\u6392\u5185\u90e8\u6253\u5370 | \u6765\u81ea\uff1a\u5185\u90e8",
+                                },
+                                {
+                                    "\u65e5\u671f": "2026-03-23",
+                                    "\u6d41\u8f6c": "\u5927\u76d8\u52a8\u6001",
+                                    "\u5de5\u5e8f": "\u5efa\u6a21(\u542b\u6253\u5370/\u7b7e\u6837)",
+                                    "\u4e8b\u4ef6": "\u7b2c\u4e8c\u7248\u5934\u96d53/23\u5df2\u5b89\u6392\u6253\u5370\uff0c\u5f85\u6536\u4ef6",
+                                },
+                            ]
+                        }
+                    }
+                }
+            }
+        )
+
+        latest = ns.get_latest_project_log_binding(project_name)
+
+        self.assertEqual(latest["component"], head_component)
+        self.assertEqual(latest["log"]["\u4e8b\u4ef6"], "\u7b2c\u4e8c\u7248\u5934\u96d53/23\u5df2\u5b89\u6392\u6253\u5370\uff0c\u5f85\u6536\u4ef6")
 
 if __name__ == "__main__":
     unittest.main()
