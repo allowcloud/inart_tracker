@@ -1563,6 +1563,71 @@ def build_project_progress_matrix_rows(project_data):
     return rows
 
 
+def build_project_review_matrix_state(project_name, review_rows=None):
+    proj = str(project_name or "").strip()
+    rows = list(review_rows) if isinstance(review_rows, list) else collect_project_review_rows(proj)
+    if not rows:
+        return {"component_rows": [], "latest_map": {}}
+
+    base_rows = build_project_progress_matrix_rows(db.get(proj, {}))
+    component_rows = []
+    seen_components = set()
+
+    for row in base_rows:
+        comp_name = str(row.get("component", "")).strip() or "全局进度"
+        if comp_name in seen_components:
+            continue
+        component_rows.append({
+            "component": comp_name,
+            "inherits_global": bool(row.get("inherits_global")),
+            "source_component": str(row.get("source_component", "")).strip() or comp_name,
+        })
+        seen_components.add(comp_name)
+
+    for row in rows:
+        comp_name = str(row.get("部件", "")).strip() or "全局进度"
+        if comp_name in seen_components:
+            continue
+        component_rows.append({
+            "component": comp_name,
+            "inherits_global": False,
+            "source_component": comp_name,
+        })
+        seen_components.add(comp_name)
+
+    latest_map = {}
+    result_rank = {"待反馈": 1, "通过": 2, "打回": 3, "(无)": 0, "": 0}
+    for row in rows:
+        comp_name = str(row.get("部件", "")).strip() or "全局进度"
+        rv_type = str(row.get("提审类型", "")).strip()
+        day = parse_date_safe(row.get("日期", "")) or datetime.date.min
+        rnd = normalize_review_round(row.get("轮次", "")) or 0
+        res = str(row.get("提审结果", "")).strip() or "(无)"
+        rank = (day.toordinal(), rnd, result_rank.get(res, 0))
+        key = (comp_name, rv_type)
+        prev = latest_map.get(key)
+        if (prev is None) or (rank >= prev["rank"]):
+            latest_map[key] = {"rank": rank, "row": row}
+
+    return {"component_rows": component_rows, "latest_map": latest_map}
+
+
+def pick_review_matrix_cell_row(component_name, review_type, latest_map, inherits_global=False, source_component=""):
+    picked = latest_map.get((str(component_name or "").strip(), str(review_type or "").strip()), {})
+    row = picked.get("row", {}) if isinstance(picked, dict) else {}
+    if row:
+        return row, False
+
+    source_comp = str(source_component or "").strip()
+    if inherits_global and source_comp and source_comp != str(component_name or "").strip():
+        picked = latest_map.get((source_comp, str(review_type or "").strip()), {})
+        row = picked.get("row", {}) if isinstance(picked, dict) else {}
+        if row:
+            return row, True
+
+    return {}, False
+
+
 def render_project_review_progress_matrix(project_name):
     review_rows = collect_project_review_rows(project_name)
     review_types = list(REVIEW_TYPE_CANONICAL)
@@ -1570,9 +1635,10 @@ def render_project_review_progress_matrix(project_name):
         st.caption("当前项目暂无版权提审记录。")
         return
 
-    comp_order = []
-    latest_map = {}
-    result_rank = {"待反馈": 1, "通过": 2, "打回": 3, "(无)": 0, "": 0}
+    matrix_state = build_project_review_matrix_state(project_name, review_rows=review_rows)
+    component_rows = matrix_state.get("component_rows", []) if isinstance(matrix_state, dict) else []
+    latest_map = matrix_state.get("latest_map", {}) if isinstance(matrix_state, dict) else {}
+    comp_order = [str(row.get("component", "")).strip() or "全局进度" for row in component_rows]
     status_val = {"(无)": 0, "": 0, "待反馈": 1, "通过": 2, "打回": 3}
     status_text = {0: "", 1: "待", 2: "过", 3: "回"}
     colorscale = [
@@ -1586,42 +1652,38 @@ def render_project_review_progress_matrix(project_name):
         [1.00, "#FCA5A5"],
     ]
 
-    for row in review_rows:
-        comp_name = str(row.get("部件", "")).strip() or "全局进度"
-        if comp_name not in comp_order:
-            comp_order.append(comp_name)
-        rv_type = str(row.get("提审类型", "")).strip()
-        if rv_type not in review_types:
-            continue
-        day = parse_date_safe(row.get("日期", "")) or datetime.date.min
-        rnd = normalize_review_round(row.get("轮次", "")) or 0
-        res = str(row.get("提审结果", "")).strip() or "(无)"
-        rank = (day.toordinal(), rnd, result_rank.get(res, 0))
-        key = (comp_name, rv_type)
-        prev = latest_map.get(key)
-        if (prev is None) or (rank >= prev["rank"]):
-            latest_map[key] = {"rank": rank, "row": row}
-
     z = []
     text = []
     hover = []
-    for comp_name in comp_order:
+    for comp_row in component_rows:
+        comp_name = str(comp_row.get("component", "")).strip() or "全局进度"
+        inherit_global = bool(comp_row.get("inherits_global"))
+        source_component = str(comp_row.get("source_component", "")).strip() or comp_name
         z_row = []
         text_row = []
         hover_row = []
         for rv_type in review_types:
-            picked = latest_map.get((comp_name, rv_type), {})
-            row = picked.get("row", {})
+            row, inherited = pick_review_matrix_cell_row(
+                comp_name,
+                rv_type,
+                latest_map,
+                inherits_global=inherit_global,
+                source_component=source_component,
+            )
             res = str(row.get("提审结果", "")).strip() if row else ""
             cell_val = status_val.get(res, 0)
             z_row.append(cell_val)
             text_row.append(status_text.get(cell_val, ""))
             if row:
+                inherited_note = ""
+                if inherited:
+                    inherited_note = f"<br>矩阵状态: 默认跟随{source_component}提审结果"
                 hover_row.append(
                     f"部件: {comp_name}<br>提审类型: {rv_type}<br>结果: {res or '(无)'}"
                     f"<br>日期: {str(row.get('日期', '')).strip() or '-'}"
                     f"<br>轮次: {str(row.get('轮次', '')).strip() or '-'}"
                     f"<br>事件: {str(row.get('事件', '')).strip() or '-'}"
+                    f"{inherited_note}"
                 )
             else:
                 hover_row.append(f"部件: {comp_name}<br>提审类型: {rv_type}<br>状态: 未开始")

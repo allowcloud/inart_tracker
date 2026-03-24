@@ -814,5 +814,83 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
 
         self.assertFalse(follows)
 
+    def test_build_project_review_matrix_state_seeds_follow_components_from_global_review(self) -> None:
+        ns = load_app_functions(
+            "component_matrix_follows_global_progress",
+            "build_project_progress_matrix_rows",
+            "build_project_review_matrix_state",
+        )
+        globals_map = ns.build_project_review_matrix_state.__globals__
+        globals_map["db"].update(
+            {
+                "1/6\u9a6c\u5c14\u798f": {
+                    "\u90e8\u4ef6\u5217\u8868": {
+                        "\u5168\u5c40\u8fdb\u5ea6": {
+                            "\u4e3b\u6d41\u7a0b": "\u5b98\u56fe",
+                            "\u65e5\u5fd7\u6d41": [{"\u65e5\u671f": "2026-03-24", "\u5de5\u5e8f": "\u5b98\u56fe"}],
+                        }
+                    }
+                }
+            }
+        )
+        globals_map["STAGES_UNIFIED"] = [
+            "\u7acb\u9879",
+            "\u5efa\u6a21(\u542b\u6253\u5370/\u7b7e\u6837)",
+            "\u5b98\u56fe",
+        ]
+        globals_map["MATRIX_FOLLOW_COMPONENTS"] = [
+            "\u5934\u96d5(\u8868\u60c5)",
+            "\u7d20\u4f53",
+            "\u624b\u578b",
+            "\u914d\u4ef6",
+            "\u5730\u53f0",
+        ]
+        globals_map["is_hidden_system_log"] = lambda log_obj: False
+        globals_map["parse_date_safe"] = lambda text: datetime.date(2026, 3, 24) if text == "2026-03-24" else None
+        globals_map["normalize_review_round"] = lambda text: int(str(text or "0").strip() or "0")
+
+        state = ns.build_project_review_matrix_state(
+            "1/6\u9a6c\u5c14\u798f",
+            review_rows=[
+                {
+                    "\u65e5\u671f": "2026-03-24",
+                    "\u90e8\u4ef6": "\u5168\u5c40\u8fdb\u5ea6",
+                    "\u63d0\u5ba1\u7c7b\u578b": "3D\u63d0\u5ba1",
+                    "\u63d0\u5ba1\u7ed3\u679c": "\u5f85\u53cd\u9988",
+                    "\u8f6e\u6b21": "1",
+                    "\u4e8b\u4ef6": "\u5168\u5c40 3D \u63d0\u5ba1",
+                }
+            ],
+        )
+
+        component_rows = state["component_rows"]
+        self.assertEqual(component_rows[0]["component"], "\u5168\u5c40\u8fdb\u5ea6")
+        head_row = next(row for row in component_rows if row["component"] == "\u5934\u96d5(\u8868\u60c5)")
+        self.assertTrue(head_row["inherits_global"])
+        self.assertEqual(head_row["source_component"], "\u5168\u5c40\u8fdb\u5ea6")
+
+    def test_pick_review_matrix_cell_row_prefers_explicit_component_review_over_global_fallback(self) -> None:
+        ns = load_app_functions("pick_review_matrix_cell_row")
+
+        latest_map = {
+            ("\u5168\u5c40\u8fdb\u5ea6", "3D\u63d0\u5ba1"): {
+                "row": {"\u63d0\u5ba1\u7ed3\u679c": "\u5f85\u53cd\u9988", "\u4e8b\u4ef6": "\u5168\u5c40\u63d0\u5ba1"}
+            },
+            ("\u5934\u96d5(\u8868\u60c5)", "3D\u63d0\u5ba1"): {
+                "row": {"\u63d0\u5ba1\u7ed3\u679c": "\u901a\u8fc7", "\u4e8b\u4ef6": "\u5934\u96d5\u63d0\u5ba1"}
+            },
+        }
+
+        row, inherited = ns.pick_review_matrix_cell_row(
+            "\u5934\u96d5(\u8868\u60c5)",
+            "3D\u63d0\u5ba1",
+            latest_map,
+            inherits_global=True,
+            source_component="\u5168\u5c40\u8fdb\u5ea6",
+        )
+
+        self.assertFalse(inherited)
+        self.assertEqual(row["\u4e8b\u4ef6"], "\u5934\u96d5\u63d0\u5ba1")
+
 if __name__ == "__main__":
     unittest.main()
