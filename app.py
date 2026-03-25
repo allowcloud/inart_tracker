@@ -2003,6 +2003,37 @@ def sync_save_db(changed_proj=None, recompute_scope="auto"):
     persist_db_scope(changed_proj)
 
 
+def persist_project_scope_batch(project_names=None, recompute_projects=True):
+    db_obj = st.session_state.db if isinstance(st.session_state.get("db"), dict) else db
+    if not isinstance(db_obj, dict) or "系统配置" not in db_obj:
+        return
+
+    targets = []
+    for proj in project_names or []:
+        proj_name = str(proj or "").strip()
+        if not proj_name or proj_name == "系统配置" or proj_name not in db_obj:
+            continue
+        if proj_name not in targets:
+            targets.append(proj_name)
+
+    if recompute_projects:
+        for proj_name in targets:
+            recompute_project_derived_state(proj_name)
+
+    mgr = globals().get("db_manager")
+    if mgr and hasattr(mgr, "save_one"):
+        for proj_name in targets:
+            mgr.save_one(proj_name, db_obj[proj_name])
+        mgr.save_one("系统配置", db_obj["系统配置"])
+        return
+
+    if targets:
+        for proj_name in targets:
+            persist_db_scope(proj_name)
+    else:
+        persist_db_scope("系统配置")
+
+
 def normalize_project_name_for_write(raw_name, valid_projs=None, alias_map=None):
     name = _clean_project_name_identity_text(raw_name)
     if not name:
@@ -6076,7 +6107,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
             touched = True
 
     if touched:
-        sync_save_db("系统配置")
+        persist_project_scope_batch([], recompute_projects=False)
 
     todo_list = [td for td in todo_all if todo_visible_for_view(td, current_pm)]
     pending = [x for x in todo_list if not x.get("完成")]
@@ -6280,6 +6311,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
                     resolved_ref_proj_list = list(inferred_defaults.get("projects") or [])
                 final_people = people_input or ", ".join(inferred_defaults.get("people") or []) or ", ".join(inferred_defaults.get("people_bundle", {}).get("labels", []))
                 standard_event_dirty = False
+                save_projects = set()
 
                 created_projects = []
                 for linked_proj in resolved_ref_proj_list:
@@ -6290,6 +6322,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
                         ip_owner=new_proj_ip_owner,
                     ):
                         created_projects.append(linked_proj)
+                        save_projects.add(linked_proj)
 
                 added_people = register_extra_role_people(split_people_text(final_people))
                 new_td = {
@@ -6312,7 +6345,8 @@ def render_pm_todo_manager(valid_projs, current_pm):
                     done_day = due_dt or datetime.date.today()
                     new_td["完成"] = True
                     new_td["完成时间"] = str(done_day)
-                    append_todo_completion_history(new_td, done_day)
+                    if append_todo_completion_history(new_td, done_day):
+                        save_projects.update([p for p in todo_project_list(new_td) if p and p in db and p != "系统配置"])
                 todo_all.append(new_td)
                 todo_action = "待办完成" if bool(new_td.get("完成")) else "待办新建"
                 event_day = due_dt if (bool(new_td.get("完成")) and isinstance(due_dt, datetime.date)) else datetime.date.today()
@@ -6341,12 +6375,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
                         },
                     ) or standard_event_dirty
                 cfg["PM_TODO_LIST"] = todo_all
-                if created_projects:
-                    sync_save_db()
-                else:
-                    sync_save_db("系统配置")
-                if standard_event_dirty:
-                    save_project_scope("系统配置")
+                persist_project_scope_batch(sorted(save_projects), recompute_projects=True)
 
                 success_bits = ["待办已添加。"]
                 if created_projects:
@@ -6471,7 +6500,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
         delete_ids = set()
         skipped = 0
         project_history_updates = set()
-        new_project_created = False
+        created_projects = set()
         removed_todo_events = 0
 
         for row in edited_df.to_dict("records"):
@@ -6518,7 +6547,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
             for p_name in proj_list:
                 if p_name and p_name not in db:
                     if create_project_shell_if_missing(p_name, current_pm if current_pm != "所有人" else "Mo"):
-                        new_project_created = True
+                        created_projects.add(p_name)
 
             old_task = str(td.get("任务", "")).strip()
             old_cpddl = todo_cpddl_text(td)
@@ -6608,10 +6637,8 @@ def render_pm_todo_manager(valid_projs, current_pm):
         if delete_ids:
             removed_todo_events = purge_deleted_todo_standard_events(delete_ids)
 
-        if project_history_updates or new_project_created:
-            sync_save_db()
-        else:
-            sync_save_db("系统配置")
+        touched_projects = set(project_history_updates) | set(created_projects)
+        persist_project_scope_batch(sorted(touched_projects), recompute_projects=True)
 
         success_msg = f"待办已保存：保留 {len(todo_all)} 条，删除 {len(delete_ids)} 条，跳过 {skipped} 条空任务。"
         if removed_todo_events:

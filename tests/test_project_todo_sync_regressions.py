@@ -1032,6 +1032,72 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         self.assertEqual(result["comp_map"][result["rows"][0]["_id"]], "头雕(表情)")
         self.assertEqual(result["seeded_projects"], {"1/6超女"})
 
+    def test_persist_project_scope_batch_saves_only_target_projects_and_config(self) -> None:
+        ns = load_app_functions("persist_project_scope_batch")
+
+        class FakeSessionState(dict):
+            def __getattr__(self, name):
+                return self[name]
+
+            def __setattr__(self, name, value):
+                self[name] = value
+
+        saved = []
+        recomputed = []
+        fake_state = FakeSessionState(
+            db={
+                "系统配置": {"项目别名": {}},
+                "1/6超女": {"Milestone": "官图"},
+                "1/6马尔福": {"Milestone": "建模(含打印/签样)"},
+            }
+        )
+
+        class FakeManager:
+            def save_one(self, key, value):
+                saved.append(key)
+
+        globals_map = ns.persist_project_scope_batch.__globals__
+        globals_map["st"] = types.SimpleNamespace(session_state=fake_state)
+        globals_map["db"] = fake_state.db
+        globals_map["db_manager"] = FakeManager()
+        globals_map["recompute_project_derived_state"] = lambda proj: recomputed.append(proj)
+        globals_map["persist_db_scope"] = lambda changed_proj=None: saved.append(f"persist:{changed_proj}")
+
+        ns.persist_project_scope_batch(["1/6超女", "1/6超女", "1/6马尔福"])
+
+        self.assertEqual(recomputed, ["1/6超女", "1/6马尔福"])
+        self.assertEqual(saved, ["1/6超女", "1/6马尔福", "系统配置"])
+
+    def test_persist_project_scope_batch_can_save_config_only_without_recompute(self) -> None:
+        ns = load_app_functions("persist_project_scope_batch")
+
+        class FakeSessionState(dict):
+            def __getattr__(self, name):
+                return self[name]
+
+            def __setattr__(self, name, value):
+                self[name] = value
+
+        saved = []
+        recomputed = []
+        fake_state = FakeSessionState(db={"系统配置": {"项目别名": {}}, "1/6超女": {"Milestone": "官图"}})
+
+        class FakeManager:
+            def save_one(self, key, value):
+                saved.append(key)
+
+        globals_map = ns.persist_project_scope_batch.__globals__
+        globals_map["st"] = types.SimpleNamespace(session_state=fake_state)
+        globals_map["db"] = fake_state.db
+        globals_map["db_manager"] = FakeManager()
+        globals_map["recompute_project_derived_state"] = lambda proj: recomputed.append(proj)
+        globals_map["persist_db_scope"] = lambda changed_proj=None: saved.append(f"persist:{changed_proj}")
+
+        ns.persist_project_scope_batch([], recompute_projects=False)
+
+        self.assertEqual(recomputed, [])
+        self.assertEqual(saved, ["系统配置"])
+
     def test_collect_history_project_todos_filters_and_sorts_related_items(self) -> None:
         ns = load_app_functions("collect_history_done_project_todos", "collect_history_project_todos")
         globals_map = ns.collect_history_project_todos.__globals__
