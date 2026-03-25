@@ -963,5 +963,180 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         self.assertFalse(inherited)
         self.assertEqual(row["\u4e8b\u4ef6"], "\u5934\u96d5\u63d0\u5ba1")
 
+    def test_sync_save_db_system_config_skips_global_recompute(self) -> None:
+        ns = load_app_functions("sync_save_db")
+
+        class FakeSessionState(dict):
+            def __getattr__(self, name):
+                return self[name]
+
+            def __setattr__(self, name, value):
+                self[name] = value
+
+        calls = {"all": 0, "project": [], "persist": []}
+        fake_state = FakeSessionState(
+            db={
+                "系统配置": {"项目别名": {}},
+                "1/6超女": {"Milestone": "官图"},
+            }
+        )
+        globals_map = ns.sync_save_db.__globals__
+        globals_map["st"] = types.SimpleNamespace(session_state=fake_state)
+        globals_map["auto_cleanup_project_shells"] = lambda: None
+        globals_map["sanitize_project_alias_map"] = lambda raw: raw if isinstance(raw, dict) else {}
+        globals_map["canonicalize_all_project_references"] = lambda: None
+        globals_map["recompute_project_derived_state"] = lambda proj: calls["project"].append(proj)
+        globals_map["recompute_all_project_derived_states"] = lambda: calls.__setitem__("all", calls["all"] + 1)
+        globals_map["persist_db_scope"] = lambda changed_proj=None: calls["persist"].append(changed_proj)
+
+        ns.sync_save_db("系统配置")
+
+        self.assertEqual(calls["all"], 0)
+        self.assertEqual(calls["project"], [])
+        self.assertEqual(calls["persist"], ["系统配置"])
+
+    def test_build_history_day_scope_rows_limits_projects_and_seeds_missing_ids(self) -> None:
+        ns = load_app_functions("build_history_day_scope_rows")
+        globals_map = ns.build_history_day_scope_rows.__globals__
+        globals_map["is_hidden_system_log"] = lambda log_obj: False
+        globals_map["normalize_review_type"] = lambda value: str(value or "(无)") or "(无)"
+        globals_map["normalize_review_round"] = lambda value: str(value or "").strip()
+        ns.db.update(
+            {
+                "1/6超女": {
+                    "部件列表": {
+                        "头雕(表情)": {
+                            "日志流": [
+                                {"日期": "2026-03-24", "工序": "建模(含打印/签样)", "流转": "打印追踪", "事件": "第二版头雕待收件"}
+                            ]
+                        }
+                    }
+                },
+                "1/6马尔福": {
+                    "部件列表": {
+                        "全局进度": {
+                            "日志流": [
+                                {"_id": "keep_me", "日期": "2026-03-24", "工序": "官图", "流转": "项目日志", "事件": "官图推进"}
+                            ]
+                        }
+                    }
+                },
+            }
+        )
+
+        result = ns.build_history_day_scope_rows(["1/6超女"])
+
+        self.assertEqual(len(result["rows"]), 1)
+        self.assertEqual(result["rows"][0]["项目"], "1/6超女")
+        self.assertEqual(result["proj_map"][result["rows"][0]["_id"]], "1/6超女")
+        self.assertEqual(result["comp_map"][result["rows"][0]["_id"]], "头雕(表情)")
+        self.assertEqual(result["seeded_projects"], {"1/6超女"})
+
+    def test_persist_project_scope_batch_saves_only_target_projects_and_config(self) -> None:
+        ns = load_app_functions("persist_project_scope_batch")
+
+        class FakeSessionState(dict):
+            def __getattr__(self, name):
+                return self[name]
+
+            def __setattr__(self, name, value):
+                self[name] = value
+
+        saved = []
+        recomputed = []
+        fake_state = FakeSessionState(
+            db={
+                "系统配置": {"项目别名": {}},
+                "1/6超女": {"Milestone": "官图"},
+                "1/6马尔福": {"Milestone": "建模(含打印/签样)"},
+            }
+        )
+
+        class FakeManager:
+            def save_one(self, key, value):
+                saved.append(key)
+
+        globals_map = ns.persist_project_scope_batch.__globals__
+        globals_map["st"] = types.SimpleNamespace(session_state=fake_state)
+        globals_map["db"] = fake_state.db
+        globals_map["db_manager"] = FakeManager()
+        globals_map["recompute_project_derived_state"] = lambda proj: recomputed.append(proj)
+        globals_map["persist_db_scope"] = lambda changed_proj=None: saved.append(f"persist:{changed_proj}")
+
+        ns.persist_project_scope_batch(["1/6超女", "1/6超女", "1/6马尔福"])
+
+        self.assertEqual(recomputed, ["1/6超女", "1/6马尔福"])
+        self.assertEqual(saved, ["1/6超女", "1/6马尔福", "系统配置"])
+
+    def test_persist_project_scope_batch_can_save_config_only_without_recompute(self) -> None:
+        ns = load_app_functions("persist_project_scope_batch")
+
+        class FakeSessionState(dict):
+            def __getattr__(self, name):
+                return self[name]
+
+            def __setattr__(self, name, value):
+                self[name] = value
+
+        saved = []
+        recomputed = []
+        fake_state = FakeSessionState(db={"系统配置": {"项目别名": {}}, "1/6超女": {"Milestone": "官图"}})
+
+        class FakeManager:
+            def save_one(self, key, value):
+                saved.append(key)
+
+        globals_map = ns.persist_project_scope_batch.__globals__
+        globals_map["st"] = types.SimpleNamespace(session_state=fake_state)
+        globals_map["db"] = fake_state.db
+        globals_map["db_manager"] = FakeManager()
+        globals_map["recompute_project_derived_state"] = lambda proj: recomputed.append(proj)
+        globals_map["persist_db_scope"] = lambda changed_proj=None: saved.append(f"persist:{changed_proj}")
+
+        ns.persist_project_scope_batch([], recompute_projects=False)
+
+        self.assertEqual(recomputed, [])
+        self.assertEqual(saved, ["系统配置"])
+
+    def test_collect_history_project_todos_filters_and_sorts_related_items(self) -> None:
+        ns = load_app_functions("collect_history_done_project_todos", "collect_history_project_todos")
+        globals_map = ns.collect_history_project_todos.__globals__
+        globals_map["todo_matches_project"] = lambda td, proj: proj in list(td.get("关联项目列表", []) or [td.get("关联项目", "")])
+        ns.db.update(
+            {
+                "系统配置": {
+                    "PM_TODO_LIST": [
+                        {"任务": "先建旧记录", "创建": "2026-03-01", "完成": False, "关联项目列表": ["1/6超女"]},
+                        {"任务": "后建已完成", "创建": "2026-03-10", "完成": True, "完成时间": "2026-03-22", "关联项目列表": ["1/6超女"]},
+                        {"任务": "别的项目", "创建": "2026-03-20", "完成": True, "完成时间": "2026-03-23", "关联项目列表": ["1/6马尔福"]},
+                    ]
+                }
+            }
+        )
+
+        all_rows = ns.collect_history_project_todos("1/6超女")
+        done_rows = ns.collect_history_done_project_todos("1/6超女")
+
+        self.assertEqual([row["任务"] for row in all_rows], ["后建已完成", "先建旧记录"])
+        self.assertEqual([row["任务"] for row in done_rows], ["后建已完成"])
+
+    def test_collect_history_project_standard_events_filters_current_project(self) -> None:
+        ns = load_app_functions("collect_history_project_standard_events")
+        ns.db.update(
+            {
+                "系统配置": {
+                    "标准事件流": [
+                        {"项目": "1/6超女", "内容": "头雕待收件"},
+                        {"项目": "1/6马尔福", "内容": "官图推进"},
+                    ]
+                }
+            }
+        )
+
+        rows = ns.collect_history_project_standard_events("1/6超女")
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["内容"], "头雕待收件")
+
 if __name__ == "__main__":
     unittest.main()
