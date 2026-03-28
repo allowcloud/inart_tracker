@@ -10381,9 +10381,9 @@ if menu == MENU_DASHBOARD:
     st.caption("CSV 导入入口已迁移至【系统维护】。")
     gantt_cat_orders = MACRO_STAGES.copy()
     combined_color_map = {
-        "预研": "#94A3B8", "立项": "#F2C14E", "建模": "#34C6D3", "打印": "#0EA5A4", "涂装": "#F59E0B", "设计": "#8B5CF6",
+        "预研": "#CBD5E1", "立项": "#F2C14E", "建模": "#34C6D3", "打印": "#0EA5A4", "涂装": "#F59E0B", "设计": "#8B5CF6",
         "工程": "#4F7CFF", "开模": "#FB7185", "修模": "#F97316",
-        "生产": "#37B36B", "暂停": "#94A3B8", "结束": "#334155"
+        "生产": "#37B36B", "暂停": "#64748B", "结束": "#334155"
     }
 
     @st.cache_data(ttl=30, show_spinner=False)
@@ -10489,6 +10489,7 @@ if menu == MENU_DASHBOARD:
     st.divider()
     st.subheader("📈 全局进展甘特图")
     st.markdown("💡 默认显示当前月份前后约半年区间；支持手动调整日期范围，并统计建模/打印/设计/工程平均耗时（可选去极值）。")
+    st.caption("颜色提示：预研是浅灰蓝，暂停是深灰；带“停”字的小方块才表示明确暂停节点。")
     if gantt_data:
         df_g_all = pd.DataFrame(gantt_data).sort_values(by=["项目", "Start"])
         df_g_all["Start_dt"] = pd.to_datetime(df_g_all["Start"], errors="coerce")
