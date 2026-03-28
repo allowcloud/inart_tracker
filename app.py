@@ -6395,6 +6395,28 @@ def build_project_stage_segments(proj_label, proj_data):
             "synthetic": True,
         })
 
+    live_stage_order = ["预研", "建模", "打印", "涂装", "设计", "工程", "开模", "修模", "生产"]
+    if current_macros and milestone not in ["暂停研发", "生产结束", "项目结束撒花🎉", "✅ 已完成(结束)"]:
+        latest_live_record_dt = max(
+            [x["date"] for x in all_records if x["stage"] not in ["立项", "暂停", "结束"]],
+            default=launch_start or latest_date,
+        )
+        for live_stage in live_stage_order:
+            if live_stage not in current_macros or stage_records.get(live_stage):
+                continue
+            synth_seed = latest_live_record_dt + datetime.timedelta(days=1) if latest_live_record_dt else (first_date + datetime.timedelta(days=1))
+            stage_records[live_stage].append({
+                "date": synth_seed,
+                "stage": live_stage,
+                "component": "全局进度",
+                "event": f"当前主阶段仍在{live_stage}，甘特自动延续当前阶段",
+                "review_type": "",
+                "review_result": "",
+                "review_round": "",
+                "raw_stage": live_stage,
+                "synthetic": True,
+            })
+
     mold_start = min([x["date"] for x in stage_records["开模"]], default=None)
     segments = []
 
