@@ -192,6 +192,44 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         self.assertEqual(max(seg["Finish"] for seg in build_segments), str(datetime.date.today() + datetime.timedelta(days=1)))
         self.assertTrue(any(seg["Start"] > "2026-03-25" for seg in build_segments))
 
+    def test_build_project_stage_segments_extends_live_stage_without_explicit_stage_log(self) -> None:
+        ns = load_app_functions("build_project_stage_segments")
+        globals_map = ns.build_project_stage_segments.__globals__
+        globals_map["is_hidden_system_log"] = lambda log_obj: False
+        globals_map["is_stage_timeline_driver_log"] = lambda log_obj: True
+        globals_map["_parse_log_date"] = lambda log_obj: datetime.datetime.strptime(
+            str((log_obj or {}).get("日期", "")), "%Y-%m-%d"
+        ).date()
+        globals_map["get_macro_phase"] = (
+            lambda detail_stage, event_text="", comp_name="", proj_label="", proj_data=None:
+            "建模"
+        )
+        globals_map["normalize_review_type"] = lambda value: "(无)"
+        globals_map["infer_current_macro_stages"] = lambda proj_data: {"工程"}
+        globals_map["get_project_status_bucket"] = lambda milestone: "dev"
+        globals_map["get_pause_signal_keywords"] = lambda: ["暂停"]
+
+        proj_data = {
+            "项目名称": "1/6伏地魔",
+            "Milestone": "研发中",
+            "部件列表": {
+                "全局进度": {
+                    "主流程": "工程拆件",
+                    "日志流": [
+                        {"日期": "2026-03-20", "工序": "建模(含打印/签样)", "事件": "蛇拆件已安排返厂"},
+                    ],
+                }
+            },
+        }
+
+        segments = ns.build_project_stage_segments("1/6伏地魔", proj_data)
+        stage_names = [str(seg.get("工序阶段", "")).strip() for seg in segments]
+        engineer_segments = [seg for seg in segments if str(seg.get("工序阶段", "")).strip() == "工程"]
+
+        self.assertIn("工程", stage_names)
+        self.assertTrue(engineer_segments)
+        self.assertEqual(max(seg["Finish"] for seg in engineer_segments), str(datetime.date.today() + datetime.timedelta(days=1)))
+
     def test_expand_workbench_segment_entries_preserves_split_stage_hints(self) -> None:
         ns = load_app_functions(
             "norm_text",
@@ -686,6 +724,38 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
             "[配件] 待修改狗绳结构 ｜ [手型] 待确认手型角度 ｜ [素体] 已安排打印 ｜ ... 另有1条（共4条）",
         )
 
+    def test_build_dashboard_dynamic_display_dedupes_same_todo_reminder(self) -> None:
+        ns = load_app_functions("build_dashboard_dynamic_display")
+        globals_map = ns.build_dashboard_dynamic_display.__globals__
+        globals_map["collect_latest_dashboard_dynamic_group_logs"] = lambda project_name, anchor_binding=None: []
+        globals_map["build_project_current_explanation"] = lambda project_name, pm_view=None: {}
+        globals_map["format_todo_reminder_label"] = (
+            lambda text, date_text="", action_text="": f"待办：{str(text or '').strip()}"
+        )
+        globals_map["parse_date_safe"] = lambda text: None
+        globals_map["clamp_timeline_date"] = lambda d: d
+        globals_map["event_attention_priority"] = lambda content_text="", action_type="", source_module="", extra_payload=None: 1
+        globals_map["same_event_match_score"] = lambda left, right: 4
+
+        text = ns.build_dashboard_dynamic_display(
+            "1/6 2025超人",
+            explanation={
+                "来源": "全局大盘",
+                "动作": "追加最新动态",
+                "日期": "2026-03-28",
+                "部件": "地台",
+                "阶段": "工厂复样(含胶件/上色等)",
+                "内容": "冰川地台的防雾帮件有水纹，需确认是否能上色盖住",
+                "提醒内容": "冰川地台的防雾帮件有水纹，需确认是否能上色盖住",
+                "提醒日期": "",
+                "提醒动作": "待办提醒",
+                "提醒部件": "地台",
+                "提醒阶段": "工厂复样(含胶件/上色等)",
+            },
+        )
+
+        self.assertEqual(text, "[地台] 冰川地台的防雾帮件有水纹，需确认是否能上色盖住")
+
     def test_extract_event_date_and_body_does_not_treat_decimal_like_text_as_date(self) -> None:
         ns = load_app_functions("extract_event_date_and_body")
 
@@ -1040,6 +1110,29 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["components"], ["头雕(表情)"])
         self.assertEqual(rows[0]["stage"], "建模(含打印/签样)")
+
+    def test_extract_todo_segment_hints_learns_engineering_handoff_and_body_terms(self) -> None:
+        ns = load_app_functions("norm_text", "extract_todo_segment_hints")
+
+        rows = ns.extract_todo_segment_hints(
+            "头雕已于3/27交接工程拆脖子和眼睛；透明胸皮已于3/27安排打印",
+            project_components=["头雕(表情)", "素体", "全局进度"],
+            comp_kw={
+                "头雕": "头雕(表情)",
+                "脖子": "头雕(表情)",
+                "眼睛": "头雕(表情)",
+                "透明胸皮": "素体",
+                "胸皮": "素体",
+                "素体": "素体",
+            },
+            stage_kw_map={"打印": "建模(含打印/签样)"},
+        )
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["components"], ["头雕(表情)"])
+        self.assertEqual(rows[0]["stage"], "工程拆件")
+        self.assertEqual(rows[1]["components"], ["素体"])
+        self.assertEqual(rows[1]["stage"], "建模(含打印/签样)")
 
     def test_extract_dashboard_todo_segments_turns_expected_arrival_into_receive_todos(self) -> None:
         ns = load_app_functions(
