@@ -10489,7 +10489,7 @@ if menu == MENU_DASHBOARD:
     st.divider()
     st.subheader("📈 全局进展甘特图")
     st.markdown("💡 默认显示当前月份前后约半年区间；支持手动调整日期范围，并统计建模/打印/设计/工程平均耗时（可选去极值）。")
-    st.caption("颜色提示：预研是浅灰蓝，暂停是深灰；带“停”字的小方块才表示明确暂停节点。")
+    st.caption("颜色提示：甘特主条只显示正式推进阶段；预研改成“预”标记，暂停是深灰并带“停”字小方块。")
     if gantt_data:
         df_g_all = pd.DataFrame(gantt_data).sort_values(by=["项目", "Start"])
         df_g_all["Start_dt"] = pd.to_datetime(df_g_all["Start"], errors="coerce")
@@ -10560,6 +10560,8 @@ if menu == MENU_DASHBOARD:
                 y_order = sorted(visible_labels)
         else:
             y_order = sorted(df_g["项目"].unique().tolist())
+        df_pre = df_g[df_g["工序阶段"] == "预研"].copy()
+        df_g_bars = df_g[df_g["工序阶段"] != "预研"].copy()
         def _is_parallel_row(row):
             stage_name = str(row.get("工序阶段", "")).strip()
             proj_name = str(row.get("项目", "")).strip()
@@ -10570,21 +10572,42 @@ if menu == MENU_DASHBOARD:
             return False
 
         parallel_stages = ["打印", "设计"]
-        main_stage_order = [x for x in gantt_cat_orders if x != "打印"]
-        df_parallel = df_g[df_g.apply(_is_parallel_row, axis=1)].copy()
-        df_main = df_g[~df_g.apply(_is_parallel_row, axis=1)].copy()
-        df_display = df_g if show_parallel_tracks else df_main
-        display_stage_order = gantt_cat_orders if show_parallel_tracks else main_stage_order
+        main_stage_order = [x for x in gantt_cat_orders if x not in ["打印", "预研"]]
+        bar_stage_order = [x for x in gantt_cat_orders if x != "预研"]
+        df_parallel = df_g_bars[df_g_bars.apply(_is_parallel_row, axis=1)].copy()
+        df_main = df_g_bars[~df_g_bars.apply(_is_parallel_row, axis=1)].copy()
+        df_display = df_g_bars if show_parallel_tracks else df_main
+        display_stage_order = bar_stage_order if show_parallel_tracks else main_stage_order
         if df_display.empty:
-            df_display = df_g.copy()
-            display_stage_order = gantt_cat_orders
-        fig = px.timeline(
-            df_display, x_start="Start", x_end="Finish", y="项目",
-            color="工序阶段", hover_name="详情",
-            category_orders={"工序阶段": display_stage_order, "项目": y_order},
-            color_discrete_map=combined_color_map
-        )
-        fig.update_xaxes(range=[selected_start.to_pydatetime(), selected_end.to_pydatetime()])
+            fig = go.Figure()
+            fig.update_xaxes(range=[selected_start.to_pydatetime(), selected_end.to_pydatetime()])
+            fig.update_yaxes(categoryorder="array", categoryarray=y_order, autorange="reversed")
+        else:
+            fig = px.timeline(
+                df_display, x_start="Start", x_end="Finish", y="项目",
+                color="工序阶段", hover_name="详情",
+                category_orders={"工序阶段": display_stage_order, "项目": y_order},
+                color_discrete_map=combined_color_map
+            )
+            fig.update_xaxes(range=[selected_start.to_pydatetime(), selected_end.to_pydatetime()])
+        if not df_pre.empty:
+            df_pre_marks = df_pre.copy()
+            df_pre_marks["标记说明"] = df_pre_marks.apply(
+                lambda r: f"[预研] {r['详情']}",
+                axis=1
+            )
+            fig.add_trace(go.Scatter(
+                x=df_pre_marks["Start"],
+                y=df_pre_marks["项目"],
+                mode="markers+text",
+                marker=dict(symbol="circle", size=11, color="#CBD5E1", line=dict(width=1, color="#64748B")),
+                text=["预"] * len(df_pre_marks),
+                textposition="middle center",
+                textfont=dict(size=8, color="#334155"),
+                name="预研标记",
+                customdata=df_pre_marks[["标记说明"]],
+                hovertemplate="%{customdata[0]}<extra></extra>"
+            ))
         if (not show_parallel_tracks) and (not df_parallel.empty):
             df_parallel_marks = df_parallel.copy()
             df_parallel_marks["标记文案"] = df_parallel_marks["工序阶段"].map({"打印": "打", "设计": "设"}).fillna("并")
