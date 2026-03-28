@@ -103,6 +103,95 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         self.assertEqual(remaining[0]["_id"], "evt_progress")
         self.assertEqual(remaining[0]["关联待办"], ["td2"])
 
+    def test_remap_system_project_references_updates_todo_event_and_print_rows(self) -> None:
+        ns = load_app_functions(
+            "normalize_todo_project_list",
+            "remap_system_project_references",
+        )
+        ns.db.update(
+            {
+                "\u7cfb\u7edf\u914d\u7f6e": {
+                    "PM_TODO_LIST": [
+                        {
+                            "_id": "td_merge",
+                            "\u5173\u8054\u9879\u76ee\u5217\u8868": ["proj_old", "proj_other"],
+                            "\u5173\u8054\u9879\u76ee": "proj_old",
+                            "\u6700\u8fd1\u8054\u52a8\u9879\u76ee": "proj_old",
+                        }
+                    ],
+                    "\u6807\u51c6\u4e8b\u4ef6\u6d41": [
+                        {
+                            "_id": "evt_merge",
+                            "\u9879\u76ee": "proj_old",
+                            "\u9879\u76ee\u5217\u8868": ["proj_old", "proj_other"],
+                        }
+                    ],
+                    "\u6253\u5370\u8ffd\u8e2a\u5217\u8868": [
+                        {"_id": "print_merge", "\u9879\u76ee": "proj_old"},
+                        {"_id": "print_keep", "\u9879\u76ee": "proj_other"},
+                    ],
+                }
+            }
+        )
+        ns.normalize_todo_project_list.__globals__["canonicalize_project_name"] = (
+            lambda name, valid_projs=None, alias_map=None: str(name or "").strip()
+        )
+
+        changed = ns.remap_system_project_references("proj_old", "proj_new")
+
+        self.assertTrue(changed)
+        todo_row = ns.db["\u7cfb\u7edf\u914d\u7f6e"]["PM_TODO_LIST"][0]
+        self.assertEqual(todo_row["\u5173\u8054\u9879\u76ee\u5217\u8868"], ["proj_new", "proj_other"])
+        self.assertEqual(todo_row["\u5173\u8054\u9879\u76ee"], "proj_new")
+        self.assertEqual(todo_row["\u6700\u8fd1\u8054\u52a8\u9879\u76ee"], "proj_new")
+        self.assertEqual(todo_row["\u5386\u53f2\u7248\u672c"], [])
+
+        evt_row = ns.db["\u7cfb\u7edf\u914d\u7f6e"]["\u6807\u51c6\u4e8b\u4ef6\u6d41"][0]
+        self.assertEqual(evt_row["\u9879\u76ee"], "proj_new")
+        self.assertEqual(evt_row["\u9879\u76ee\u5217\u8868"], ["proj_new", "proj_other"])
+
+        print_rows = ns.db["\u7cfb\u7edf\u914d\u7f6e"]["\u6253\u5370\u8ffd\u8e2a\u5217\u8868"]
+        self.assertEqual(print_rows[0]["\u9879\u76ee"], "proj_new")
+        self.assertEqual(print_rows[1]["\u9879\u76ee"], "proj_other")
+
+    def test_build_project_stage_segments_resumes_after_latest_pause_when_project_is_active(self) -> None:
+        ns = load_app_functions("build_project_stage_segments")
+        globals_map = ns.build_project_stage_segments.__globals__
+        globals_map["is_hidden_system_log"] = lambda log_obj: False
+        globals_map["is_stage_timeline_driver_log"] = lambda log_obj: True
+        globals_map["_parse_log_date"] = lambda log_obj: datetime.datetime.strptime(
+            str((log_obj or {}).get("日期", "")), "%Y-%m-%d"
+        ).date()
+        globals_map["get_macro_phase"] = (
+            lambda detail_stage, event_text="", comp_name="", proj_label="", proj_data=None:
+            "暂停" if "暂停" in str(event_text or "") else "建模"
+        )
+        globals_map["normalize_review_type"] = lambda value: "(无)"
+        globals_map["infer_current_macro_stages"] = lambda proj_data: {"建模"}
+        globals_map["get_project_status_bucket"] = lambda milestone: "dev"
+        globals_map["get_pause_signal_keywords"] = lambda: ["暂停"]
+
+        proj_data = {
+            "项目名称": "1/6超女",
+            "Milestone": "研发中",
+            "部件列表": {
+                "头雕(表情)": {
+                    "主流程": "建模(含打印/签样)",
+                    "日志流": [
+                        {"日期": "2026-03-20", "工序": "建模(含打印/签样)", "事件": "超女v2版继续建模修正"},
+                        {"日期": "2026-03-25", "工序": "⏸️ 暂停/搁置", "事件": "暂停等待老师反馈"},
+                    ],
+                }
+            },
+        }
+
+        segments = ns.build_project_stage_segments("1/6超女", proj_data)
+        build_segments = [seg for seg in segments if str(seg.get("工序阶段", "")).strip() == "建模"]
+
+        self.assertTrue(build_segments)
+        self.assertEqual(max(seg["Finish"] for seg in build_segments), str(datetime.date.today() + datetime.timedelta(days=1)))
+        self.assertTrue(any(seg["Start"] > "2026-03-25" for seg in build_segments))
+
     def test_expand_workbench_segment_entries_preserves_split_stage_hints(self) -> None:
         ns = load_app_functions(
             "norm_text",

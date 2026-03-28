@@ -2039,6 +2039,15 @@ def persist_project_scope_batch(project_names=None, recompute_projects=True):
         persist_db_scope("系统配置")
 
 
+def persist_project_admin_changes(project_names=None, recompute_projects=True):
+    db_obj = st.session_state.db if isinstance(st.session_state.get("db"), dict) else db
+    if not isinstance(db_obj, dict):
+        return
+    cfg = db_obj.setdefault("系统配置", {})
+    cfg["项目别名"] = sanitize_project_alias_map(cfg.get("项目别名", {}))
+    persist_project_scope_batch(project_names or [], recompute_projects=recompute_projects)
+
+
 def clear_todo_quick_add_form_state(state_obj, preserve_scope=True):
     state = state_obj if hasattr(state_obj, "get") else {}
     state["todo_title_global"] = ""
@@ -3990,6 +3999,78 @@ def canonicalize_all_project_references():
     return changed
 
 
+def remap_system_project_references(src_name, dst_name):
+    src = str(src_name or "").strip()
+    dst = str(dst_name or "").strip()
+    if (not src) or (not dst) or src == dst:
+        return False
+
+    cfg = db.setdefault("系统配置", {})
+    changed = False
+
+    for td in cfg.setdefault("PM_TODO_LIST", []):
+        if not isinstance(td, dict):
+            continue
+        proj_list = normalize_todo_project_list(td.get("关联项目列表", []))
+        legacy = str(td.get("关联项目", "")).strip()
+        if legacy:
+            proj_list = list(dict.fromkeys(proj_list + normalize_todo_project_list([legacy])))
+        new_list = []
+        for proj in proj_list:
+            mapped = dst if str(proj).strip() == src else str(proj).strip()
+            if mapped and mapped not in new_list:
+                new_list.append(mapped)
+        if new_list != proj_list:
+            td["关联项目列表"] = new_list
+            td["关联项目"] = new_list[0] if new_list else ""
+            if not isinstance(td.get("历史版本"), list):
+                td["历史版本"] = []
+            changed = True
+        linked_proj = str(td.get("最近联动项目", "")).strip()
+        if linked_proj == src:
+            td["最近联动项目"] = dst
+            changed = True
+
+    events = cfg.get("标准事件流", [])
+    if isinstance(events, list):
+        new_events = []
+        for evt in events:
+            if not isinstance(evt, dict):
+                continue
+            main_proj = str(evt.get("项目", "")).strip()
+            if main_proj == src:
+                main_proj = dst
+                changed = True
+            proj_list = []
+            for proj in normalize_todo_project_list(evt.get("项目列表", [])):
+                mapped = dst if str(proj).strip() == src else str(proj).strip()
+                if mapped and mapped not in proj_list:
+                    proj_list.append(mapped)
+            if proj_list != normalize_todo_project_list(evt.get("项目列表", [])):
+                changed = True
+            evt["项目"] = main_proj or (proj_list[0] if proj_list else "")
+            evt["项目列表"] = proj_list
+            if evt["项目"] or evt["项目列表"]:
+                new_events.append(evt)
+        cfg["标准事件流"] = new_events
+
+    print_rows = cfg.get("打印追踪列表", [])
+    if isinstance(print_rows, list):
+        new_print_rows = []
+        for row in print_rows:
+            if not isinstance(row, dict):
+                continue
+            proj_name = str(row.get("项目", "")).strip()
+            if proj_name == src:
+                row["项目"] = dst
+                changed = True
+            if str(row.get("项目", "")).strip():
+                new_print_rows.append(row)
+        cfg["打印追踪列表"] = new_print_rows
+
+    return changed
+
+
 def auto_cleanup_project_shells():
     changed = False
     for proj in [p for p in list(db.keys()) if p != "系统配置"]:
@@ -4032,7 +4113,7 @@ def rename_project_to_target(src_name, dst_name):
             updated_alias[kk] = vv
     updated_alias[norm_text(src)] = dst
     db["系统配置"]["项目别名"] = sanitize_project_alias_map(updated_alias)
-    canonicalize_all_project_references()
+    remap_system_project_references(src, dst)
     return dst, True
 
 
@@ -4082,25 +4163,6 @@ def merge_project_into_target(merge_src, merge_dst, learned_aliases=None):
     dst_data["项目名称"] = dst
 
     cfg = db.setdefault("系统配置", {})
-    todo_all = cfg.setdefault("PM_TODO_LIST", [])
-    for td in todo_all:
-        proj_list = normalize_todo_project_list(td.get("关联项目列表", []))
-        legacy = str(td.get("关联项目", "")).strip()
-        if legacy:
-            proj_list = list(dict.fromkeys(proj_list + normalize_todo_project_list([legacy])))
-        changed = False
-        new_list = [dst if p == src else p for p in proj_list]
-        new_list = list(dict.fromkeys(normalize_todo_project_list(new_list)))
-        if new_list != proj_list:
-            td["关联项目列表"] = new_list
-            td["关联项目"] = new_list[0] if new_list else ""
-            changed = True
-        if str(td.get("最近联动项目", "")).strip() == src:
-            td["最近联动项目"] = dst
-            changed = True
-        if changed and not isinstance(td.get("历史版本"), list):
-            td["历史版本"] = []
-
     db[dst] = dst_data
     if src in db:
         del db[src]
@@ -4116,7 +4178,7 @@ def merge_project_into_target(merge_src, merge_dst, learned_aliases=None):
         if norm_text(a) != norm_text(dst):
             alias_map[norm_text(a)] = dst
     cfg["项目别名"] = sanitize_project_alias_map(alias_map)
-    canonicalize_all_project_references()
+    remap_system_project_references(src, dst)
     return True
 
 
@@ -6372,7 +6434,12 @@ def build_project_stage_segments(proj_label, proj_data):
     pause_dates = sorted({x["date"] for x in stage_records.get("暂停", [])})
     active_bucket = get_project_status_bucket(proj_data.get("Milestone", "")) if isinstance(proj_data, dict) else "unknown"
     latest_any_record = max(all_records, key=lambda x: x["date"], default=None)
-    pause_still_open = bool(latest_any_record and str(latest_any_record.get("stage", "")).strip() == "暂停")
+    has_live_current_stage = any(str(x).strip() not in ["", "暂停", "结束"] for x in current_macros)
+    pause_still_open = bool(
+        latest_any_record
+        and str(latest_any_record.get("stage", "")).strip() == "暂停"
+        and not (active_bucket not in ["pause", "done"] and has_live_current_stage)
+    )
     effective_active_bucket = "pause" if (pause_still_open and active_bucket not in ["done"]) else active_bucket
     latest_non_pause_record = max(
         [x for x in all_records if x["stage"] not in ["暂停", "结束"]],
@@ -11208,15 +11275,18 @@ if menu == MENU_DASHBOARD:
         if current_pm == "所有人":
             dashboard_column_config["负责人"] = st.column_config.SelectboxColumn("负责人", options=owner_options, width="small")
 
-        edited_dashboard_df = st.data_editor(
-            editable_df,
-            width="stretch",
-            hide_index=True,
-            num_rows="fixed",
-            column_config=dashboard_column_config,
-            disabled=["状态", "项目", "断更", "开定延迟预警", "发货延迟预警"],
-            key="dashboard_main_editor",
-        )
+        with st.form("dashboard_main_edit_form", clear_on_submit=False):
+            st.caption("表格编辑已切到批量提交模式：先集中改，再点一次保存，避免改一格就整页重跑。")
+            edited_dashboard_df = st.data_editor(
+                editable_df,
+                width="stretch",
+                hide_index=True,
+                num_rows="fixed",
+                column_config=dashboard_column_config,
+                disabled=["状态", "项目", "断更", "开定延迟预警", "发货延迟预警"],
+                key="dashboard_main_editor",
+            )
+            dashboard_submit = st.form_submit_button("💾 修改动态并保存", type="primary")
 
         def _normalize_target_text(v):
             s = str(v or "").strip()
@@ -11517,7 +11587,7 @@ if menu == MENU_DASHBOARD:
                 st.rerun()
 
         st.caption("提示：默认作为新记录；勾选【改写历史】后会覆盖该项目当前最新动态。")
-        if st.button("💾 修改动态并保存", type="primary", key="btn_dash_save_dynamic"):
+        if dashboard_submit:
             _save_dashboard_from_table()
     st.divider()
     with st.expander("人员 Loading（点击展开）", expanded=False):
@@ -13978,7 +14048,7 @@ elif menu == MENU_SETTINGS:
                     else:
                         final_name, renamed = rename_project_to_target(src_proj, new_proj_name)
                         if renamed:
-                            sync_save_db()
+                            persist_project_admin_changes([final_name], recompute_projects=True)
                             st.success(f"✅ 已重命名：{src_proj} → {final_name}")
                             st.rerun()
                         else:
@@ -14016,7 +14086,11 @@ elif menu == MENU_SETTINGS:
                     if alias_input.strip():
                         learned_aliases.update(x.strip() for x in re.split(r'[,，]', alias_input) if x.strip())
                     if merge_project_into_target(merge_src, merge_dst, learned_aliases=list(learned_aliases)):
-                        sync_save_db()
+                        merge_target = normalize_project_name_for_write(
+                            merge_dst,
+                            valid_projs=[p for p in db.keys() if p != "系统配置"],
+                        )
+                        persist_project_admin_changes([merge_target], recompute_projects=True)
                         st.success(f"✅ 合并完成：{merge_src} → {normalize_project_name_for_write(merge_dst)}，并已学习 {len(learned_aliases)} 个别名。")
                         st.rerun()
                     else:
@@ -14058,15 +14132,18 @@ elif menu == MENU_SETTINGS:
                 )
                 if st.button("🧹 执行异常比例项目清理", type="primary", key="btn_cleanup_ratio"):
                     cleaned = []
+                    cleaned_targets = []
                     skipped = []
                     for label in picked_malformed:
                         src, dst = label.split(" → ", 1)
                         if merge_project_into_target(src, dst, learned_aliases=[src]):
                             cleaned.append(label)
+                            if dst not in cleaned_targets:
+                                cleaned_targets.append(dst)
                         else:
                             skipped.append(label)
                     if cleaned:
-                        sync_save_db()
+                        persist_project_admin_changes(cleaned_targets, recompute_projects=True)
                         msg = f"已清理 {len(cleaned)} 个异常项目：{'；'.join(cleaned[:6])}"
                         if skipped:
                             msg += f"；另有 {len(skipped)} 个未处理，请检查目标项是否有效。"
@@ -14093,7 +14170,7 @@ elif menu == MENU_SETTINGS:
                         st.warning("该项目不存在或不可删除。")
                     else:
                         delete_project_and_refs(pick)
-                        sync_save_db()
+                        persist_project_admin_changes([], recompute_projects=False)
                         st.success(f"已删除可疑项目：{pick}")
                         st.rerun()
 
@@ -14116,7 +14193,7 @@ elif menu == MENU_SETTINGS:
                             if delete_project_and_refs(pick):
                                 removed.append(pick)
                         if removed:
-                            sync_save_db()
+                            persist_project_admin_changes([], recompute_projects=False)
                             st.success(f"已删除 {len(removed)} 个项目：{'；'.join(removed[:8])}")
                             st.rerun()
                         else:
@@ -14137,13 +14214,16 @@ elif menu == MENU_SETTINGS:
                     )
                     if st.button("✨ 清理这些命名噪音", key="btn_cleanup_project_noise", type="primary"):
                         cleaned = []
+                        cleaned_targets = []
                         for label in picked_noise:
                             src, rest = label.split(" → ", 1)
                             dst, _reason = rest.split("｜", 1)
                             if merge_project_into_target(src.strip(), dst.strip(), learned_aliases=[src.strip()]):
                                 cleaned.append(f"{src.strip()} → {dst.strip()}")
+                                if dst.strip() not in cleaned_targets:
+                                    cleaned_targets.append(dst.strip())
                         if cleaned:
-                            sync_save_db()
+                            persist_project_admin_changes(cleaned_targets, recompute_projects=True)
                             st.success(f"已清理 {len(cleaned)} 个命名噪音项目：{'；'.join(cleaned[:8])}")
                             st.rerun()
                         else:
@@ -14166,13 +14246,16 @@ elif menu == MENU_SETTINGS:
                     )
                     if st.button("🧩 合并这些高相似度项目", key="btn_merge_similarity_projects"):
                         cleaned = []
+                        cleaned_targets = []
                         for label in picked_sim:
                             src, rest = label.split(" → ", 1)
                             dst, _score = rest.split("｜", 1)
                             if merge_project_into_target(src.strip(), dst.strip(), learned_aliases=[src.strip()]):
                                 cleaned.append(f"{src.strip()} → {dst.strip()}")
+                                if dst.strip() not in cleaned_targets:
+                                    cleaned_targets.append(dst.strip())
                         if cleaned:
-                            sync_save_db()
+                            persist_project_admin_changes(cleaned_targets, recompute_projects=True)
                             st.success(f"已合并 {len(cleaned)} 个高相似度项目：{'；'.join(cleaned[:8])}")
                             st.rerun()
                         else:
@@ -14193,13 +14276,13 @@ elif menu == MENU_SETTINGS:
                     del_alias = st.selectbox("删除某个别名映射", [""] + sorted(alias_map.keys()), key="del_alias_key")
                     if st.button("🧯 删除该别名", key="btn_del_alias") and del_alias:
                         st.session_state.db["系统配置"].setdefault("项目别名", {}).pop(del_alias, None)
-                        sync_save_db()
+                        persist_project_admin_changes([], recompute_projects=False)
                         st.success(f"已删除别名：{del_alias}")
                         st.rerun()
                 with c_a2:
                     if st.button("🧹 清空全部别名映射", key="btn_clear_alias"):
                         st.session_state.db["系统配置"]["项目别名"] = {}
-                        sync_save_db()
+                        persist_project_admin_changes([], recompute_projects=False)
                         st.success("已清空全部别名映射。")
                         st.rerun()
 
@@ -14218,7 +14301,7 @@ elif menu == MENU_SETTINGS:
                     )
                     st.session_state.db["系统配置"].setdefault("最近合并回滚", {})
                     st.session_state.db["系统配置"]["最近合并回滚"] = {}
-                    sync_save_db()
+                    persist_project_admin_changes([src_name, dst_name], recompute_projects=True)
                     st.success("✅ 已撤销最近一次合并。")
                     st.rerun()
 
@@ -14251,14 +14334,14 @@ elif menu == MENU_SETTINGS:
                             st.session_state.db["系统配置"]["项目别名"] = tar.get(
                                 "alias_map_before", st.session_state.db["系统配置"].get("项目别名", {})
                             )
-                            sync_save_db()
+                            persist_project_admin_changes([src_name, dst_name], recompute_projects=True)
                             st.success("✅ 已按历史记录恢复。")
                             st.rerun()
                 with c_h2:
                     del_ids = st.multiselect("多选删除历史记录", id_list, key="merge_hist_delete", placeholder="请选择要删除的记录")
                     if st.button("🗑️ 删除选中历史", key="btn_del_hist") and del_ids:
                         st.session_state.db["系统配置"]["合并回滚历史"] = [x for x in hist if x.get("id") not in set(del_ids)]
-                        sync_save_db()
+                        persist_project_admin_changes([], recompute_projects=False)
                         st.success(f"已删除 {len(del_ids)} 条历史记录。")
                         st.rerun()
 
