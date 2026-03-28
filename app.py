@@ -4495,6 +4495,28 @@ def extract_todo_segment_hints(text, project_components=None, comp_kw=None, stag
             return "工程拆件"
         return ""
 
+    def _should_fall_back_to_global(seg_text_value, comp_list):
+        concrete_comps = [
+            str(comp_name).strip()
+            for comp_name in (comp_list or [])
+            if str(comp_name).strip() and "全局" not in str(comp_name)
+        ]
+        concrete_comps = list(dict.fromkeys(concrete_comps))
+        if len(concrete_comps) < 2:
+            return False
+        relation_tokens = ["确认", "核对", "匹配", "适配", "装配", "搭配", "配合", "组合"]
+        comparison_tokens = ["大小", "外观", "效果", "比例", "关系", "协调", "能否", "是否能", "合不合"]
+        carry_tokens = ["带回", "拿回", "带去", "拿去", "带上", "拿上"]
+        has_relation = any(tok in seg_text_value for tok in relation_tokens)
+        has_comparison = any(tok in seg_text_value for tok in comparison_tokens)
+        has_carry = any(tok in seg_text_value for tok in carry_tokens)
+        return (
+            (has_relation and has_comparison)
+            or (has_relation and has_carry)
+            or bool(re.search(r"(确认|核对).*(大小|外观|效果|比例|匹配|适配|装配|搭配)", seg_text_value))
+            or ("待确认" in seg_text_value and ("大小" in seg_text_value or "外观" in seg_text_value))
+        )
+
     def _append_component_label(label_map, comp_name, label_text):
         comp_txt = str(comp_name or "").strip()
         label = str(label_text or "").strip(" ，,;；|")
@@ -4575,6 +4597,13 @@ def extract_todo_segment_hints(text, project_components=None, comp_kw=None, stag
 
         if not seg_comps and any(k in seg for k in ["全局", "整体", "项目", "大盘"]):
             seg_comps = ["🌐 全局进度 (Overall)"]
+
+        seg_comps = list(dict.fromkeys([str(comp_name).strip() for comp_name in seg_comps if str(comp_name).strip()]))
+        if "🌐 全局进度 (Overall)" in seg_comps and len(seg_comps) > 1:
+            seg_comps = [x for x in seg_comps if x != "🌐 全局进度 (Overall)"]
+        if _should_fall_back_to_global(seg, seg_comps):
+            seg_comps = ["🌐 全局进度 (Overall)"]
+            seg_component_labels = {}
 
         stage_name = _pick_stage_from_segment(seg)
         if seg_comps or stage_name:
@@ -10381,9 +10410,9 @@ if menu == MENU_DASHBOARD:
     st.caption("CSV 导入入口已迁移至【系统维护】。")
     gantt_cat_orders = MACRO_STAGES.copy()
     combined_color_map = {
-        "预研": "#94A3B8", "立项": "#F2C14E", "建模": "#34C6D3", "打印": "#0EA5A4", "涂装": "#F59E0B", "设计": "#8B5CF6",
+        "预研": "#CBD5E1", "立项": "#F2C14E", "建模": "#34C6D3", "打印": "#0EA5A4", "涂装": "#F59E0B", "设计": "#8B5CF6",
         "工程": "#4F7CFF", "开模": "#FB7185", "修模": "#F97316",
-        "生产": "#37B36B", "暂停": "#94A3B8", "结束": "#334155"
+        "生产": "#37B36B", "暂停": "#64748B", "结束": "#334155"
     }
 
     @st.cache_data(ttl=30, show_spinner=False)
@@ -10489,6 +10518,7 @@ if menu == MENU_DASHBOARD:
     st.divider()
     st.subheader("📈 全局进展甘特图")
     st.markdown("💡 默认显示当前月份前后约半年区间；支持手动调整日期范围，并统计建模/打印/设计/工程平均耗时（可选去极值）。")
+    st.caption("颜色提示：甘特主条只显示正式推进阶段；预研改成“预”标记，暂停是深灰并带“停”字小方块。")
     if gantt_data:
         df_g_all = pd.DataFrame(gantt_data).sort_values(by=["项目", "Start"])
         df_g_all["Start_dt"] = pd.to_datetime(df_g_all["Start"], errors="coerce")
@@ -10559,6 +10589,8 @@ if menu == MENU_DASHBOARD:
                 y_order = sorted(visible_labels)
         else:
             y_order = sorted(df_g["项目"].unique().tolist())
+        df_pre = df_g[df_g["工序阶段"] == "预研"].copy()
+        df_g_bars = df_g[df_g["工序阶段"] != "预研"].copy()
         def _is_parallel_row(row):
             stage_name = str(row.get("工序阶段", "")).strip()
             proj_name = str(row.get("项目", "")).strip()
@@ -10569,21 +10601,42 @@ if menu == MENU_DASHBOARD:
             return False
 
         parallel_stages = ["打印", "设计"]
-        main_stage_order = [x for x in gantt_cat_orders if x != "打印"]
-        df_parallel = df_g[df_g.apply(_is_parallel_row, axis=1)].copy()
-        df_main = df_g[~df_g.apply(_is_parallel_row, axis=1)].copy()
-        df_display = df_g if show_parallel_tracks else df_main
-        display_stage_order = gantt_cat_orders if show_parallel_tracks else main_stage_order
+        main_stage_order = [x for x in gantt_cat_orders if x not in ["打印", "预研"]]
+        bar_stage_order = [x for x in gantt_cat_orders if x != "预研"]
+        df_parallel = df_g_bars[df_g_bars.apply(_is_parallel_row, axis=1)].copy()
+        df_main = df_g_bars[~df_g_bars.apply(_is_parallel_row, axis=1)].copy()
+        df_display = df_g_bars if show_parallel_tracks else df_main
+        display_stage_order = bar_stage_order if show_parallel_tracks else main_stage_order
         if df_display.empty:
-            df_display = df_g.copy()
-            display_stage_order = gantt_cat_orders
-        fig = px.timeline(
-            df_display, x_start="Start", x_end="Finish", y="项目",
-            color="工序阶段", hover_name="详情",
-            category_orders={"工序阶段": display_stage_order, "项目": y_order},
-            color_discrete_map=combined_color_map
-        )
-        fig.update_xaxes(range=[selected_start.to_pydatetime(), selected_end.to_pydatetime()])
+            fig = go.Figure()
+            fig.update_xaxes(range=[selected_start.to_pydatetime(), selected_end.to_pydatetime()])
+            fig.update_yaxes(categoryorder="array", categoryarray=y_order, autorange="reversed")
+        else:
+            fig = px.timeline(
+                df_display, x_start="Start", x_end="Finish", y="项目",
+                color="工序阶段", hover_name="详情",
+                category_orders={"工序阶段": display_stage_order, "项目": y_order},
+                color_discrete_map=combined_color_map
+            )
+            fig.update_xaxes(range=[selected_start.to_pydatetime(), selected_end.to_pydatetime()])
+        if not df_pre.empty:
+            df_pre_marks = df_pre.copy()
+            df_pre_marks["标记说明"] = df_pre_marks.apply(
+                lambda r: f"[预研] {r['详情']}",
+                axis=1
+            )
+            fig.add_trace(go.Scatter(
+                x=df_pre_marks["Start"],
+                y=df_pre_marks["项目"],
+                mode="markers+text",
+                marker=dict(symbol="circle", size=11, color="#CBD5E1", line=dict(width=1, color="#64748B")),
+                text=["预"] * len(df_pre_marks),
+                textposition="middle center",
+                textfont=dict(size=8, color="#334155"),
+                name="预研标记",
+                customdata=df_pre_marks[["标记说明"]],
+                hovertemplate="%{customdata[0]}<extra></extra>"
+            ))
         if (not show_parallel_tracks) and (not df_parallel.empty):
             df_parallel_marks = df_parallel.copy()
             df_parallel_marks["标记文案"] = df_parallel_marks["工序阶段"].map({"打印": "打", "设计": "设"}).fillna("并")
@@ -10860,6 +10913,25 @@ if menu == MENU_DASHBOARD:
             global_comp = next((k for k in comp_names if "全局" in str(k)), "全局进度")
             txt = str(raw_text or "").strip()
 
+            def _should_fall_back_to_global(text_value, comp_list):
+                concrete_comps = [
+                    str(comp_name).strip()
+                    for comp_name in (comp_list or [])
+                    if str(comp_name).strip() and "全局" not in str(comp_name)
+                ]
+                concrete_comps = list(dict.fromkeys(concrete_comps))
+                if len(concrete_comps) < 2:
+                    return False
+                relation_tokens = ["确认", "核对", "匹配", "适配", "装配", "搭配", "配合", "组合"]
+                comparison_tokens = ["大小", "外观", "效果", "比例", "关系", "协调", "能否", "是否能", "合不合"]
+                carry_tokens = ["带回", "拿回", "带去", "拿去", "带上", "拿上"]
+                return (
+                    (any(tok in text_value for tok in relation_tokens) and any(tok in text_value for tok in comparison_tokens))
+                    or (any(tok in text_value for tok in relation_tokens) and any(tok in text_value for tok in carry_tokens))
+                    or bool(re.search(r"(确认|核对).*(大小|外观|效果|比例|匹配|适配|装配|搭配)", text_value))
+                    or ("待确认" in text_value and ("大小" in text_value or "外观" in text_value))
+                )
+
             def _pick_component(hint):
                 h = str(hint or "").strip()
                 if not h:
@@ -10879,11 +10951,18 @@ if menu == MENU_DASHBOARD:
                 return ""
 
             lead = re.match(r"^\s*((?:\[[^\]]+\]\s*)+)", txt)
+            explicit_picks = []
             if lead:
                 for tg in re.findall(r"\[([^\]]+)\]", lead.group(1)):
                     picked = _pick_component(tg)
                     if picked:
-                        return picked
+                        explicit_picks.append(picked)
+            explicit_picks = list(dict.fromkeys(explicit_picks))
+            explicit_concrete = [comp_name for comp_name in explicit_picks if str(comp_name).strip() and comp_name != global_comp]
+            if explicit_concrete:
+                if _should_fall_back_to_global(txt, explicit_concrete):
+                    return global_comp
+                return explicit_concrete[0]
 
             comp_hint_pairs = [
                 ("\u5934\u96d5", "\u5934\u96d5(\u8868\u60c5)"), ("\u8868\u60c5", "\u5934\u96d5(\u8868\u60c5)"), ("\u8138", "\u5934\u96d5(\u8868\u60c5)"),
@@ -10893,16 +10972,25 @@ if menu == MENU_DASHBOARD:
                 ("\u670d\u88c5", "\u670d\u88c5"), ("\u5305\u88c5", "\u5305\u88c5"),
                 ("\u5168\u5c40", "\u5168\u5c40\u8fdb\u5ea6"), ("\u6574\u4f53", "\u5168\u5c40\u8fdb\u5ea6"),
             ]
+            matched_components = []
             for kw, target in get_component_split_keyword_map().items():
                 if kw and kw in txt:
                     picked = _pick_component(target)
                     if picked:
-                        return picked
+                        matched_components.append(picked)
             for kw, target in comp_hint_pairs:
                 if kw in txt:
                     picked = _pick_component(target)
                     if picked:
-                        return picked
+                        matched_components.append(picked)
+            matched_components = list(dict.fromkeys([str(comp_name).strip() for comp_name in matched_components if str(comp_name).strip()]))
+            concrete_matches = [comp_name for comp_name in matched_components if comp_name != global_comp]
+            if concrete_matches:
+                if _should_fall_back_to_global(txt, concrete_matches):
+                    return global_comp
+                return concrete_matches[0]
+            if matched_components:
+                return matched_components[0]
 
             if any(k in txt for k in ["\u5168\u5c40", "\u6574\u4f53", "\u9879\u76ee", "\u603b\u4f53"]):
                 return global_comp

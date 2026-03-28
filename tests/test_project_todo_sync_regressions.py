@@ -1692,6 +1692,30 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         self.assertFalse(inherited)
         self.assertEqual(row["\u4e8b\u4ef6"], "\u5934\u96d5\u63d0\u5ba1")
 
+    def test_extract_todo_segment_hints_prefers_specific_component_over_global_prefix(self) -> None:
+        ns = load_app_functions("norm_text", "extract_todo_segment_hints")
+
+        rows = ns.extract_todo_segment_hints(
+            "[全局进度] 素体修改待OB跟冯老师确认，CP4/1",
+            project_components=["全局进度", "素体", "配件"],
+            comp_kw={"素体": "素体", "配件": "配件"},
+            stage_kw_map={},
+        )
+
+        self.assertEqual(rows[0]["components"], ["素体"])
+
+    def test_extract_todo_segment_hints_falls_back_to_global_for_cross_component_confirmation(self) -> None:
+        ns = load_app_functions("norm_text", "extract_todo_segment_hints")
+
+        rows = ns.extract_todo_segment_hints(
+            "[配件] 待17将穿衣素体带回以确认配件的大小和外观",
+            project_components=["全局进度", "素体", "配件"],
+            comp_kw={"穿衣素体": "素体", "素体": "素体", "配件": "配件"},
+            stage_kw_map={},
+        )
+
+        self.assertEqual(rows[0]["components"], ["🌐 全局进度 (Overall)"])
+
     def test_sync_save_db_system_config_skips_global_recompute(self) -> None:
         ns = load_app_functions("sync_save_db")
 
