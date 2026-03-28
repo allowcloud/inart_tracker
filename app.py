@@ -2891,6 +2891,12 @@ def extract_dashboard_todo_segments(text, project_name="", ref_date=None):
     for seg in segments:
         body_text = seg
         hint_text = ""
+        explicit_history_date_marker = bool(
+            re.search(
+                r"已于\s*(?:20\d{2}[-/年.]?)?\d{1,2}(?:[-/月.]\d{1,2})",
+                str(seg or "").strip(),
+            )
+        )
         m = re.match(r"^(.*?)(?:\s*(?:--+|——+)\s*)(.+)$", seg)
         if m:
             body_text = str(m.group(1) or "").strip() or seg
@@ -2918,6 +2924,11 @@ def extract_dashboard_todo_segments(text, project_name="", ref_date=None):
             elif route == "past":
                 due_dt = None
             route = "todo"
+        elif explicit_history_date_marker and any(tok in task_seed for tok in ["待", "需", "需要", "跟进", "跟催"]):
+            route = "todo"
+
+        if explicit_history_date_marker and isinstance(due_dt, datetime.date):
+            due_dt = None
         task = clean_auto_todo_task_text(task_seed)
         if not task:
             continue
@@ -3019,7 +3030,10 @@ def extract_dashboard_todo_segments(text, project_name="", ref_date=None):
                 "due_dt": due_dt if isinstance(due_dt, datetime.date) else None,
                 "component": row_component,
                 "stage": stage_name,
-                "allow_empty_due": (route == "todo" and (not isinstance(due_dt, datetime.date))),
+                "allow_empty_due": (
+                    (route == "todo" or explicit_history_date_marker)
+                    and (not isinstance(due_dt, datetime.date))
+                ),
             })
     return out
 
