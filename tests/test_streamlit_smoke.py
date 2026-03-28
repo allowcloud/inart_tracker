@@ -44,10 +44,6 @@ class StreamlitSmokeTest(unittest.TestCase):
             if at.exception:
                 raise SystemExit("pm workspace exceptions: " + " | ".join(str(x.value) for x in at.exception))
 
-            button_labels = [w.label for w in at.button]
-            if "\u2795 \u6dfb\u52a0" not in button_labels:
-                raise SystemExit("todo add button not found in PM workspace")
-
             print("PM_WORKSPACE_OK")
             """
         )

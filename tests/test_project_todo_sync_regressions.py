@@ -1716,6 +1716,66 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
 
         self.assertEqual(rows[0]["components"], ["🌐 全局进度 (Overall)"])
 
+    def test_build_todo_quick_add_entry_prepares_new_todo_for_unified_save(self) -> None:
+        ns = load_app_functions("build_todo_quick_add_entry")
+        appended = []
+        project_name = "1/6超女"
+        globals_map = ns.build_todo_quick_add_entry.__globals__
+        globals_map["db"].update(
+            {
+                "系统配置": {},
+                project_name: {
+                    "部件列表": {
+                        "素体": {},
+                        "全局进度": {},
+                    }
+                },
+            }
+        )
+        globals_map["normalize_people_text"] = lambda text: str(text or "").strip()
+        globals_map["infer_todo_form_defaults"] = lambda task_text, cpddl_text, valid_projs, current_people_text="": {
+            "cleaned_task": "素体修改待确认",
+            "cpddl": "CP4/1",
+            "due_dt": datetime.date(2026, 4, 1),
+            "projects": [project_name],
+            "people": [],
+            "people_bundle": {"labels": []},
+        }
+        globals_map["clean_auto_todo_task_text"] = lambda text: str(text or "").strip()
+        globals_map["classify_temporal_event_route"] = lambda text, ref_date=None, prefer_past=False: {"route": "todo", "date": None}
+        globals_map["extract_deadline_from_text"] = lambda text: datetime.date(2026, 4, 1)
+        globals_map["normalize_todo_cpddl_for_storage"] = lambda cpddl_text, task_text="", due_dt=None: str(cpddl_text or "").strip()
+        globals_map["create_project_shell_if_missing"] = lambda *args, **kwargs: False
+        globals_map["register_extra_role_people"] = lambda people_list: []
+        globals_map["split_people_text"] = lambda text: [str(text).strip()] if str(text or "").strip() else []
+        globals_map["resolve_todo_completion_event_day"] = lambda *args, **kwargs: datetime.date(2026, 3, 28)
+        globals_map["append_todo_completion_history"] = lambda td, done_day: False
+        globals_map["todo_project_list"] = lambda td: list(td.get("关联项目列表", []))
+        globals_map["infer_todo_handoff_prefill"] = lambda td, proj_name: {"部件": ["素体"], "阶段": "建模(含打印/签样)"}
+        globals_map["_normalize_standard_event_component"] = lambda comp_name: comp_name
+        globals_map["todo_cpddl_text"] = lambda td: str(td.get("CPDDL", "")).strip()
+        globals_map["append_standard_event_entry"] = lambda **kwargs: appended.append(kwargs) or True
+        globals_map["parse_date_safe"] = lambda text: None
+
+        result = ns.build_todo_quick_add_entry(
+            "素体修改待确认",
+            "CP4/1",
+            [project_name],
+            "",
+            "袁",
+            "袁",
+            [project_name],
+            today=datetime.date(2026, 3, 28),
+        )
+
+        self.assertNotIn("error", result)
+        self.assertEqual(result["todo"]["任务"], "素体修改待确认")
+        self.assertEqual(result["todo"]["关联项目列表"], [project_name])
+        self.assertEqual(result["todo"]["所属视角"], "袁")
+        self.assertFalse(result["todo"]["完成"])
+        self.assertEqual(len(appended), 1)
+        self.assertEqual(appended[0]["component_name"], "素体")
+
     def test_sync_save_db_system_config_skips_global_recompute(self) -> None:
         ns = load_app_functions("sync_save_db")
 
