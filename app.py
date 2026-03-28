@@ -4495,6 +4495,28 @@ def extract_todo_segment_hints(text, project_components=None, comp_kw=None, stag
             return "工程拆件"
         return ""
 
+    def _should_fall_back_to_global(seg_text_value, comp_list):
+        concrete_comps = [
+            str(comp_name).strip()
+            for comp_name in (comp_list or [])
+            if str(comp_name).strip() and "全局" not in str(comp_name)
+        ]
+        concrete_comps = list(dict.fromkeys(concrete_comps))
+        if len(concrete_comps) < 2:
+            return False
+        relation_tokens = ["确认", "核对", "匹配", "适配", "装配", "搭配", "配合", "组合"]
+        comparison_tokens = ["大小", "外观", "效果", "比例", "关系", "协调", "能否", "是否能", "合不合"]
+        carry_tokens = ["带回", "拿回", "带去", "拿去", "带上", "拿上"]
+        has_relation = any(tok in seg_text_value for tok in relation_tokens)
+        has_comparison = any(tok in seg_text_value for tok in comparison_tokens)
+        has_carry = any(tok in seg_text_value for tok in carry_tokens)
+        return (
+            (has_relation and has_comparison)
+            or (has_relation and has_carry)
+            or bool(re.search(r"(确认|核对).*(大小|外观|效果|比例|匹配|适配|装配|搭配)", seg_text_value))
+            or ("待确认" in seg_text_value and ("大小" in seg_text_value or "外观" in seg_text_value))
+        )
+
     def _append_component_label(label_map, comp_name, label_text):
         comp_txt = str(comp_name or "").strip()
         label = str(label_text or "").strip(" ，,;；|")
@@ -4575,6 +4597,13 @@ def extract_todo_segment_hints(text, project_components=None, comp_kw=None, stag
 
         if not seg_comps and any(k in seg for k in ["全局", "整体", "项目", "大盘"]):
             seg_comps = ["🌐 全局进度 (Overall)"]
+
+        seg_comps = list(dict.fromkeys([str(comp_name).strip() for comp_name in seg_comps if str(comp_name).strip()]))
+        if "🌐 全局进度 (Overall)" in seg_comps and len(seg_comps) > 1:
+            seg_comps = [x for x in seg_comps if x != "🌐 全局进度 (Overall)"]
+        if _should_fall_back_to_global(seg, seg_comps):
+            seg_comps = ["🌐 全局进度 (Overall)"]
+            seg_component_labels = {}
 
         stage_name = _pick_stage_from_segment(seg)
         if seg_comps or stage_name:
@@ -10884,6 +10913,25 @@ if menu == MENU_DASHBOARD:
             global_comp = next((k for k in comp_names if "全局" in str(k)), "全局进度")
             txt = str(raw_text or "").strip()
 
+            def _should_fall_back_to_global(text_value, comp_list):
+                concrete_comps = [
+                    str(comp_name).strip()
+                    for comp_name in (comp_list or [])
+                    if str(comp_name).strip() and "全局" not in str(comp_name)
+                ]
+                concrete_comps = list(dict.fromkeys(concrete_comps))
+                if len(concrete_comps) < 2:
+                    return False
+                relation_tokens = ["确认", "核对", "匹配", "适配", "装配", "搭配", "配合", "组合"]
+                comparison_tokens = ["大小", "外观", "效果", "比例", "关系", "协调", "能否", "是否能", "合不合"]
+                carry_tokens = ["带回", "拿回", "带去", "拿去", "带上", "拿上"]
+                return (
+                    (any(tok in text_value for tok in relation_tokens) and any(tok in text_value for tok in comparison_tokens))
+                    or (any(tok in text_value for tok in relation_tokens) and any(tok in text_value for tok in carry_tokens))
+                    or bool(re.search(r"(确认|核对).*(大小|外观|效果|比例|匹配|适配|装配|搭配)", text_value))
+                    or ("待确认" in text_value and ("大小" in text_value or "外观" in text_value))
+                )
+
             def _pick_component(hint):
                 h = str(hint or "").strip()
                 if not h:
@@ -10903,11 +10951,18 @@ if menu == MENU_DASHBOARD:
                 return ""
 
             lead = re.match(r"^\s*((?:\[[^\]]+\]\s*)+)", txt)
+            explicit_picks = []
             if lead:
                 for tg in re.findall(r"\[([^\]]+)\]", lead.group(1)):
                     picked = _pick_component(tg)
                     if picked:
-                        return picked
+                        explicit_picks.append(picked)
+            explicit_picks = list(dict.fromkeys(explicit_picks))
+            explicit_concrete = [comp_name for comp_name in explicit_picks if str(comp_name).strip() and comp_name != global_comp]
+            if explicit_concrete:
+                if _should_fall_back_to_global(txt, explicit_concrete):
+                    return global_comp
+                return explicit_concrete[0]
 
             comp_hint_pairs = [
                 ("\u5934\u96d5", "\u5934\u96d5(\u8868\u60c5)"), ("\u8868\u60c5", "\u5934\u96d5(\u8868\u60c5)"), ("\u8138", "\u5934\u96d5(\u8868\u60c5)"),
@@ -10917,16 +10972,25 @@ if menu == MENU_DASHBOARD:
                 ("\u670d\u88c5", "\u670d\u88c5"), ("\u5305\u88c5", "\u5305\u88c5"),
                 ("\u5168\u5c40", "\u5168\u5c40\u8fdb\u5ea6"), ("\u6574\u4f53", "\u5168\u5c40\u8fdb\u5ea6"),
             ]
+            matched_components = []
             for kw, target in get_component_split_keyword_map().items():
                 if kw and kw in txt:
                     picked = _pick_component(target)
                     if picked:
-                        return picked
+                        matched_components.append(picked)
             for kw, target in comp_hint_pairs:
                 if kw in txt:
                     picked = _pick_component(target)
                     if picked:
-                        return picked
+                        matched_components.append(picked)
+            matched_components = list(dict.fromkeys([str(comp_name).strip() for comp_name in matched_components if str(comp_name).strip()]))
+            concrete_matches = [comp_name for comp_name in matched_components if comp_name != global_comp]
+            if concrete_matches:
+                if _should_fall_back_to_global(txt, concrete_matches):
+                    return global_comp
+                return concrete_matches[0]
+            if matched_components:
+                return matched_components[0]
 
             if any(k in txt for k in ["\u5168\u5c40", "\u6574\u4f53", "\u9879\u76ee", "\u603b\u4f53"]):
                 return global_comp
