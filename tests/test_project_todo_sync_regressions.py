@@ -1047,6 +1047,107 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         self.assertEqual(rows[0]["component"], head_component)
         self.assertEqual(rows[0]["stage"], "\u5efa\u6a21(\u542b\u6253\u5370/\u7b7e\u6837)")
 
+    def test_extract_dashboard_todo_segments_treats_yiyu_date_as_history_marker_for_receive_todo(self) -> None:
+        ns = load_app_functions(
+            "clean_auto_todo_task_text",
+            "extract_event_date_and_body",
+            "classify_text_intent",
+            "classify_temporal_event_route",
+            "extract_followup_todo_clause",
+            "extract_dashboard_todo_segments",
+            "extract_todo_segment_hints",
+        )
+        globals_map = ns.extract_dashboard_todo_segments.__globals__
+        project_name = "1/6超女"
+        head_component = "头雕(表情)"
+        globals_map["db"].update(
+            {
+                project_name: {
+                    "部件列表": {
+                        head_component: {},
+                        "全局进度": {},
+                    }
+                }
+            }
+        )
+        globals_map["norm_text"] = lambda text: str(text or "").strip().lower().replace(" ", "")
+        globals_map["get_recognition_keywords"] = lambda key: {
+            "未来意图词": ["待", "待办", "需要", "需", "预计", "cp"],
+            "过去意图词": ["已", "已经", "完成", "收到", "已安排", "安排了", "已于"],
+            "日期噪音词": ["预计", "左右", "大概", "约"],
+        }.get(key, [])
+        globals_map["get_component_keyword_map"] = lambda: {
+            "头雕": head_component,
+            "怀表": "配件",
+        }
+        globals_map["get_stage_keyword_map"] = lambda: {
+            "打印": "建模(含打印/签样)",
+        }
+        globals_map["infer_todo_handoff_prefill"] = lambda td, proj_name: {}
+
+        rows = ns.extract_dashboard_todo_segments(
+            "头雕已于3/27安排博泰打印待收件",
+            project_name=project_name,
+            ref_date=datetime.date(2026, 3, 27),
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["task"], "待收件")
+        self.assertEqual(rows[0]["route"], "todo")
+        self.assertIsNone(rows[0]["due_dt"])
+        self.assertTrue(rows[0]["allow_empty_due"])
+        self.assertEqual(rows[0]["component"], head_component)
+
+    def test_extract_dashboard_todo_segments_treats_yiyu_date_as_history_marker_for_engineering_followup(self) -> None:
+        ns = load_app_functions(
+            "clean_auto_todo_task_text",
+            "extract_event_date_and_body",
+            "classify_text_intent",
+            "classify_temporal_event_route",
+            "extract_followup_todo_clause",
+            "extract_dashboard_todo_segments",
+            "extract_todo_segment_hints",
+        )
+        globals_map = ns.extract_dashboard_todo_segments.__globals__
+        project_name = "1/6哈波火焰杯"
+        globals_map["db"].update(
+            {
+                project_name: {
+                    "部件列表": {
+                        "配件": {},
+                        "全局进度": {},
+                    }
+                }
+            }
+        )
+        globals_map["norm_text"] = lambda text: str(text or "").strip().lower().replace(" ", "")
+        globals_map["get_recognition_keywords"] = lambda key: {
+            "未来意图词": ["待", "待办", "需要", "需", "预计", "cp"],
+            "过去意图词": ["已", "已经", "完成", "收到", "已安排", "安排了", "已于", "交接"],
+            "日期噪音词": ["预计", "左右", "大概", "约"],
+        }.get(key, [])
+        globals_map["get_component_keyword_map"] = lambda: {
+            "配件": "配件",
+        }
+        globals_map["get_stage_keyword_map"] = lambda: {
+            "交接工程": "工程拆件",
+            "拆件": "工程拆件",
+        }
+        globals_map["infer_todo_handoff_prefill"] = lambda td, proj_name: {}
+
+        rows = ns.extract_dashboard_todo_segments(
+            "配件已于3/27交接工程确认样板筹备的拆件落地，待返回文件",
+            project_name=project_name,
+            ref_date=datetime.date(2026, 3, 27),
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["route"], "todo")
+        self.assertIsNone(rows[0]["due_dt"])
+        self.assertTrue(rows[0]["allow_empty_due"])
+        self.assertEqual(rows[0]["component"], "配件")
+        self.assertEqual(rows[0]["stage"], "工程拆件")
+
     def test_extract_dashboard_todo_segments_strips_cp_tail_and_keeps_due_date(self) -> None:
         ns = load_app_functions(
             "clean_auto_todo_task_text",
