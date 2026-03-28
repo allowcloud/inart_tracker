@@ -803,7 +803,9 @@ PRINT_TRACK_SOURCE_LABELS = {
 }
 DEFAULT_COMPONENT_KEYWORDS = {
     "头雕": "头雕(表情)", "表情": "头雕(表情)", "头": "头雕(表情)", "眼": "头雕(表情)", "脸": "头雕(表情)",
+    "脖子": "头雕(表情)",
     "植发": "植发", "头发": "植发", "发": "植发", "马海毛": "头雕(表情)", "毛到货": "头雕(表情)",
+    "素体": "素体", "胸皮": "素体", "透明胸皮": "素体", "穿衣素体": "素体",
     "手": "手型", "手型": "手型",
     "衣": "服装", "服": "服装", "服装": "服装", "鞋": "服装", "鞋子": "服装", "靴": "服装", "靴子": "服装",
     "包": "包装", "盒": "包装", "包装": "包装",
@@ -817,7 +819,7 @@ DEFAULT_STAGE_KEYWORDS = {
     "修": "建模(含打印/签样)", "建模": "建模(含打印/签样)", "打样": "建模(含打印/签样)",
     "涂": "涂装", "色": "涂装",
     "设计": "设计", "原画": "设计",
-    "拆件": "工程拆件", "官图": "官图",
+    "拆件": "工程拆件", "交接工程": "工程拆件", "转交工程": "工程拆件", "官图": "官图",
     "开模": "开模", "模具": "开模", "试模": "开模",
     "大货": "大货",
     "完成": "✅ 已完成(结束)", "结束": "✅ 已完成(结束)",
@@ -826,10 +828,15 @@ DEFAULT_COMPONENT_SPLIT_KEYWORDS = {
     "头雕": "头雕(表情)",
     "表情": "头雕(表情)",
     "脸": "头雕(表情)",
+    "脖子": "头雕(表情)",
     "马海毛": "头雕(表情)",
     "毛到货": "头雕(表情)",
     "植发": "植发",
     "头发": "植发",
+    "素体": "素体",
+    "胸皮": "素体",
+    "透明胸皮": "素体",
+    "穿衣素体": "素体",
     "手型": "手型",
     "服装": "服装",
     "鞋子": "服装",
@@ -4459,6 +4466,10 @@ def extract_todo_segment_hints(text, project_components=None, comp_kw=None, stag
             ):
                 return "大货"
             return "工厂复样(含胶件/上色等)"
+        if any(tok in seg_text_value for tok in ["交接工程", "转交工程", "发给工程", "交给工程", "工程接收", "工程开始", "工程拆"]) and any(
+            tok in seg_text_value for tok in ["拆", "拆件", "结构", "分件", "脖子", "眼睛"]
+        ):
+            return "工程拆件"
         for kw, stage_name in _sorted_kw_items(stage_kw_map):
             kw_norm = norm_text(kw)
             if kw in seg_text_value or (kw_norm and kw_norm in seg_norm):
@@ -5721,11 +5732,36 @@ def build_dashboard_dynamic_display(project_name, explanation=None, pm_view=None
     reminder_date_txt = str(current.get("提醒日期", "")).strip()
     reminder_action = str(current.get("提醒动作", "")).strip()
     reminder_comp = str(current.get("提醒部件", "")).strip() or component_name
+    reminder_stage = str(current.get("提醒阶段", "")).strip() or str(current.get("阶段", "")).strip() or "-"
     reminder_dt = parse_date_safe(reminder_date_txt)
     exp_dt = clamp_timeline_date(parse_date_safe(current.get("日期", "")))
     if reminder_text:
         reminder_label = format_todo_reminder_label(reminder_text, reminder_date_txt, reminder_action)
         reminder_line = f"[待办/{reminder_comp}] {reminder_label}".strip()
+        reminder_is_duplicate = False
+        current_action = str(current.get("动作", "")).strip()
+        if str(source_name).strip() == "To-do" or current_action in ["待办提醒", "待办新建", "待办更新", "待办重开", "待办完成"]:
+            reminder_is_duplicate = True
+        elif reminder_text and (reminder_text in content_text or content_text in reminder_text):
+            reminder_is_duplicate = True
+        else:
+            matcher = globals().get("same_event_match_score")
+            if callable(matcher):
+                try:
+                    reminder_is_duplicate = matcher(
+                        current,
+                        {
+                            "内容": reminder_text,
+                            "原始文本": reminder_text,
+                            "部件": reminder_comp,
+                            "阶段": reminder_stage,
+                        },
+                    ) >= 3
+                except Exception:
+                    reminder_is_duplicate = False
+
+        if reminder_is_duplicate:
+            reminder_label = ""
         should_override_reminder = (not content_text or content_text == "无数据")
         if reminder_dt and (not exp_dt or reminder_dt >= exp_dt):
             should_override_reminder = True
@@ -5738,7 +5774,7 @@ def build_dashboard_dynamic_display(project_name, explanation=None, pm_view=None
             "attention": int(event_attention_priority(content_text=reminder_label, action_type=reminder_action, source_module="To-do")),
             "order": -1 if should_override_reminder else 9999,
         }
-        if should_override_reminder:
+        if reminder_label and should_override_reminder:
             display_items.insert(0, reminder_item)
         elif reminder_label and all(reminder_label not in str(item.get("line", "")) for item in display_items):
             display_items.append(reminder_item)
