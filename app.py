@@ -1965,11 +1965,103 @@ def auto_sync_milestone(proj_name):
     _impl(proj_data, STAGES_UNIFIED)
 
 
+def sync_component_stages_from_linked_signals(proj_name):
+    proj = str(proj_name or "").strip()
+    if (not proj) or proj == "系统配置":
+        return False
+    db_obj = st.session_state.db if isinstance(st.session_state.get("db"), dict) else db
+    proj_data = db_obj.get(proj, {}) if isinstance(db_obj, dict) else {}
+    comps = proj_data.get("部件列表", {}) if isinstance(proj_data, dict) else {}
+    if not isinstance(comps, dict) or not comps:
+        return False
+
+    def _stage_index(stage_name):
+        stage_txt = str(stage_name or "").strip()
+        return STAGES_UNIFIED.index(stage_txt) if stage_txt in STAGES_UNIFIED else -1
+
+    todo_stage_candidates = {}
+    todo_all = db_obj.get("系统配置", {}).get("PM_TODO_LIST", []) if isinstance(db_obj.get("系统配置", {}), dict) else []
+    for td in todo_all:
+        if not isinstance(td, dict) or bool(td.get("完成")):
+            continue
+        if not todo_matches_project(td, proj):
+            continue
+        prefill = infer_todo_handoff_prefill(td, proj)
+        stage_name = str(prefill.get("阶段", "")).strip()
+        stage_idx = _stage_index(stage_name)
+        if stage_idx < 0 or is_pause_stage(stage_name) or stage_name == "✅ 已完成(结束)":
+            continue
+        comp_hits = prefill.get("部件", [])
+        if isinstance(comp_hits, str):
+            comp_hits = [comp_hits]
+        normalized_hits = []
+        for comp_name in comp_hits or []:
+            comp_txt = str(comp_name or "").strip()
+            if not comp_txt:
+                continue
+            if comp_txt == "🌐 全局进度 (Overall)":
+                comp_txt = "全局进度"
+            normalized_hits.append(comp_txt)
+        if not normalized_hits:
+            normalized_hits = ["全局进度"]
+        for comp_name in list(dict.fromkeys(normalized_hits)):
+            best = todo_stage_candidates.get(comp_name)
+            if (best is None) or (stage_idx > best[1]):
+                todo_stage_candidates[comp_name] = (stage_name, stage_idx)
+
+    changed = False
+    for comp_name, comp_info in comps.items():
+        if not isinstance(comp_info, dict):
+            continue
+        current_stage = str(comp_info.get("主流程", "")).strip()
+        current_idx = _stage_index(current_stage)
+        best_stage = current_stage
+        best_idx = current_idx
+
+        for log in comp_info.get("日志流", []):
+            if is_hidden_system_log(log):
+                continue
+            log_stage = str((log or {}).get("工序", "")).strip()
+            log_idx = _stage_index(log_stage)
+            if log_idx < 0 or is_pause_stage(log_stage) or log_stage == "✅ 已完成(结束)":
+                continue
+            if log_idx > best_idx:
+                best_stage = log_stage
+                best_idx = log_idx
+
+        todo_candidate = todo_stage_candidates.get(str(comp_name).strip())
+        if (not todo_candidate) and ("全局" in str(comp_name)):
+            todo_candidate = todo_stage_candidates.get("全局进度")
+        if todo_candidate:
+            todo_stage, todo_idx = todo_candidate
+            if (
+                todo_idx > best_idx
+                and (
+                    current_idx < 0
+                    or current_stage in ["", STAGES_UNIFIED[0], "立项", "预研"]
+                    or best_idx <= _stage_index("立项")
+                )
+            ):
+                best_stage = todo_stage
+                best_idx = todo_idx
+
+        if (
+            best_idx > current_idx
+            and best_stage
+            and current_stage != "✅ 已完成(结束)"
+            and not is_pause_stage(current_stage)
+        ):
+            comp_info["主流程"] = best_stage
+            changed = True
+    return changed
+
+
 def recompute_project_derived_state(proj_name):
     if not proj_name or proj_name == "系统配置":
         return
     if proj_name not in st.session_state.db:
         return
+    sync_component_stages_from_linked_signals(proj_name)
     auto_sync_milestone(proj_name)
     refresh_project_todo_links(proj_name)
 
@@ -6415,14 +6507,73 @@ def is_stage_timeline_driver_log(log_obj):
     return True
 
 
-def infer_current_macro_stages(proj_data):
-    proj_obj = proj_data or {}
+def infer_current_macro_stages(proj_label, proj_data=None):
+    proj_obj = proj_data if isinstance(proj_data, dict) else (proj_label if isinstance(proj_label, dict) else {})
     current = set()
-    proj_label = str(proj_obj.get("项目名称", "")).strip()
+    proj_name = str(proj_label or "").strip()
+    if isinstance(proj_label, dict):
+        proj_name = str(proj_obj.get("项目名称", "")).strip()
+    proj_base_label = str(proj_obj.get("项目名称", "")).strip() or proj_name.split(" 📦[", 1)[0].strip()
+
+    def _stage_index(stage_name):
+        stage_txt = str(stage_name or "").strip()
+        return STAGES_UNIFIED.index(stage_txt) if stage_txt in STAGES_UNIFIED else -1
+
     for comp_name, comp_info in proj_obj.get("部件列表", {}).items():
-        macro = get_macro_phase(comp_info.get("主流程", ""), comp_name=comp_name, proj_label=proj_label, proj_data=proj_obj)
+        macro = get_macro_phase(comp_info.get("主流程", ""), comp_name=comp_name, proj_label=proj_base_label, proj_data=proj_obj)
         if macro and macro not in ["立项", "暂停", "结束"]:
             current.add(macro)
+            continue
+        best_log_stage = ""
+        best_log_idx = -1
+        best_log_event = ""
+        for log in comp_info.get("日志流", []):
+            if is_hidden_system_log(log):
+                continue
+            raw_stage = str((log or {}).get("工序", "")).strip()
+            evt = str((log or {}).get("事件", "")).strip()
+            stage_idx = _stage_index(raw_stage)
+            if stage_idx > best_log_idx and raw_stage and raw_stage != "✅ 已完成(结束)" and not is_pause_stage(raw_stage):
+                best_log_stage = raw_stage
+                best_log_idx = stage_idx
+                best_log_event = evt
+        if best_log_stage:
+            log_macro = get_macro_phase(best_log_stage, best_log_event, comp_name=comp_name, proj_label=proj_base_label, proj_data=proj_obj)
+            if log_macro and log_macro not in ["立项", "暂停", "结束"]:
+                current.add(log_macro)
+
+    if not current and proj_base_label:
+        todo_all = db.get("系统配置", {}).get("PM_TODO_LIST", []) if isinstance(db.get("系统配置", {}), dict) else []
+        best_todo_stage = ""
+        best_todo_idx = -1
+        best_todo_event = ""
+        best_todo_comp = "全局进度"
+        for td in todo_all:
+            if not isinstance(td, dict) or bool(td.get("完成")):
+                continue
+            if not todo_matches_project(td, proj_base_label):
+                continue
+            prefill = infer_todo_handoff_prefill(td, proj_base_label)
+            stage_name = str(prefill.get("阶段", "")).strip()
+            stage_idx = _stage_index(stage_name)
+            if stage_idx < 0 or stage_name == "✅ 已完成(结束)" or is_pause_stage(stage_name):
+                continue
+            if stage_idx > best_todo_idx:
+                best_todo_idx = stage_idx
+                best_todo_stage = stage_name
+                best_todo_event = str(td.get("任务", "")).strip()
+                prefill_comps = prefill.get("部件", [])
+                if isinstance(prefill_comps, list) and prefill_comps:
+                    best_todo_comp = str(prefill_comps[0]).strip() or "全局进度"
+                elif isinstance(prefill_comps, str) and str(prefill_comps).strip():
+                    best_todo_comp = str(prefill_comps).strip()
+                if best_todo_comp == "🌐 全局进度 (Overall)":
+                    best_todo_comp = "全局进度"
+        if best_todo_stage:
+            todo_macro = get_macro_phase(best_todo_stage, best_todo_event, comp_name=best_todo_comp, proj_label=proj_base_label, proj_data=proj_obj)
+            if todo_macro and todo_macro not in ["立项", "暂停", "结束"]:
+                current.add(todo_macro)
+
     milestone = str(proj_obj.get("Milestone", "")).strip()
     if milestone == "暂停研发":
         current.add("暂停")
@@ -6504,6 +6655,8 @@ def build_project_stage_segments(proj_label, proj_data):
     latest_date = all_records[-1]["date"]
     unique_dates = sorted({x["date"] for x in all_records})
     second_date = next((d for d in unique_dates if d > first_date), None)
+    if isinstance(proj_data, dict) and (not str(proj_data.get("项目名称", "")).strip()):
+        proj_data["项目名称"] = proj_base_label
     current_macros = infer_current_macro_stages(proj_data)
     milestone = str((proj_data or {}).get("Milestone", "")).strip()
 

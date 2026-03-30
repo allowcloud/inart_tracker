@@ -1716,6 +1716,119 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
 
         self.assertEqual(rows[0]["components"], ["🌐 全局进度 (Overall)"])
 
+    def test_infer_current_macro_stages_falls_back_to_detail_logs_before_pre_research(self) -> None:
+        ns = load_app_functions("infer_current_macro_stages")
+        globals_map = ns.infer_current_macro_stages.__globals__
+        globals_map["STAGES_UNIFIED"] = [
+            "预研",
+            "立项",
+            "建模(含打印/签样)",
+            "工程拆件",
+            "官图",
+            "工厂复样(含胶件/上色等)",
+            "大货",
+        ]
+        globals_map["get_macro_phase"] = lambda detail_stage, event_text="", comp_name="", proj_label="", proj_data=None: (
+            "建模" if "建模" in str(detail_stage or "") else
+            "工程" if "工程" in str(detail_stage or "") else
+            "立项" if "立项" in str(detail_stage or "") else
+            ""
+        )
+        globals_map["is_hidden_system_log"] = lambda log_obj: False
+        globals_map["is_pause_stage"] = lambda stage_name: "暂停" in str(stage_name or "")
+        globals_map["db"] = {"系统配置": {"PM_TODO_LIST": []}}
+        globals_map["todo_matches_project"] = lambda td, proj_name: False
+        globals_map["infer_todo_handoff_prefill"] = lambda td, proj_name: {}
+
+        macros = ns.infer_current_macro_stages(
+            {
+                "项目名称": "1/6伏地魔",
+                "Milestone": "待开定",
+                "部件列表": {
+                    "全局进度": {
+                        "主流程": "立项",
+                        "日志流": [
+                            {"日期": "2026-03-20", "工序": "建模(含打印/签样)", "事件": "蛇拆件已安排返厂"},
+                        ],
+                    }
+                },
+            }
+        )
+
+        self.assertEqual(macros, {"建模"})
+
+    def test_sync_component_stages_from_linked_signals_promotes_placeholder_stage_from_logs_and_todo(self) -> None:
+        ns = load_app_functions("sync_component_stages_from_linked_signals")
+
+        class FakeSessionState(dict):
+            def __getattr__(self, name):
+                return self[name]
+
+            def __setattr__(self, name, value):
+                self[name] = value
+
+        project_name = "1/6超女"
+        fake_state = FakeSessionState(
+            db={
+                "系统配置": {
+                    "PM_TODO_LIST": [
+                        {
+                            "_id": "td1",
+                            "任务": "配件待工程确认",
+                            "完成": False,
+                            "关联项目": project_name,
+                            "关联项目列表": [project_name],
+                        }
+                    ]
+                },
+                project_name: {
+                    "部件列表": {
+                        "素体": {
+                            "主流程": "立项",
+                            "日志流": [
+                                {"日期": "2026-03-20", "工序": "建模(含打印/签样)", "事件": "素体修改已安排打印"},
+                            ],
+                        },
+                        "配件": {
+                            "主流程": "立项",
+                            "日志流": [],
+                        },
+                        "全局进度": {
+                            "主流程": "立项",
+                            "日志流": [],
+                        },
+                    }
+                },
+            }
+        )
+
+        globals_map = ns.sync_component_stages_from_linked_signals.__globals__
+        globals_map["st"] = types.SimpleNamespace(session_state=fake_state)
+        globals_map["db"] = fake_state.db
+        globals_map["STAGES_UNIFIED"] = [
+            "预研",
+            "立项",
+            "建模(含打印/签样)",
+            "工程拆件",
+            "官图",
+            "工厂复样(含胶件/上色等)",
+            "大货",
+        ]
+        globals_map["is_hidden_system_log"] = lambda log_obj: False
+        globals_map["is_pause_stage"] = lambda stage_name: "暂停" in str(stage_name or "")
+        globals_map["todo_matches_project"] = lambda td, proj_name: proj_name in list(td.get("关联项目列表", []))
+        globals_map["infer_todo_handoff_prefill"] = lambda td, proj_name: {
+            "部件": ["配件"],
+            "阶段": "工程拆件",
+        }
+
+        changed = ns.sync_component_stages_from_linked_signals(project_name)
+
+        self.assertTrue(changed)
+        comps = fake_state.db[project_name]["部件列表"]
+        self.assertEqual(comps["素体"]["主流程"], "建模(含打印/签样)")
+        self.assertEqual(comps["配件"]["主流程"], "工程拆件")
+
     def test_build_todo_quick_add_entry_prepares_new_todo_for_unified_save(self) -> None:
         ns = load_app_functions("build_todo_quick_add_entry")
         appended = []
