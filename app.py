@@ -2149,6 +2149,10 @@ def persist_project_admin_changes(project_names=None, recompute_projects=True):
 
 def clear_todo_quick_add_form_state(state_obj, preserve_scope=True):
     state = state_obj if hasattr(state_obj, "get") else {}
+    if not isinstance(state_obj, dict):
+        state["_todo_quick_add_clear_request"] = {"preserve_scope": bool(preserve_scope)}
+        return
+
     state["todo_title_global"] = ""
     state["todo_cpddl_global"] = ""
     state["todo_ref_global_multi"] = []
@@ -2170,6 +2174,41 @@ def clear_todo_quick_add_form_state(state_obj, preserve_scope=True):
             state.pop("todo_scope_global", None)
         except Exception:
             pass
+    return True
+
+
+def apply_todo_quick_add_form_state_clear_request(state_obj):
+    state = state_obj if hasattr(state_obj, "get") else {}
+    clear_req = state.get("_todo_quick_add_clear_request")
+    if not isinstance(clear_req, dict):
+        return False
+    preserve_scope = bool(clear_req.get("preserve_scope", True))
+    state["todo_title_global"] = ""
+    state["todo_cpddl_global"] = ""
+    state["todo_ref_global_multi"] = []
+    state["todo_people_global"] = []
+    state["todo_new_proj_name"] = ""
+    state["todo_new_person_role"] = ""
+    state["todo_new_person_name"] = ""
+    state["todo_global_autofill_preview"] = {}
+    state["todo_global_autofill_sig"] = ""
+
+    for key in ["todo_new_proj_owner", "todo_new_proj_ratio", "todo_new_proj_ip_owner"]:
+        try:
+            state.pop(key, None)
+        except Exception:
+            pass
+
+    if not preserve_scope:
+        try:
+            state.pop("todo_scope_global", None)
+        except Exception:
+            pass
+    try:
+        state.pop("_todo_quick_add_clear_request", None)
+    except Exception:
+        pass
+    return True
 
 
 def build_todo_quick_add_entry(
@@ -2184,6 +2223,7 @@ def build_todo_quick_add_entry(
     new_proj_ratio="1/6",
     new_proj_ip_owner="",
     today=None,
+    apply_side_effects=True,
 ):
     task_text = str(title_text or "").strip()
     cpddl_raw = str(cpddl_text or "").strip()
@@ -2225,17 +2265,19 @@ def build_todo_quick_add_entry(
 
     created_projects = []
     save_projects = set()
-    for linked_proj in proj_list:
-        if create_project_shell_if_missing(
-            linked_proj,
-            new_proj_owner,
-            ratio_preset=new_proj_ratio,
-            ip_owner=new_proj_ip_owner,
-        ):
-            created_projects.append(linked_proj)
-            save_projects.add(linked_proj)
+    added_people = []
+    if apply_side_effects:
+        for linked_proj in proj_list:
+            if create_project_shell_if_missing(
+                linked_proj,
+                new_proj_owner,
+                ratio_preset=new_proj_ratio,
+                ip_owner=new_proj_ip_owner,
+            ):
+                created_projects.append(linked_proj)
+                save_projects.add(linked_proj)
 
-    added_people = register_extra_role_people(split_people_text(final_people))
+        added_people = register_extra_role_people(split_people_text(final_people))
     new_td = {
         "_id": uuid.uuid4().hex[:10],
         "任务": cleaned_task_title,
@@ -2252,6 +2294,8 @@ def build_todo_quick_add_entry(
         "创建": str(ref_day),
         "历史版本": [],
     }
+    if not apply_side_effects:
+        new_td["_待保存新增"] = True
 
     if str(temporal.get("route", "")).strip() == "past":
         done_day = resolve_todo_completion_event_day(
@@ -2262,35 +2306,36 @@ def build_todo_quick_add_entry(
         )
         new_td["完成"] = True
         new_td["完成时间"] = str(done_day)
-        if append_todo_completion_history(new_td, done_day):
+        if apply_side_effects and append_todo_completion_history(new_td, done_day):
             save_projects.update([p for p in todo_project_list(new_td) if p and p in db and p != "系统配置"])
 
-    todo_action = "待办完成" if bool(new_td.get("完成")) else "待办新建"
-    event_day = parse_date_safe(str(new_td.get("完成时间", "")).strip()) if bool(new_td.get("完成")) else ref_day
-    for proj_name in [p for p in todo_project_list(new_td) if p and p in db and p != "系统配置"]:
-        prefill = infer_todo_handoff_prefill(new_td, proj_name)
-        event_comp = ""
-        if prefill.get("部件"):
-            event_comp = _normalize_standard_event_component(prefill["部件"][0])
-        append_standard_event_entry(
-            source_module="To-do",
-            action_type=todo_action,
-            project_name=proj_name,
-            event_date=event_day,
-            component_name=event_comp,
-            stage_name=str(prefill.get("阶段", "")).strip(),
-            content_text=str(new_td.get("任务", "")).strip(),
-            raw_text=todo_cpddl_text(new_td),
-            people_text=final_people,
-            todo_ids=[str(new_td.get("_id", "")).strip()],
-            intent="past" if bool(new_td.get("完成")) else "todo",
-            actor=current_pm if current_pm != "所有人" else "系统",
-            extra_payload={
-                "所属视角": str(new_td.get("所属视角", "")).strip(),
-                "完成": bool(new_td.get("完成")),
-                "关联项目列表": todo_project_list(new_td),
-            },
-        )
+    if apply_side_effects:
+        todo_action = "待办完成" if bool(new_td.get("完成")) else "待办新建"
+        event_day = parse_date_safe(str(new_td.get("完成时间", "")).strip()) if bool(new_td.get("完成")) else ref_day
+        for proj_name in [p for p in todo_project_list(new_td) if p and p in db and p != "系统配置"]:
+            prefill = infer_todo_handoff_prefill(new_td, proj_name)
+            event_comp = ""
+            if prefill.get("部件"):
+                event_comp = _normalize_standard_event_component(prefill["部件"][0])
+            append_standard_event_entry(
+                source_module="To-do",
+                action_type=todo_action,
+                project_name=proj_name,
+                event_date=event_day,
+                component_name=event_comp,
+                stage_name=str(prefill.get("阶段", "")).strip(),
+                content_text=str(new_td.get("任务", "")).strip(),
+                raw_text=todo_cpddl_text(new_td),
+                people_text=final_people,
+                todo_ids=[str(new_td.get("_id", "")).strip()],
+                intent="past" if bool(new_td.get("完成")) else "todo",
+                actor=current_pm if current_pm != "所有人" else "系统",
+                extra_payload={
+                    "所属视角": str(new_td.get("所属视角", "")).strip(),
+                    "完成": bool(new_td.get("完成")),
+                    "关联项目列表": todo_project_list(new_td),
+                },
+            )
 
     return {
         "todo": new_td,
@@ -6997,6 +7042,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
     st.caption("这里专注提醒、DDL 和人员协作；过去日期会自动按已完成入历史，未来日期保留为待办。")
     cfg = db.setdefault("系统配置", {})
     todo_all = cfg.setdefault("PM_TODO_LIST", [])
+    apply_todo_quick_add_form_state_clear_request(st.session_state)
 
     todo_new_proj_option = "➕ 新增项目..."
     todo_new_person_option = "➕ 新增关联人员..."
@@ -7127,6 +7173,12 @@ def render_pm_todo_manager(valid_projs, current_pm):
 
     with st.container():
         st.markdown("##### 快速新增（直接加到下方表格）")
+        queued_draft_count = len([
+            td for td in todo_all
+            if isinstance(td, dict) and bool(td.get("_待保存新增"))
+        ])
+        if queued_draft_count:
+            st.caption(f"当前有 {queued_draft_count} 条待新增草稿，已进入下方表格，等你最后统一保存。")
 
         todo_title_state = str(st.session_state.get("todo_title_global", "")).strip()
         todo_cpddl_state = str(st.session_state.get("todo_cpddl_global", "")).strip()
@@ -7301,7 +7353,43 @@ def render_pm_todo_manager(valid_projs, current_pm):
             people_bundle = infer_todo_people_bundle(tmp_td)
         if people_input and (people_bundle["ambiguous"] or people_bundle["unknown"]):
             st.warning("人员没有唯一识别，建议在待办里直接补充【关联人员】；图片和细节再放到下方进度明细。")
-        st.caption("上方快速新增会和下方完成/修改/删除一起，在底部同一个保存键里提交。")
+        q1, q2 = st.columns([1.2, 4.0])
+        with q1:
+            queue_clicked = st.button("➕ 加入待保存列表", key="todo_queue_global", type="secondary")
+        with q2:
+            st.caption("上方快速新增不会直接落库；你可以连续加入多条，最后在底部一个保存键里统一提交。")
+        if queue_clicked:
+            if (todo_new_proj_option in todo_ref_projs) and (not str(new_proj_name).strip()):
+                st.warning("你选择了【新增项目】，请先填写项目名称。")
+            elif not str(todo_title).strip():
+                st.warning("请先填写任务内容。")
+            else:
+                add_result = build_todo_quick_add_entry(
+                    todo_title,
+                    todo_cpddl,
+                    resolved_ref_proj_list,
+                    people_input,
+                    todo_scope,
+                    current_pm,
+                    valid_projs,
+                    new_proj_owner=new_proj_owner,
+                    new_proj_ratio=new_proj_ratio,
+                    new_proj_ip_owner=new_proj_ip_owner,
+                    today=today,
+                    apply_side_effects=False,
+                )
+                if add_result.get("error"):
+                    st.warning(str(add_result.get("error", "")).strip() or "这条待办暂时没能加入列表。")
+                else:
+                    todo_all.append(add_result["todo"])
+                    cfg["PM_TODO_LIST"] = todo_all
+                    clear_todo_quick_add_form_state(st.session_state, preserve_scope=True)
+                    st.session_state["todo_queue_notice"] = "已加入待保存列表，可继续录下一条。"
+                    st.rerun()
+
+    if st.session_state.get("todo_queue_notice"):
+        st.toast(str(st.session_state.get("todo_queue_notice", "")).strip() or "已加入待保存列表。")
+        st.session_state.pop("todo_queue_notice", None)
 
     st.markdown("##### 待办表格")
     if not todo_list:
@@ -7445,39 +7533,9 @@ def render_pm_todo_manager(valid_projs, current_pm):
         created_projects = set()
         removed_todo_events = 0
         quick_add_warning = ""
-        quick_add_created_projects = []
-        quick_add_added_people = []
         quick_add_added = 0
-
         if quick_add_used:
-            if (todo_new_proj_option in todo_ref_projs) and (not str(new_proj_name).strip()):
-                quick_add_warning = "快速新增里选择了【新增项目】但未填写项目名称；本次未新增，只保存了表格修改。"
-            elif not str(todo_title).strip():
-                quick_add_warning = "快速新增区有内容但任务为空；本次未新增，只保存了表格修改。"
-            else:
-                add_result = build_todo_quick_add_entry(
-                    todo_title,
-                    todo_cpddl,
-                    resolved_ref_proj_list,
-                    people_input,
-                    todo_scope,
-                    current_pm,
-                    valid_projs,
-                    new_proj_owner=new_proj_owner,
-                    new_proj_ratio=new_proj_ratio,
-                    new_proj_ip_owner=new_proj_ip_owner,
-                    today=today,
-                )
-                if add_result.get("error"):
-                    quick_add_warning = str(add_result.get("error", "")).strip() or "快速新增未能提交，本次只保存了表格修改。"
-                else:
-                    todo_all.append(add_result["todo"])
-                    quick_add_added = 1
-                    quick_add_created_projects = list(add_result.get("created_projects", []) or [])
-                    quick_add_added_people = list(add_result.get("added_people", []) or [])
-                    created_projects.update(quick_add_created_projects)
-                    project_history_updates.update(add_result.get("save_projects", []) or [])
-                    clear_todo_quick_add_form_state(st.session_state, preserve_scope=True)
+            quick_add_warning = "快速新增区还有未加入表格的内容；先点【➕ 加入待保存列表】，再统一保存。"
 
         for row in edited_df.to_dict("records"):
             rid = str(row.get("_id", "")).strip()
@@ -7525,6 +7583,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
                     if create_project_shell_if_missing(p_name, current_pm if current_pm != "所有人" else "Mo"):
                         created_projects.add(p_name)
 
+            is_pending_create = bool(td.get("_待保存新增"))
             old_task = str(td.get("任务", "")).strip()
             old_cpddl = todo_cpddl_text(td)
             old_people = normalize_people_text(td.get("关联人员", ""))
@@ -7536,7 +7595,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
                 old_people != people_raw or
                 old_proj != " / ".join(proj_list)
             )
-            if changed_core:
+            if changed_core and (not is_pending_create):
                 todo_append_history_version(td, actor=current_pm if current_pm != "所有人" else "系统")
 
             prev_done = bool(td.get("完成", False))
@@ -7565,7 +7624,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
             if (not str(td.get("创建者视角", "")).strip()) and scope_val not in ["", "未分配", "所有人"]:
                 td["创建者视角"] = scope_val
 
-            if new_done and not prev_done:
+            if new_done and (is_pending_create or not prev_done):
                 done_date = resolve_todo_completion_event_day(
                     title,
                     cpddl,
@@ -7579,10 +7638,19 @@ def render_pm_todo_manager(valid_projs, current_pm):
             elif not new_done:
                 td["完成时间"] = ""
 
-            if changed_core or (new_done != prev_done):
+            if is_pending_create or changed_core or (new_done != prev_done):
                 todo_action = "待办更新"
                 event_day = datetime.date.today()
-                if new_done and not prev_done:
+                if is_pending_create:
+                    todo_action = "待办完成" if new_done else "待办新建"
+                    if new_done:
+                        event_day = resolve_todo_completion_event_day(
+                            title,
+                            cpddl,
+                            temporal_info=temporal,
+                            ref_date=datetime.date.today(),
+                        )
+                elif new_done and not prev_done:
                     todo_action = "待办完成"
                     event_day = resolve_todo_completion_event_day(
                         title,
@@ -7617,6 +7685,9 @@ def render_pm_todo_manager(valid_projs, current_pm):
                             "关联项目列表": todo_project_list(td),
                         },
                     )
+                if is_pending_create:
+                    quick_add_added += 1
+                    td.pop("_待保存新增", None)
 
         todo_all[:] = [x for x in todo_all if str(x.get("_id", "")).strip() not in delete_ids and str(x.get("任务", "")).strip()]
         cfg["PM_TODO_LIST"] = todo_all
@@ -7629,14 +7700,10 @@ def render_pm_todo_manager(valid_projs, current_pm):
         if quick_add_warning:
             st.warning(quick_add_warning)
         success_msg = f"待办已保存：新增 {quick_add_added} 条，保留 {len(todo_all)} 条，删除 {len(delete_ids)} 条，跳过 {skipped} 条空任务。"
-        if quick_add_created_projects:
-            success_msg += " 已新建项目：" + " / ".join(quick_add_created_projects[:3]) + (" ..." if len(quick_add_created_projects) > 3 else "") + "。"
-        if quick_add_added_people:
-            success_msg += " 已补充人员库：" + " / ".join(quick_add_added_people[:3]) + (" ..." if len(quick_add_added_people) > 3 else "") + "。"
         if removed_todo_events:
             success_msg += f" 已同步清理 {removed_todo_events} 条旧待办提醒事件。"
         if quick_add_added:
-            st.toast("✅ 待办已添加，输入已清空")
+            st.toast("✅ 待新增草稿已统一保存")
         st.success(success_msg)
         st.rerun()
 
