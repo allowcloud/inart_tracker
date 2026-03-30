@@ -230,6 +230,43 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         self.assertTrue(engineer_segments)
         self.assertEqual(max(seg["Finish"] for seg in engineer_segments), str(datetime.date.today() + datetime.timedelta(days=1)))
 
+    def test_build_project_stage_segments_does_not_extend_pre_research_as_live_stage(self) -> None:
+        ns = load_app_functions("build_project_stage_segments")
+        globals_map = ns.build_project_stage_segments.__globals__
+        globals_map["is_hidden_system_log"] = lambda log_obj: False
+        globals_map["is_stage_timeline_driver_log"] = lambda log_obj: True
+        globals_map["_parse_log_date"] = lambda log_obj: datetime.datetime.strptime(
+            str((log_obj or {}).get("日期", "")), "%Y-%m-%d"
+        ).date()
+        globals_map["get_macro_phase"] = (
+            lambda detail_stage, event_text="", comp_name="", proj_label="", proj_data=None:
+            "预研" if "预研" in str(detail_stage or "") else "建模"
+        )
+        globals_map["normalize_review_type"] = lambda value: "(无)"
+        globals_map["infer_current_macro_stages"] = lambda proj_data: {"预研"}
+        globals_map["get_project_status_bucket"] = lambda milestone: "dev"
+        globals_map["get_pause_signal_keywords"] = lambda: ["暂停"]
+
+        proj_data = {
+            "项目名称": "1/6马尔福",
+            "Milestone": "待开定",
+            "部件列表": {
+                "全局进度": {
+                    "主流程": "立项",
+                    "日志流": [
+                        {"日期": "2026-03-20", "工序": "预研", "事件": "老师反馈方向待确认"},
+                    ],
+                }
+            },
+        }
+
+        segments = ns.build_project_stage_segments("1/6马尔福", proj_data)
+        pre_segments = [seg for seg in segments if str(seg.get("工序阶段", "")).strip() == "预研"]
+
+        self.assertTrue(pre_segments)
+        self.assertEqual(max(seg["Finish"] for seg in pre_segments), "2026-03-21")
+        self.assertFalse(any("当前主阶段仍在预研" in str(seg.get("详情", "")) for seg in pre_segments))
+
     def test_expand_workbench_segment_entries_preserves_split_stage_hints(self) -> None:
         ns = load_app_functions(
             "norm_text",
@@ -1756,6 +1793,48 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         )
 
         self.assertEqual(macros, {"建模"})
+
+    def test_infer_current_macro_stages_drops_pre_research_when_other_live_stage_exists(self) -> None:
+        ns = load_app_functions("infer_current_macro_stages")
+        globals_map = ns.infer_current_macro_stages.__globals__
+        globals_map["STAGES_UNIFIED"] = [
+            "预研",
+            "立项",
+            "建模(含打印/签样)",
+            "工程拆件",
+            "官图",
+            "工厂复样(含胶件/上色等)",
+            "大货",
+        ]
+        globals_map["get_macro_phase"] = lambda detail_stage, event_text="", comp_name="", proj_label="", proj_data=None: (
+            "预研" if "预研" in str(detail_stage or "") else
+            "生产" if "大货" in str(detail_stage or "") else
+            ""
+        )
+        globals_map["is_hidden_system_log"] = lambda log_obj: False
+        globals_map["is_pause_stage"] = lambda stage_name: "暂停" in str(stage_name or "")
+        globals_map["db"] = {"系统配置": {"PM_TODO_LIST": []}}
+        globals_map["todo_matches_project"] = lambda td, proj_name: False
+        globals_map["infer_todo_handoff_prefill"] = lambda td, proj_name: {}
+
+        macros = ns.infer_current_macro_stages(
+            {
+                "项目名称": "1/6 2025超人",
+                "Milestone": "生产中",
+                "部件列表": {
+                    "全局进度": {
+                        "主流程": "预研",
+                        "日志流": [],
+                    },
+                    "包装": {
+                        "主流程": "大货",
+                        "日志流": [],
+                    },
+                },
+            }
+        )
+
+        self.assertEqual(macros, {"生产"})
 
     def test_sync_component_stages_from_linked_signals_promotes_placeholder_stage_from_logs_and_todo(self) -> None:
         ns = load_app_functions("sync_component_stages_from_linked_signals")
