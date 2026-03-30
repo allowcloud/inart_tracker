@@ -2071,6 +2071,17 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         self.assertTrue(fake_state["hist_std_evt_load_1/6马尔福"])
         self.assertEqual(switch_calls, [("🛠️ 数据维护", "1/6马尔福")])
 
+    def test_project_space_section_expanded_matches_focus_mode(self) -> None:
+        ns = load_app_functions("project_space_section_expanded")
+
+        self.assertTrue(ns.project_space_section_expanded("⚡ 日常推进", "项目状态总览"))
+        self.assertTrue(ns.project_space_section_expanded("⚡ 日常推进", "项目更新"))
+        self.assertTrue(ns.project_space_section_expanded("🧩 专项模块", "专项模块"))
+        self.assertTrue(ns.project_space_section_expanded("🧠 排查与治理", "系统当前解释"))
+        self.assertFalse(ns.project_space_section_expanded("⚡ 日常推进", "系统当前解释"))
+        self.assertFalse(ns.project_space_section_expanded("🧩 专项模块", "项目更新"))
+        self.assertFalse(ns.project_space_section_expanded("", "未知区块"))
+
     def test_sync_save_db_system_config_skips_global_recompute(self) -> None:
         ns = load_app_functions("sync_save_db")
 
