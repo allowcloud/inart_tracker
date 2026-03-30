@@ -2040,6 +2040,37 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         self.assertEqual(fake_state["pm_sel_proj"], "1/6马尔福")
         self.assertEqual(rerun_calls, [True])
 
+    def test_open_project_maintenance_prefills_history_context(self) -> None:
+        ns = load_app_functions("open_project_maintenance")
+
+        class FakeSessionState(dict):
+            def __getattr__(self, name):
+                return self[name]
+
+            def __setattr__(self, name, value):
+                self[name] = value
+
+        fake_state = FakeSessionState()
+        switch_calls = []
+        globals_map = ns.open_project_maintenance.__globals__
+        globals_map["st"] = types.SimpleNamespace(session_state=fake_state)
+        globals_map["norm_text"] = lambda text: str(text).strip()
+        globals_map["MENU_MAINTENANCE"] = "🛠️ 数据维护"
+        globals_map["switch_main_menu"] = lambda menu, project_name="": switch_calls.append((menu, project_name))
+
+        ns.open_project_maintenance(
+            "1/6马尔福",
+            component_name="头雕(表情)",
+            load_todo_history=True,
+            load_standard_events=True,
+        )
+
+        self.assertEqual(fake_state["history_sel_proj"], "1/6马尔福")
+        self.assertEqual(fake_state["history_sel_comp"], "头雕(表情)")
+        self.assertTrue(fake_state["hist_todo_load_1/6马尔福"])
+        self.assertTrue(fake_state["hist_std_evt_load_1/6马尔福"])
+        self.assertEqual(switch_calls, [("🛠️ 数据维护", "1/6马尔福")])
+
     def test_sync_save_db_system_config_skips_global_recompute(self) -> None:
         ns = load_app_functions("sync_save_db")
 

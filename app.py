@@ -7803,6 +7803,19 @@ def switch_main_menu(target_menu, project_name=""):
     st.rerun()
 
 
+def open_project_maintenance(project_name, component_name="🌐 全部展示", load_todo_history=False, load_standard_events=False):
+    proj = str(project_name or "").strip()
+    comp = str(component_name or "").strip() or "🌐 全部展示"
+    if proj:
+        st.session_state["history_sel_proj"] = proj
+        if load_todo_history:
+            st.session_state[f"hist_todo_load_{norm_text(proj)}"] = True
+        if load_standard_events:
+            st.session_state[f"hist_std_evt_load_{norm_text(proj)}"] = True
+    st.session_state["history_sel_comp"] = comp
+    switch_main_menu(MENU_MAINTENANCE, project_name=proj)
+
+
 def build_home_project_warning_rows(project_names, pm_view):
     rows = []
     today = datetime.date.today()
@@ -8669,7 +8682,7 @@ def render_pm_fastlog_integrated(sel_proj, show_header=True):
     if show_header:
         st.markdown("#### 🕰️ 补历史 / 速记补录（可指定日期）")
         st.caption("想补过去某一天的信息，就在这里先选日期再写。过去日期进历史，未来日期进待办。")
-        st.caption("【历史溯源】更适合回看和修改已有记录；这里才是新增入口。")
+        st.caption("【数据维护】更适合回看和修改已有记录；这里才是新增入口。")
     else:
         st.caption("想补过去某一天的信息，就在这里先选日期再写。过去日期进历史，未来日期进待办。")
 
@@ -10573,7 +10586,7 @@ def render_dashboard_plan_board(valid_projects):
     st.markdown(f"**本周预警：🟡 临期 {soon_count} 个阶段 ｜ 🔴 Delay {delay_count} 个阶段**")
 
     if not rows:
-        st.caption("当前视角下暂无计划排期数据。可在 PM 工作台 > 项目基础信息里先维护计划排期。")
+        st.caption("当前视角下暂无计划排期数据。可先在【项目空间】里维护项目基础信息和计划排期。")
         return
 
     plan_mode = st.radio("时间轴模式", ["📅 自然周模式", "📅 月份周模式"], horizontal=True, key="plan_board_mode")
@@ -10940,7 +10953,7 @@ if menu == MENU_HOME:
 elif menu == MENU_DASHBOARD:
     st.title(f"📊 全局看板 ({current_pm} 的视角)")
 
-    st.caption("CSV 导入入口已迁移至【系统维护】。")
+    st.caption("CSV 导入入口已迁移至【系统设置】。")
     gantt_cat_orders = MACRO_STAGES.copy()
     combined_color_map = {
         "预研": "#CBD5E1", "立项": "#F2C14E", "建模": "#34C6D3", "打印": "#0EA5A4", "涂装": "#F59E0B", "设计": "#8B5CF6",
@@ -12330,11 +12343,11 @@ elif menu == MENU_PROJECTS:
                 switch_main_menu(MENU_TASKS)
     st.divider()
     with st.expander("🎯 特定项目操作", expanded=True):
-        st.caption("这里专注某一个项目。日常推进先看【项目状态总览】，再到【项目更新】里补历史或推进当下。")
+        st.caption("这里专注某一个项目。先选当前项目，再决定现在是在做日常推进、专项维护，还是排查治理。")
 
         c_proj_top1, c_proj_top2 = st.columns([4.2, 1.2])
         with c_proj_top1:
-            st.caption("只有当你想排查系统为什么这样理解时，再看【系统当前解释】或去【历史溯源】。")
+            st.caption("只有当你想排查系统为什么这样理解时，再看【系统当前解释】或去【数据维护】。")
         with c_proj_top2:
             if st.button("➕ 手动建档新项目"):
                 st.session_state.new_proj_mode = not st.session_state.get('new_proj_mode', False)
@@ -12376,7 +12389,7 @@ elif menu == MENU_PROJECTS:
                             st.error("项目名称不能为空。")
 
         if not valid_projs:
-            st.warning("当前视角下暂无项目；可以先在上方手动建档，或先在 To do 中心维护提醒。")
+            st.warning("当前视角下暂无项目；可以先在上方手动建档，或先去【我的待办】整理提醒。")
             st.stop()
 
         if ('current_proj_context' not in st.session_state) or (st.session_state.current_proj_context not in valid_projs):
@@ -12418,7 +12431,20 @@ elif menu == MENU_PROJECTS:
                 st.info(project_memo)
             else:
                 st.caption("项目备忘录：暂无。可在下方专项模块继续维护。")
-            st.caption("下方的项目状态总览、项目更新、系统当前解释和专项模块，都只作用于这个当前选定项目。")
+            st.caption("下方的所有内容，都只作用于这个当前选定项目。")
+
+        project_space_mode = st.radio(
+            "当前工作区",
+            ["⚡ 日常推进", "🧩 专项模块", "🧠 排查与治理"],
+            horizontal=True,
+            key=f"project_space_mode_{norm_text(sel_proj)}",
+        )
+        if project_space_mode == "⚡ 日常推进":
+            st.caption("当前只展示最常用的推进路径：项目状态总览 + 项目更新。")
+        elif project_space_mode == "🧩 专项模块":
+            st.caption("当前只展示低频但必要的专项维护模块，避免和日常推进混在一起。")
+        else:
+            st.caption("当前只展示识别排查和历史治理入口；日常推进信息已先收起。")
 
         with st.container(border=True):
             st.markdown("**项目状态总览**")
@@ -12598,7 +12624,23 @@ elif menu == MENU_PROJECTS:
                     },
                 )
 
-        with st.expander("🧠 系统当前解释（识别排查用）", expanded=False):
+        if project_space_mode == "🧠 排查与治理":
+            with st.container(border=True):
+                st.markdown("**🛠️ 排查与治理快捷入口**")
+                st.caption("识别不对、想查历史、想看统一事件时，从这里直接跳去【数据维护】对应项目。")
+                qa1, qa2, qa3 = st.columns(3)
+                with qa1:
+                    if st.button("🕰️ 去数据维护看项目历史", key=f"proj_jump_hist_{norm_text(sel_proj)}", use_container_width=True):
+                        open_project_maintenance(sel_proj)
+                with qa2:
+                    if st.button("🔗 去数据维护看统一事件", key=f"proj_jump_evt_{norm_text(sel_proj)}", use_container_width=True):
+                        open_project_maintenance(sel_proj, load_standard_events=True)
+                with qa3:
+                    if st.button("✅ 去数据维护看待办历史", key=f"proj_jump_todo_hist_{norm_text(sel_proj)}", use_container_width=True):
+                        open_project_maintenance(sel_proj, load_todo_history=True)
+
+        with st.container(border=True):
+            st.markdown("**🧠 系统当前解释（识别排查用）**")
             st.caption("如果你只是日常推进，这块可以先不看；只有当你想知道系统当前是按哪条记录在解释时，再展开排查。")
             explain_bits = [
                 f"来源：{str(proj_explain.get('来源', '')).strip() or '-'}",
@@ -12685,9 +12727,10 @@ elif menu == MENU_PROJECTS:
                         else:
                             st.info("没有检测到需要保存的修正。")
             else:
-                st.caption("当前解释若来自原始项目日志，可去【历史溯源】改原日志；标准事件类解释可直接在这里修正。")
+                st.caption("当前解释若来自原始项目日志，可去【数据维护】改原日志；标准事件类解释可直接在这里修正。")
 
-        with st.expander("⚡ 项目更新", expanded=True):
+        with st.container(border=True):
+            st.markdown("**⚡ 项目更新**")
             st.markdown(
                 """
                 <div class='pm-subsection-card'>
@@ -12702,7 +12745,7 @@ elif menu == MENU_PROJECTS:
 
             with quick_tab:
                 st.caption("适合改项目基础信息、补历史、补一条速记，属于当前项目的轻量更新。")
-                st.info("想补过去某一天的信息，直接在下面【补历史 / 速记补录】里选日期即可；不用去【历史溯源】新增。")
+                st.info("想补过去某一天的信息，直接在下面【补历史 / 速记补录】里选日期即可；不用去【数据维护】新增。")
                 with st.expander("🕰️ 补历史 / 速记补录（可指定日期）", expanded=True):
                     render_pm_fastlog_integrated(sel_proj, show_header=False)
                 cur_pm     = db[sel_proj].get('负责人', 'Mo')
@@ -13455,7 +13498,8 @@ elif menu == MENU_PROJECTS:
                             ))
                             st.rerun()
 
-        with st.expander("🧩 专项模块", expanded=False):
+        with st.container(border=True):
+            st.markdown("**🧩 专项模块**")
             st.caption("专项模块默认折叠，按需要展开。常规项目先用【项目状态总览】和【项目更新】就够了。")
             with st.expander("🗒️ 项目备忘录", expanded=False):
                 memo_txt_pm = st.text_area("记录跨部门叮嘱等杂项", value=db[sel_proj].get("备忘录", ""), height=90, key=f"pm_memo_{sel_proj}")
@@ -13768,7 +13812,7 @@ elif menu == MENU_FASTLOG:
                                  "提审类型": normalize_review_type(rv_type), "提审结果": rv_res})
 
         st.markdown("**🖼️ 附件图片**")
-        st.caption("附件会跟随每条入库记录自动关联到其对应项目/部件，后续可在【历史溯源】按项目追溯。")
+        st.caption("附件会跟随每条入库记录自动关联到其对应项目/部件，后续可在【数据维护】按项目追溯。")
         ai_pasted_img, ai_paste_err = capture_paste_image(
             "ai_batch_main",
             button_key="ai_paste_btn",
@@ -13895,7 +13939,7 @@ elif menu == MENU_PACKING:
         st.session_state.pack_sel_proj = valid_projs[0]
     sel_proj = st.selectbox("📌 追踪项目", valid_projs, key="pack_sel_proj", format_func=lambda x: format_project_option_label(x, project_attention_map))
     render_packing_lightweight_board(sel_proj, ui_prefix=f"pack_page_{norm_text(sel_proj)[:24]}")
-    st.caption("项目备忘录请在 PM 工作台维护；入库/领用台账请在成本台账查看。")
+    st.caption("项目备忘录请在【项目空间】维护；入库/领用台账请在成本台账查看。")
 
 # ==========================================
 elif menu == MENU_COST:
@@ -14125,7 +14169,7 @@ elif menu == MENU_COST:
 elif menu == MENU_MAINTENANCE:
     st.title("🛠️ 数据维护")
     st.caption("这里集中放历史溯源、全局修正和识别排查；项目治理相关能力会逐步继续往这里收口。")
-    st.caption("这里主要用于回看和修改已有记录；如果要新增过去某一天的信息，请回【特定项目操作】里的【补历史 / 速记补录】。")
+    st.caption("这里主要用于回看和修改已有记录；如果要新增过去某一天的信息，请回【项目空间】里的【补历史 / 速记补录】。")
     st.caption("下方文字表和图片画廊来自同一批项目日志：上面改文字结构，下面只负责翻图，不是两套历史。")
     valid_p = [p for p in db.keys() if p != "系统配置"]
     if not valid_p: st.stop()
@@ -14133,10 +14177,12 @@ elif menu == MENU_MAINTENANCE:
     if ("history_sel_proj" not in st.session_state) or (st.session_state.history_sel_proj not in valid_p):
         st.session_state.history_sel_proj = valid_p[0]
     sel_proj = st.selectbox("📌 选择溯源项目", valid_p, key="history_sel_proj", format_func=lambda x: format_project_option_label(x, history_attention_map))
+    if str(st.session_state.get("current_proj_context", "")).strip() == str(sel_proj).strip():
+        st.caption("当前项目上下文已带入到数据维护；这里默认就是你刚才在项目空间里操作的项目。")
     low_conf_events = [x for x in collect_low_confidence_standard_events(limit=80) if str(x.get("项目", "")).strip() == str(sel_proj).strip()]
     if low_conf_events:
         with st.expander(f"🧭 当前项目的识别待确认 ({len(low_conf_events)} 条)", expanded=False):
-            st.caption("这里直接显示当前项目的高风险识别记录，方便你在查历史时顺手确认，不用再切去系统维护。")
+            st.caption("这里直接显示当前项目的高风险识别记录，方便你在查历史时顺手确认，不用再切去【系统设置】。")
             quick_rows = []
             for evt in low_conf_events[:20]:
                 conf = evt.get("_confidence", {})
@@ -14159,7 +14205,9 @@ elif menu == MENU_MAINTENANCE:
                 log["_id"] = str(uuid.uuid4())
 
     comps_in_proj = ["🌐 全部展示"] + list(db[sel_proj].get("部件列表", {}).keys())
-    sel_comp      = st.selectbox("📌 筛选特定部件 (默认全览)", comps_in_proj)
+    if ("history_sel_comp" not in st.session_state) or (st.session_state.history_sel_comp not in comps_in_proj):
+        st.session_state.history_sel_comp = "🌐 全部展示"
+    sel_comp = st.selectbox("📌 筛选特定部件 (默认全览)", comps_in_proj, key="history_sel_comp")
 
     grouped_logs = {}
     log_ref_map  = {}
@@ -14281,7 +14329,7 @@ elif menu == MENU_MAINTENANCE:
 
     st.divider()
     st.subheader("🔗 统一事件时间线（跨入口互通视图）")
-    st.caption("这里会把 To-do、全局大盘、PM 工作台等不同入口的写入，收束成同一种事件结构，便于你回看系统是怎么理解和联动的。")
+    st.caption("这里会把 To-do、全局看板、项目空间等不同入口的写入，收束成同一种事件结构，便于你回看系统是怎么理解和联动的。")
     load_standard_events = st.checkbox(
         "加载统一事件时间线",
         value=False,
@@ -14447,7 +14495,7 @@ elif menu == MENU_MAINTENANCE:
             else:
                 st.caption("当前筛选条件下暂无统一事件。")
         else:
-            st.caption("这个项目还没有统一事件记录。后续从 To-do / 全局大盘 / PM 工作台写入后，会自动在这里汇总。")
+            st.caption("这个项目还没有统一事件记录。后续从 To-do / 全局看板 / 项目空间写入后，会自动在这里汇总。")
     else:
         st.caption("统一事件时间线已改成延迟加载；需要排查串联时再勾选即可。")
 
@@ -15922,27 +15970,27 @@ elif menu == MENU_SETTINGS:
 # ==========================================
 elif menu == MENU_GUIDE:
     st.title("📖 INART PM 系统 (v49) 快速上手指南")
-    st.info("👋 新同事建议按下面顺序操作：先 PM 工作台录入，再看全局大盘，再用历史溯源校验。")
+    st.info("👋 新同事建议按下面顺序操作：先看今日视图，再进项目空间录入，最后用数据维护校验历史。")
     st.markdown("---")
 
     with st.expander("🚀 5分钟上手路径", expanded=True):
         st.markdown(
-            "1. 在 **【🎯 PM 工作台】** 先创建/选择项目。\n"
+            "1. 在 **【📁 项目空间】** 先创建/选择项目。\n"
             "2. 在待办中录入任务（任务必填，CP/DDL 合并字段可选）。\n"
             "3. 在细分配件工作台更新阶段、提审类型、提审结果并保存。\n"
-            "4. 去 **【📊 全局大盘与甘特图】** 检查断更、临期预警和甘特时段。"
+            "4. 去 **【📊 全局看板】** 检查断更、临期预警和甘特时段。"
         )
 
-    with st.expander("🎯 PM 工作台：待办 + 透视矩阵", expanded=True):
+    with st.expander("📁 项目空间：项目推进 + 透视矩阵", expanded=True):
         st.markdown(
             "1. **待办排序规则**：未完成在上，已完成自动下沉；CP/DDL 中识别到日期时会做临期提醒。\n"
             "2. **透视矩阵颜色**：绿色=完成，蓝色=进行中/暂停点，深灰=暂停前流转，黄色=Delay，浅灰=未到阶段。\n"
-            "3. **包装快捷跟踪**：可在 PM 工作台直接勾选包装状态；附件追溯在包装模块维护。"
+            "3. **包装快捷跟踪**：可在项目空间直接勾选包装状态；附件追溯在包装模块维护。"
         )
 
     with st.expander("📝 AI 速记：最低成本自动学习", expanded=False):
         st.markdown(
-            "1. **进入专属操作台**：点击左侧 **【🎯 PM 工作台】**，先维护待办再选择项目更新。\n"
+            "1. **进入项目空间**：点击左侧 **【📁 项目空间】**，先选项目再补项目更新。\n"
             "2. **填写【基础信息】与【细分角色】**：根据进度选择更新阶段并填入成员名称。\n"
             "3. **填入进展详情**与图片。\n"
             "4. 点击最下方的批量保存按钮，**系统会在保存后全自动为你清空表单！**"
@@ -15955,7 +16003,7 @@ elif menu == MENU_GUIDE:
             "3. 系统会显示 **实际-预计差异**（总额与分类）。分类差异按同名匹配。"
         )
 
-    with st.expander("🧯 系统维护与风险提示", expanded=False):
+    with st.expander("🧯 系统设置与风险提示", expanded=False):
         st.markdown(
             "1. 合并同类项目支持历史恢复与多选删除。\n"
             "2. **数据库瘦身**建议保留：当图片多时可显著降低库体积与加载时间。\n"
