@@ -1968,6 +1968,31 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         self.assertEqual(len(appended), 1)
         self.assertEqual(appended[0]["component_name"], "素体")
 
+    def test_build_todo_manager_visible_items_keeps_queued_draft_visible(self) -> None:
+        ns = load_app_functions("build_todo_manager_visible_items")
+        globals_map = ns.build_todo_manager_visible_items.__globals__
+        globals_map["todo_visible_for_view"] = lambda td, pm_view: False
+
+        rows = ns.build_todo_manager_visible_items(
+            [
+                {"_id": "draft1", "任务": "待保存草稿", "_待保存新增": True},
+                {"_id": "live1", "任务": "普通待办"},
+            ],
+            "袁",
+        )
+
+        self.assertEqual([row["_id"] for row in rows], ["draft1"])
+
+    def test_todo_manager_display_sort_key_puts_queued_draft_first(self) -> None:
+        ns = load_app_functions("todo_manager_display_sort_key")
+        globals_map = ns.todo_manager_display_sort_key.__globals__
+        globals_map["todo_sort_key"] = lambda td, today=None: (5, str(td.get("_id", "")))
+
+        draft_key = ns.todo_manager_display_sort_key({"_id": "draft1", "_待保存新增": True})
+        live_key = ns.todo_manager_display_sort_key({"_id": "live1"})
+
+        self.assertLess(draft_key, live_key)
+
     def test_sync_save_db_system_config_skips_global_recompute(self) -> None:
         ns = load_app_functions("sync_save_db")
 

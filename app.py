@@ -3552,6 +3552,36 @@ def build_todo_scope_options(current_pm):
     return list(dict.fromkeys([x for x in scope_vals if x and x != "所有人"]))
 
 
+def build_todo_manager_visible_items(todo_all, current_pm):
+    visible = []
+    for td in (todo_all or []):
+        if not isinstance(td, dict):
+            continue
+        if bool(td.get("_待保存新增")) or todo_visible_for_view(td, current_pm):
+            visible.append(td)
+    return visible
+
+
+def todo_manager_display_sort_key(td, today=None):
+    base_key = todo_sort_key(td, today)
+    if not isinstance(base_key, tuple):
+        base_key = (base_key,)
+    draft_rank = 0 if bool((td or {}).get("_待保存新增")) else 1
+    return (draft_rank,) + base_key
+
+
+def build_todo_editor_widget_key(todo_items):
+    tokens = []
+    for td in (todo_items or []):
+        if not isinstance(td, dict):
+            continue
+        td_id = str(td.get("_id", "")).strip()
+        if not td_id:
+            continue
+        tokens.append(f"{td_id}:{'draft' if bool(td.get('_待保存新增')) else 'live'}")
+    return "todo_editor_df" if not tokens else "todo_editor_df::" + "|".join(tokens)
+
+
 def parse_target_year_month(target_str):
     s = str(target_str or "").strip()
     if not s or s.upper() == "TBD":
@@ -7169,7 +7199,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
         if scope_hint and scope_hint not in scope_options:
             scope_options.append(scope_hint)
 
-    todo_list = [td for td in todo_all if todo_visible_for_view(td, current_pm)]
+    todo_list = build_todo_manager_visible_items(todo_all, current_pm)
     pending = [x for x in todo_list if not x.get("完成")]
     overdue = [x for x in pending if todo_due_date(x) and (todo_due_date(x) - today).days < 0]
     near_due = [x for x in pending if todo_due_date(x) and 0 <= (todo_due_date(x) - today).days <= 3]
@@ -7441,7 +7471,11 @@ def render_pm_todo_manager(valid_projs, current_pm):
         due_to = st.date_input("到期止", value=None, key="todo_filter_due_to")
 
     filtered = []
+    queued_visible = []
     for td in todo_list:
+        if bool(td.get("_待保存新增")):
+            queued_visible.append(td)
+            continue
         if status_filter == "未完成" and bool(td.get("完成")):
             continue
         if status_filter == "已完成" and (not bool(td.get("完成"))):
@@ -7464,16 +7498,26 @@ def render_pm_todo_manager(valid_projs, current_pm):
 
         filtered.append(td)
 
+    if queued_visible:
+        draft_ids = {str(td.get("_id", "")).strip() for td in queued_visible if str(td.get("_id", "")).strip()}
+        filtered = queued_visible + [
+            td for td in filtered
+            if str(td.get("_id", "")).strip() not in draft_ids
+        ]
+
     st.caption(f"当前筛选命中：{len(filtered)} 条")
+    if queued_visible:
+        st.caption(f"其中 {len(queued_visible)} 条是待保存草稿，已置顶显示，不受当前筛选和视角隐藏影响。")
 
     rows = []
-    sorted_items = sorted(filtered, key=lambda x: todo_sort_key(x, today))
+    sorted_items = sorted(filtered, key=lambda x: todo_manager_display_sort_key(x, today))
     for td in sorted_items:
         done_at = str(td.get("完成时间", "")) if td.get("完成") else ""
         people_tokens = split_people_text(td.get("关联人员", ""))
         people_display = " ，".join(people_tokens)
         row_obj = {
             "_id": str(td.get("_id", "")),
+            "保存状态": "待保存新增" if bool(td.get("_待保存新增")) else "",
             "完成": bool(td.get("完成", False)),
             "任务": str(td.get("任务", "")),
             "CP/DDL": todo_cpddl_text(td),
@@ -7500,6 +7544,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
 
     todo_column_config = {
         "_id": st.column_config.TextColumn("_id", disabled=True, width="small"),
+        "保存状态": st.column_config.TextColumn("保存状态 ⚙", disabled=True, width="small", help="待保存新增表示这条草稿已进表，但还没最终落库"),
         "完成": st.column_config.CheckboxColumn("完成 ✍", width="small"),
         "完成于": st.column_config.TextColumn("完成于 ⚙", disabled=True, width="small", help="勾选完成后自动记录，无需手填"),
         "任务": st.column_config.TextColumn("任务 ✍", required=True, width="large"),
@@ -7511,7 +7556,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
         "提醒": st.column_config.TextColumn("提醒 ⚙", disabled=True, width="small"),
         "删除": st.column_config.CheckboxColumn("删除", width="small"),
     }
-    todo_disabled_cols = ["_id", "完成于", "到期", "提醒"]
+    todo_disabled_cols = ["_id", "保存状态", "完成于", "到期", "提醒"]
     if load_todo_diagnostics:
         todo_column_config["人员识别"] = st.column_config.TextColumn("人员识别 ⚙", disabled=True, width="large")
         todo_column_config["开定识别"] = st.column_config.TextColumn("开定识别 ⚙", disabled=True, width="large")
@@ -7525,7 +7570,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
         num_rows="fixed",
         column_config=todo_column_config,
         disabled=todo_disabled_cols,
-        key="todo_editor_df",
+        key=build_todo_editor_widget_key(sorted_items),
     )
 
     if st.button("💾 保存待办变更（含新增）", key="todo_save_global"):
