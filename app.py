@@ -6630,6 +6630,12 @@ def infer_current_macro_stages(proj_label, proj_data=None):
         current.add("预研")
     elif milestone in ["研发中"] and not current:
         current.add("建模")
+    live_non_placeholder = {
+        stage_name for stage_name in current
+        if str(stage_name or "").strip() not in ["", "预研", "立项", "暂停", "结束"]
+    }
+    if live_non_placeholder:
+        current.discard("预研")
     return current
 
 
@@ -6800,7 +6806,7 @@ def build_project_stage_segments(proj_label, proj_data):
             "synthetic": True,
         })
 
-    live_stage_order = ["预研", "建模", "打印", "涂装", "设计", "工程", "开模", "修模", "生产"]
+    live_stage_order = ["建模", "打印", "涂装", "设计", "工程", "开模", "修模", "生产"]
     if current_macros and milestone not in ["暂停研发", "生产结束", "项目结束撒花🎉", "✅ 已完成(结束)"]:
         latest_live_record_dt = max(
             [x["date"] for x in all_records if x["stage"] not in ["立项", "暂停", "结束"]],
@@ -6958,9 +6964,14 @@ def build_project_stage_segments(proj_label, proj_data):
         )
         if next_other_stage_dt:
             finish_dt = max(finish_dt, next_other_stage_dt)
-        if stage in current_macros and effective_active_bucket not in ["pause", "done"]:
+        if stage != "预研" and stage in current_macros and effective_active_bucket not in ["pause", "done"]:
             finish_dt = max(finish_dt, today + datetime.timedelta(days=1))
-        elif stage == latest_non_pause_stage and effective_active_bucket not in ["pause", "done"] and not next_other_stage_dt:
+        elif (
+            stage != "预研"
+            and stage == latest_non_pause_stage
+            and effective_active_bucket not in ["pause", "done"]
+            and not next_other_stage_dt
+        ):
             finish_dt = max(finish_dt, today + datetime.timedelta(days=1))
         if effective_active_bucket == "pause" and open_pause_start_dt:
             finish_dt = min(finish_dt, open_pause_start_dt)
