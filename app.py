@@ -764,15 +764,17 @@ footer { visibility: hidden; }
 </style>
 """, unsafe_allow_html=True)
 
-MENU_DASHBOARD = "📊 全局大盘与甘特图"
-MENU_SPECIFIC  = "🎯 PM 工作台"
-MENU_PRINT     = "🖨️ 打印追踪"
-MENU_FASTLOG   = "📝 手机 AI 速记"
-MENU_PACKING   = "📦 包装与入库特殊领用"
-MENU_COST      = "💰 专属成本台账"
-MENU_HISTORY   = "🔍 历史溯源 (全局可编)"
-MENU_SETTINGS  = "⚙️ 系统维护 (全局配置)"
-MENU_GUIDE     = "📖 新手使用指南"
+MENU_HOME         = "🏠 今日视图"
+MENU_PROJECTS     = "📁 项目空间"
+MENU_DASHBOARD    = "📊 全局看板"
+MENU_TASKS        = "✅ 我的待办"
+MENU_FASTLOG      = "📝 速记"
+MENU_PRINT        = "🖨️ 打印追踪（过渡）"
+MENU_SETTINGS     = "⚙️ 系统设置"
+MENU_MAINTENANCE  = "🛠️ 数据维护"
+MENU_PACKING      = "📦 包装与入库特殊领用（隐藏）"
+MENU_COST         = "💰 专属成本台账（隐藏）"
+MENU_GUIDE        = "📖 新手使用指南（隐藏）"
 
 STD_MILESTONES  = ["待立项", "研发中", "暂停研发", "下模中", "生产中", "生产结束", "项目结束撒花🎉"]
 HANDOFF_METHODS = ["内部正常推进", "微信", "飞书", "实物/打印件交接", "网盘链接", "当面沟通"]
@@ -7791,6 +7793,169 @@ def render_sidebar_todo_panel(pm_view):
     if len(pending) > 6:
         st.sidebar.caption(f"还有 {len(pending) - 6} 条未完成待办未展开。")
 
+
+def switch_main_menu(target_menu, project_name=""):
+    st.session_state["main_nav_menu"] = target_menu
+    proj = str(project_name or "").strip()
+    if proj:
+        st.session_state["current_proj_context"] = proj
+        st.session_state["pm_sel_proj"] = proj
+    st.rerun()
+
+
+def build_home_project_warning_rows(project_names, pm_view):
+    rows = []
+    today = datetime.date.today()
+    for proj in (project_names or []):
+        explanation = build_project_current_explanation(proj, pm_view=pm_view)
+        latest_dt = clamp_timeline_date(parse_date_safe(explanation.get("日期", "")))
+        gap_days = max((today - latest_dt).days, 0) if isinstance(latest_dt, datetime.date) else None
+        rows.append({
+            "项目": proj,
+            "负责人": str(db.get(proj, {}).get("负责人", "")).strip() or "-",
+            "当前阶段": str(db.get(proj, {}).get("Milestone", "")).strip() or "-",
+            "最近更新": str(latest_dt) if isinstance(latest_dt, datetime.date) else "-",
+            "断更天数": gap_days if gap_days is not None else 99999,
+            "动态": build_dashboard_dynamic_display(proj, explanation=explanation, pm_view=pm_view) or str(explanation.get("内容", "")).strip() or "-",
+        })
+    return rows
+
+
+def render_home_view(valid_projs, current_pm):
+    st.title("🏠 今日视图")
+    st.caption("先看今天要做什么，再进入项目空间或速记；把日常高频动作收在首屏。")
+
+    with st.expander("🧭 首次使用建议", expanded=False):
+        st.markdown(
+            "1. 先看 **今日待办** 和 **重点预警**，确定今天最先推进什么。\n"
+            "2. 点项目名进入 **项目空间**，补进展、补历史或维护专项模块。\n"
+            "3. 需要手机快速录入时，去 **速记**；需要集中改提醒时，去 **我的待办**。"
+        )
+
+    cfg = db.get("系统配置", {}) if isinstance(db, dict) else {}
+    todo_all = cfg.get("PM_TODO_LIST", []) if isinstance(cfg.get("PM_TODO_LIST", []), list) else []
+    visible_todos = [td for td in todo_all if todo_visible_for_view(td, current_pm)]
+    today = datetime.date.today()
+    pending = [td for td in visible_todos if not bool(td.get("完成"))]
+    overdue = [td for td in pending if todo_due_date(td) and todo_due_date(td) < today]
+    soon = [td for td in pending if todo_due_date(td) and 0 <= (todo_due_date(td) - today).days <= 3]
+
+    warning_rows = build_home_project_warning_rows(valid_projs, current_pm)
+    stale_rows = [row for row in warning_rows if isinstance(row.get("断更天数"), int) and row["断更天数"] >= 7]
+    stale_rows = sorted(stale_rows, key=lambda row: (-int(row.get("断更天数", 0)), str(row.get("项目", ""))))
+
+    top1, top2, top3, top4 = st.columns(4)
+    top1.metric("未完成待办", len(pending))
+    top2.metric("已逾期待办", len(overdue))
+    top3.metric("3天内到期", len(soon))
+    top4.metric("断更≥7天项目", len(stale_rows))
+
+    qa1, qa2, qa3 = st.columns(3)
+    with qa1:
+        if st.button("✅ 去我的待办", key="home_jump_tasks", use_container_width=True):
+            switch_main_menu(MENU_TASKS)
+    with qa2:
+        if st.button("📝 去速记", key="home_jump_quicklog", use_container_width=True):
+            switch_main_menu(MENU_FASTLOG)
+    with qa3:
+        if st.button("📊 去全局看板", key="home_jump_dashboard", use_container_width=True):
+            switch_main_menu(MENU_DASHBOARD)
+
+    st.divider()
+    left_col, right_col = st.columns([1.4, 1.1])
+
+    with left_col:
+        st.markdown("**今日待办**")
+        st.caption("这里只放今天最值得先处理的提醒；更多编辑操作去【我的待办】。")
+        focus_todos = sorted(pending, key=lambda td: todo_sort_key(td, today))[:8]
+        if focus_todos:
+            for idx, td in enumerate(focus_todos, start=1):
+                proj_list = todo_project_list(td)
+                proj_text = todo_project_text(td) or "未关联项目"
+                due = todo_due_date(td)
+                due_txt = str(due) if due else "无DDL"
+                alert_txt = todo_alert_text(td, today)
+                c1, c2 = st.columns([4.0, 1.0])
+                with c1:
+                    st.markdown(f"`{idx}` **{str(td.get('任务', '')).strip() or '(空任务)'}**")
+                    st.caption(f"{proj_text} ｜ {due_txt} ｜ {alert_txt}")
+                with c2:
+                    jump_proj = proj_list[0] if proj_list else ""
+                    if jump_proj and st.button("打开项目", key=f"home_open_todo_proj_{idx}", use_container_width=True):
+                        switch_main_menu(MENU_PROJECTS, project_name=jump_proj)
+        else:
+            st.success("今天这边没有未完成待办。")
+
+        st.divider()
+        st.markdown("**我的项目**")
+        st.caption("按最近更新和断更情况快速挑项目，不用先钻到长页面里找。")
+        project_rows = sorted(
+            warning_rows,
+            key=lambda row: (
+                int(row.get("断更天数", 99999)),
+                str(row.get("项目", "")),
+            ),
+        )[:12]
+        if project_rows:
+            for idx, row in enumerate(project_rows, start=1):
+                p1, p2 = st.columns([4.0, 1.0])
+                with p1:
+                    st.markdown(f"`{idx}` **{row['项目']}**")
+                    st.caption(f"{row['负责人']} ｜ {row['当前阶段']} ｜ 最近更新 {row['最近更新']}")
+                with p2:
+                    if st.button("进入", key=f"home_open_proj_{idx}", use_container_width=True):
+                        switch_main_menu(MENU_PROJECTS, project_name=row["项目"])
+        else:
+            st.info("当前视角下暂无可进入的项目。")
+
+    with right_col:
+        st.markdown("**重点预警**")
+        st.caption("把逾期、临期和断更项目集中到一起，代替旧页面里分散的提醒。")
+        warning_cards = []
+        for td in overdue[:5]:
+            warning_cards.append({
+                "类型": "待办逾期",
+                "项目": todo_project_text(td) or "未关联项目",
+                "说明": str(td.get("任务", "")).strip(),
+            })
+        for td in soon[:5]:
+            warning_cards.append({
+                "类型": "即将到期",
+                "项目": todo_project_text(td) or "未关联项目",
+                "说明": str(td.get("任务", "")).strip(),
+            })
+        for row in stale_rows[:5]:
+            warning_cards.append({
+                "类型": f"断更 {row['断更天数']} 天",
+                "项目": row["项目"],
+                "说明": str(row.get("动态", "")).strip() or "暂无动态",
+            })
+        if warning_cards:
+            st.dataframe(pd.DataFrame(warning_cards), width='stretch', hide_index=True)
+        else:
+            st.success("当前没有需要优先处理的逾期或断更预警。")
+
+        st.divider()
+        st.markdown("**本周重点（轻量版）**")
+        st.caption("先把最容易卡住推进的事放在这；详细排期继续看全局看板。")
+        plan_rows, soon_cnt, delay_cnt = build_plan_board_rows(valid_projs)
+        if plan_rows:
+            focus_rows = [
+                {
+                    "项目": str(row.get("项目", "")).strip(),
+                    "阶段": str(row.get("阶段", "")).strip(),
+                    "状态": str(row.get("状态", "")).strip(),
+                }
+                for row in plan_rows
+                if str(row.get("状态", "")).strip() in ["计划-Soon", "计划-Delay"]
+            ]
+            if focus_rows:
+                st.dataframe(pd.DataFrame(focus_rows[:8]), width='stretch', hide_index=True)
+            else:
+                st.caption("本周暂时没有计划临期或延误。")
+        else:
+            st.caption("当前没有可展示的计划重点。")
+
 def _csv_cell_text(v):
     s = str(v if v is not None else "").strip()
     if s.lower() in ["nan", "none", "nat"]:
@@ -10590,15 +10755,24 @@ valid_projs = get_visible_projects(db, current_pm)
 project_attention_map = build_project_attention_map(valid_projs)
 attention_count = len(project_attention_map)
 if attention_count:
-    st.sidebar.caption(f"⚠️ 命名待确认项目 {attention_count} 个，可在系统维护里清理。")
+    st.sidebar.caption(f"⚠️ 命名待确认项目 {attention_count} 个，可在【数据维护】里清理。")
 render_sidebar_todo_panel(current_pm)
 
 
-menu = st.sidebar.radio("📂 功能导航", [
-    MENU_DASHBOARD, MENU_SPECIFIC, MENU_PRINT, MENU_FASTLOG,
-    MENU_HISTORY, MENU_SETTINGS, MENU_GUIDE
-])
-st.sidebar.caption("建议流程：先看全局，再进 PM 工作台；手机端可用 AI 速记做晚间复盘。")
+menu_options = [
+    MENU_HOME,
+    MENU_PROJECTS,
+    MENU_DASHBOARD,
+    MENU_TASKS,
+    MENU_FASTLOG,
+    MENU_PRINT,
+    MENU_SETTINGS,
+    MENU_MAINTENANCE,
+]
+if st.session_state.get("main_nav_menu") not in menu_options:
+    st.session_state["main_nav_menu"] = MENU_HOME
+menu = st.sidebar.radio("📂 功能导航", menu_options, key="main_nav_menu")
+st.sidebar.caption("建议流程：先看今日视图，再进项目空间；待办和速记已独立出来，管理能力拆成系统设置 / 数据维护。")
 
 # 备份与恢复
 st.sidebar.divider()
@@ -10760,8 +10934,11 @@ def render_rd_csv_import_panel(expanded=False):
             except Exception as e:
                 st.error(f"解析失败: {e}")
 
-if menu == MENU_DASHBOARD:
-    st.title(f"📊 全局大盘与进度甘特图 ({current_pm} 的视角)")
+if menu == MENU_HOME:
+    render_home_view(valid_projs, current_pm)
+
+elif menu == MENU_DASHBOARD:
+    st.title(f"📊 全局看板 ({current_pm} 的视角)")
 
     st.caption("CSV 导入入口已迁移至【系统维护】。")
     gantt_cat_orders = MACRO_STAGES.copy()
@@ -12126,17 +12303,31 @@ if menu == MENU_DASHBOARD:
     # ==========================================
     # 模块 2：特定项目管控台
 # ==========================================
-elif menu == MENU_SPECIFIC:
-    st.title("🎯 PM 工作台")
-    with st.expander("🧭 PM 工作台分区说明", expanded=False):
+elif menu == MENU_PROJECTS:
+    st.title("📁 项目空间")
+    with st.expander("🧭 项目空间说明", expanded=False):
         st.markdown(
-            "这页主要只有两块：**To do 中心**负责提醒、DDL、协作清单；**特定项目操作**负责选中某个项目后的状态查看、记录落地和专项维护。"
+            "这页专注单个项目：**项目状态总览**负责看整体推进，**项目更新**负责补进展/补历史，专项能力继续跟在当前项目后面。"
         )
-        st.caption("默认心智：先在待办里梳理今天要推进什么，再进入具体项目做更新和落地。")
-        st.caption("如果你只是日常推进，优先看这两块就够了，专项模块放在更后面。")
-    with st.expander("🗂️ To do 中心", expanded=True):
-        st.caption("先梳理提醒、DDL 和协作清单；需要落地图片、文件和正式流转时，再进入下方具体项目。")
-        todo_list = render_pm_todo_manager(valid_projs, current_pm)
+        st.caption("默认心智：先在【今日视图】或【我的待办】确认今天要推进什么，再进入这里处理某一个具体项目。")
+        st.caption("这轮先把入口层改成 PRD 结构；专项模块仍保留在当前项目页里，避免你找不到原有能力。")
+    todo_all_cfg = db.get("系统配置", {}).get("PM_TODO_LIST", []) if isinstance(db.get("系统配置", {}), dict) else []
+    todo_list = [td for td in todo_all_cfg if todo_visible_for_view(td, current_pm)]
+    with st.container(border=True):
+        st.markdown("**今日协作提醒（项目空间过渡提示）**")
+        st.caption("待办现在有独立入口。这里保留的是当前视角的简要提醒，避免项目页再把整套 To-do 编辑器堆回来。")
+        pending_count = len([td for td in todo_list if not bool(td.get("完成"))])
+        overdue_count = len([
+            td for td in todo_list
+            if (not bool(td.get("完成"))) and todo_due_date(td) and todo_due_date(td) < datetime.date.today()
+        ])
+        hp1, hp2, hp3 = st.columns([1.1, 1.1, 1.8])
+        hp1.metric("当前未完成待办", pending_count)
+        hp2.metric("其中已逾期", overdue_count)
+        with hp3:
+            st.write("")
+            if st.button("✅ 去我的待办集中处理", key="project_space_jump_tasks", use_container_width=True):
+                switch_main_menu(MENU_TASKS)
     st.divider()
     with st.expander("🎯 特定项目操作", expanded=True):
         st.caption("这里专注某一个项目。日常推进先看【项目状态总览】，再到【项目更新】里补历史或推进当下。")
@@ -13315,16 +13506,26 @@ elif menu == MENU_SPECIFIC:
             with st.expander("💰 成本台账", expanded=False):
                 render_pm_cost_integrated(sel_proj)
     # ==========================================
-    # 模块 3：打印追踪
+    # 模块 3：我的待办
+# ==========================================
+elif menu == MENU_TASKS:
+    st.title("✅ 我的待办")
+    st.caption("这是待办的单一权威入口：新增、完成、修改、删除都在这里集中处理。")
+    render_pm_todo_manager(valid_projs, current_pm)
+
+    # ==========================================
+    # 模块 4：打印追踪（过渡）
 # ==========================================
 elif menu == MENU_PRINT:
+    st.title("🖨️ 打印追踪（过渡入口）")
+    st.caption("按 PRD 方向，这块后续会并入项目空间；这轮先保留独立入口，避免你现有流程中断。")
     render_print_tracking_board(current_pm, valid_projs, ui_prefix="print_track_global")
 
 # ==========================================
-# 模块 4：AI 速记
+# 模块 5：AI 速记
 # ==========================================
 elif menu == MENU_FASTLOG:
-    st.title("📝 手机 AI 速记")
+    st.title("📝 速记")
     _fastlog_first_expand = not st.session_state.get("fastlog_expanded_once", False)
     with st.expander("每晚复盘（多项目）", expanded=_fastlog_first_expand):
         render_pm_batch_fastlog_integrated(valid_projs)
@@ -13921,8 +14122,9 @@ elif menu == MENU_COST:
         with st.expander("入库与领用台账", expanded=False):
             render_project_inventory_ledger(sel_proj, key_prefix=f"cost_inv_{norm_text(sel_proj)[:24]}")
 # ==========================================
-elif menu == MENU_HISTORY:
-    st.title("🔍 图文交接溯源档案 (全局/可编辑)")
+elif menu == MENU_MAINTENANCE:
+    st.title("🛠️ 数据维护")
+    st.caption("这里集中放历史溯源、全局修正和识别排查；项目治理相关能力会逐步继续往这里收口。")
     st.caption("这里主要用于回看和修改已有记录；如果要新增过去某一天的信息，请回【特定项目操作】里的【补历史 / 速记补录】。")
     st.caption("下方文字表和图片画廊来自同一批项目日志：上面改文字结构，下面只负责翻图，不是两套历史。")
     valid_p = [p for p in db.keys() if p != "系统配置"]
@@ -14536,7 +14738,8 @@ elif menu == MENU_HISTORY:
 # 模块 7：系统维护
 # ==========================================
 elif menu == MENU_SETTINGS:
-    st.title("⚙️ 系统维护 (全局参数与词库管理)")
+    st.title("⚙️ 系统设置")
+    st.caption("这里保留团队成员、词典、排期基线和导入等全局配置；低频治理型操作会逐步转去【数据维护】。")
     render_rd_csv_import_panel(expanded=False)
     st.divider()
 

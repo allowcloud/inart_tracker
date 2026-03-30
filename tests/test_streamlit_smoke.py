@@ -13,7 +13,7 @@ APP_PATH = REPO_ROOT / "app.py"
 
 
 class StreamlitSmokeTest(unittest.TestCase):
-    def test_pm_workspace_renders_without_exceptions(self) -> None:
+    def test_project_space_renders_without_exceptions(self) -> None:
         script = textwrap.dedent(
             f"""
             from pathlib import Path
@@ -29,22 +29,22 @@ class StreamlitSmokeTest(unittest.TestCase):
             for r in at.radio:
                 label = str(r.label or "")
                 options = [str(o) for o in r.options]
-                if "\u529f\u80fd\u5bfc\u822a" in label or any("PM \u5de5\u4f5c\u53f0" in o for o in options):
+                if "\u529f\u80fd\u5bfc\u822a" in label or any("\u9879\u76ee\u7a7a\u95f4" in o for o in options):
                     nav_radio = r
                     break
             if nav_radio is None:
                 raise SystemExit("navigation radio not found")
 
-            pm_option = next((o for o in nav_radio.options if "PM \u5de5\u4f5c\u53f0" in str(o)), None)
-            if pm_option is None:
-                raise SystemExit("PM workspace option not found")
+            project_option = next((o for o in nav_radio.options if "\u9879\u76ee\u7a7a\u95f4" in str(o)), None)
+            if project_option is None:
+                raise SystemExit("Project space option not found")
 
-            nav_radio.set_value(pm_option)
+            nav_radio.set_value(project_option)
             at.run()
             if at.exception:
-                raise SystemExit("pm workspace exceptions: " + " | ".join(str(x.value) for x in at.exception))
+                raise SystemExit("project space exceptions: " + " | ".join(str(x.value) for x in at.exception))
 
-            print("PM_WORKSPACE_OK")
+            print("PROJECT_SPACE_OK")
             """
         )
 
@@ -63,7 +63,7 @@ class StreamlitSmokeTest(unittest.TestCase):
             0,
             f"stdout:\n{proc.stdout}\n\nstderr:\n{proc.stderr}",
         )
-        self.assertIn("PM_WORKSPACE_OK", proc.stdout)
+        self.assertIn("PROJECT_SPACE_OK", proc.stdout)
 
 
 if __name__ == "__main__":

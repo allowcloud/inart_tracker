@@ -1993,6 +1993,53 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
 
         self.assertLess(draft_key, live_key)
 
+    def test_build_home_project_warning_rows_uses_explanation_date_and_dynamic(self) -> None:
+        ns = load_app_functions("build_home_project_warning_rows")
+        globals_map = ns.build_home_project_warning_rows.__globals__
+        globals_map["db"] = {
+            "1/6马尔福": {"负责人": "袁", "Milestone": "生产中"},
+        }
+        globals_map["build_project_current_explanation"] = lambda proj, pm_view=None: {
+            "日期": "2026-03-28",
+            "内容": "马海毛到货开始植发",
+        }
+        globals_map["clamp_timeline_date"] = lambda dt: dt
+        globals_map["parse_date_safe"] = lambda text: datetime.datetime.strptime(str(text), "%Y-%m-%d").date()
+        globals_map["build_dashboard_dynamic_display"] = lambda proj, explanation=None, pm_view=None: "[全局进度] 马海毛到货开始植发"
+
+        rows = ns.build_home_project_warning_rows(["1/6马尔福"], "袁")
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["项目"], "1/6马尔福")
+        self.assertEqual(rows[0]["负责人"], "袁")
+        self.assertEqual(rows[0]["当前阶段"], "生产中")
+        self.assertEqual(rows[0]["最近更新"], "2026-03-28")
+        self.assertIn("马海毛到货开始植发", rows[0]["动态"])
+
+    def test_switch_main_menu_updates_selection_and_project_context(self) -> None:
+        ns = load_app_functions("switch_main_menu")
+
+        class FakeSessionState(dict):
+            def __getattr__(self, name):
+                return self[name]
+
+            def __setattr__(self, name, value):
+                self[name] = value
+
+        fake_state = FakeSessionState()
+        rerun_calls = []
+        ns.switch_main_menu.__globals__["st"] = types.SimpleNamespace(
+            session_state=fake_state,
+            rerun=lambda: rerun_calls.append(True),
+        )
+
+        ns.switch_main_menu("📁 项目空间", project_name="1/6马尔福")
+
+        self.assertEqual(fake_state["main_nav_menu"], "📁 项目空间")
+        self.assertEqual(fake_state["current_proj_context"], "1/6马尔福")
+        self.assertEqual(fake_state["pm_sel_proj"], "1/6马尔福")
+        self.assertEqual(rerun_calls, [True])
+
     def test_sync_save_db_system_config_skips_global_recompute(self) -> None:
         ns = load_app_functions("sync_save_db")
 
