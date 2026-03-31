@@ -766,7 +766,7 @@ footer { visibility: hidden; }
 
 MENU_HOME         = "🏠 今日视图"
 MENU_PROJECTS     = "📁 项目空间"
-MENU_DASHBOARD    = "📊 全局看板"
+MENU_DASHBOARD    = "📊 全局大盘与甘特图"
 MENU_TASKS        = "✅ 我的待办"
 MENU_FASTLOG      = "📝 速记"
 MENU_PRINT        = "🖨️ 打印追踪（过渡）"
@@ -7884,7 +7884,7 @@ def render_home_view(valid_projs, current_pm):
         if st.button("📝 去速记", key="home_jump_quicklog", use_container_width=True):
             switch_main_menu(MENU_FASTLOG)
     with qa3:
-        if st.button("📊 去全局看板", key="home_jump_dashboard", use_container_width=True):
+        if st.button("📊 去全局大盘与甘特图", key="home_jump_dashboard", use_container_width=True):
             switch_main_menu(MENU_DASHBOARD)
 
     st.divider()
@@ -7963,7 +7963,7 @@ def render_home_view(valid_projs, current_pm):
 
         st.divider()
         st.markdown("**本周重点（轻量版）**")
-        st.caption("先把最容易卡住推进的事放在这；详细排期继续看全局看板。")
+        st.caption("先把最容易卡住推进的事放在这；详细排期和甘特继续看全局大盘与甘特图。")
         plan_rows, soon_cnt, delay_cnt = build_plan_board_rows(valid_projs)
         if plan_rows:
             focus_rows = [
@@ -10798,7 +10798,7 @@ menu_options = [
 if st.session_state.get("main_nav_menu") not in menu_options:
     st.session_state["main_nav_menu"] = MENU_HOME
 menu = st.sidebar.radio("📂 功能导航", menu_options, key="main_nav_menu")
-st.sidebar.caption("建议流程：先看今日视图，再进项目空间；待办和速记已独立出来，管理能力拆成系统设置 / 数据维护。")
+st.sidebar.caption("建议流程：先看今日视图，再进项目空间；全局大盘与甘特图仍保留独立入口，待办和速记已独立出来。")
 
 # 备份与恢复
 st.sidebar.divider()
@@ -10964,9 +10964,9 @@ if menu == MENU_HOME:
     render_home_view(valid_projs, current_pm)
 
 elif menu == MENU_DASHBOARD:
-    st.title(f"📊 全局看板 ({current_pm} 的视角)")
+    st.title(f"📊 全局大盘与甘特图 ({current_pm} 的视角)")
 
-    st.caption("CSV 导入入口已迁移至【系统设置】。")
+    st.caption("大盘和甘特图仍保留在同一页；这轮只调整导航，不会把甘特拆掉。CSV 导入入口已迁移至【系统设置】。")
     gantt_cat_orders = MACRO_STAGES.copy()
     combined_color_map = {
         "预研": "#CBD5E1", "立项": "#F2C14E", "建模": "#34C6D3", "打印": "#0EA5A4", "涂装": "#F59E0B", "设计": "#8B5CF6",
@@ -14362,7 +14362,7 @@ elif menu == MENU_MAINTENANCE:
 
     st.divider()
     st.subheader("🔗 统一事件时间线（跨入口互通视图）")
-    st.caption("这里会把 To-do、全局看板、项目空间等不同入口的写入，收束成同一种事件结构，便于你回看系统是怎么理解和联动的。")
+    st.caption("这里会把 To-do、全局大盘与甘特图、项目空间等不同入口的写入，收束成同一种事件结构，便于你回看系统是怎么理解和联动的。")
     load_standard_events = st.checkbox(
         "加载统一事件时间线",
         value=(maintenance_mode == "🔗 串联排查"),
@@ -14528,7 +14528,7 @@ elif menu == MENU_MAINTENANCE:
             else:
                 st.caption("当前筛选条件下暂无统一事件。")
         else:
-            st.caption("这个项目还没有统一事件记录。后续从 To-do / 全局看板 / 项目空间写入后，会自动在这里汇总。")
+            st.caption("这个项目还没有统一事件记录。后续从 To-do / 全局大盘与甘特图 / 项目空间写入后，会自动在这里汇总。")
     else:
         st.caption("统一事件时间线已改成延迟加载；需要排查串联时再勾选即可。")
 
@@ -16011,7 +16011,7 @@ elif menu == MENU_GUIDE:
             "1. 在 **【📁 项目空间】** 先创建/选择项目。\n"
             "2. 在待办中录入任务（任务必填，CP/DDL 合并字段可选）。\n"
             "3. 在细分配件工作台更新阶段、提审类型、提审结果并保存。\n"
-            "4. 去 **【📊 全局看板】** 检查断更、临期预警和甘特时段。"
+            "4. 去 **【📊 全局大盘与甘特图】** 检查断更、临期预警和甘特时段。"
         )
 
     with st.expander("📁 项目空间：项目推进 + 透视矩阵", expanded=True):
