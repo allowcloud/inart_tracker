@@ -7794,25 +7794,79 @@ def render_sidebar_todo_panel(pm_view):
         st.sidebar.caption(f"还有 {len(pending) - 6} 条未完成待办未展开。")
 
 
+def apply_pending_main_navigation(menu_options, valid_projects=None):
+    pending_menu = str(st.session_state.pop("_pending_main_nav_menu", "")).strip()
+    if pending_menu and pending_menu in list(menu_options or []):
+        st.session_state["main_nav_menu"] = pending_menu
+
+    pending_context = str(st.session_state.pop("_pending_current_proj_context", "")).strip()
+    if pending_context:
+        st.session_state["current_proj_context"] = pending_context
+
+    pending_proj = str(st.session_state.pop("_pending_pm_sel_proj", "")).strip()
+    if pending_proj and ((not valid_projects) or pending_proj in list(valid_projects or [])):
+        st.session_state["pm_sel_proj"] = pending_proj
+
+
+def try_set_session_state_value(key, value):
+    try:
+        st.session_state[key] = value
+        return True
+    except Exception:
+        return False
+
+
 def switch_main_menu(target_menu, project_name=""):
-    st.session_state["main_nav_menu"] = target_menu
+    pending_menu = str(target_menu or "").strip()
+    st.session_state["_pending_main_nav_menu"] = pending_menu
+    safe_setter = globals().get("try_set_session_state_value")
+    if pending_menu:
+        if callable(safe_setter):
+            safe_setter("main_nav_menu", pending_menu)
+        else:
+            st.session_state["main_nav_menu"] = pending_menu
     proj = str(project_name or "").strip()
     if proj:
-        st.session_state["current_proj_context"] = proj
-        st.session_state["pm_sel_proj"] = proj
+        st.session_state["_pending_current_proj_context"] = proj
+        st.session_state["_pending_pm_sel_proj"] = proj
+        if callable(safe_setter):
+            safe_setter("current_proj_context", proj)
+            safe_setter("pm_sel_proj", proj)
+        else:
+            st.session_state["current_proj_context"] = proj
+            st.session_state["pm_sel_proj"] = proj
     st.rerun()
 
 
 def open_project_maintenance(project_name, component_name="🌐 全部展示", load_todo_history=False, load_standard_events=False):
     proj = str(project_name or "").strip()
     comp = str(component_name or "").strip() or "🌐 全部展示"
+    safe_setter = globals().get("try_set_session_state_value")
+    st.session_state["_pending_history_target"] = {
+        "project": proj,
+        "component": comp,
+        "load_todo_history": bool(load_todo_history),
+        "load_standard_events": bool(load_standard_events),
+    }
     if proj:
-        st.session_state["history_sel_proj"] = proj
+        if callable(safe_setter):
+            safe_setter("history_sel_proj", proj)
+        else:
+            st.session_state["history_sel_proj"] = proj
         if load_todo_history:
-            st.session_state[f"hist_todo_load_{norm_text(proj)}"] = True
+            if callable(safe_setter):
+                safe_setter(f"hist_todo_load_{norm_text(proj)}", True)
+            else:
+                st.session_state[f"hist_todo_load_{norm_text(proj)}"] = True
         if load_standard_events:
-            st.session_state[f"hist_std_evt_load_{norm_text(proj)}"] = True
-    st.session_state["history_sel_comp"] = comp
+            if callable(safe_setter):
+                safe_setter(f"hist_std_evt_load_{norm_text(proj)}", True)
+            else:
+                st.session_state[f"hist_std_evt_load_{norm_text(proj)}"] = True
+    if callable(safe_setter):
+        safe_setter("history_sel_comp", comp)
+    else:
+        st.session_state["history_sel_comp"] = comp
     switch_main_menu(MENU_MAINTENANCE, project_name=proj)
 
 
@@ -10795,6 +10849,7 @@ menu_options = [
     MENU_SETTINGS,
     MENU_MAINTENANCE,
 ]
+apply_pending_main_navigation(menu_options, valid_projects=valid_projs)
 if st.session_state.get("main_nav_menu") not in menu_options:
     st.session_state["main_nav_menu"] = MENU_HOME
 menu = st.sidebar.radio("📂 功能导航", menu_options, key="main_nav_menu")
@@ -14195,6 +14250,11 @@ elif menu == MENU_MAINTENANCE:
     valid_p = [p for p in db.keys() if p != "系统配置"]
     if not valid_p: st.stop()
     history_attention_map = build_project_attention_map(valid_p)
+    pending_history_target = st.session_state.get("_pending_history_target", {})
+    if isinstance(pending_history_target, dict):
+        pending_history_proj = str(pending_history_target.get("project", "")).strip()
+        if pending_history_proj and pending_history_proj in valid_p:
+            st.session_state["history_sel_proj"] = pending_history_proj
     if ("history_sel_proj" not in st.session_state) or (st.session_state.history_sel_proj not in valid_p):
         st.session_state.history_sel_proj = valid_p[0]
     sel_proj = st.selectbox("📌 选择溯源项目", valid_p, key="history_sel_proj", format_func=lambda x: format_project_option_label(x, history_attention_map))
@@ -14238,6 +14298,15 @@ elif menu == MENU_MAINTENANCE:
                 log["_id"] = str(uuid.uuid4())
 
     comps_in_proj = ["🌐 全部展示"] + list(db[sel_proj].get("部件列表", {}).keys())
+    if isinstance(pending_history_target, dict) and str(pending_history_target.get("project", "")).strip() == str(sel_proj).strip():
+        pending_comp = str(pending_history_target.get("component", "")).strip() or "🌐 全部展示"
+        if pending_comp in comps_in_proj:
+            st.session_state["history_sel_comp"] = pending_comp
+        if bool(pending_history_target.get("load_todo_history", False)):
+            st.session_state[f"hist_todo_load_{norm_text(sel_proj)}"] = True
+        if bool(pending_history_target.get("load_standard_events", False)):
+            st.session_state[f"hist_std_evt_load_{norm_text(sel_proj)}"] = True
+        st.session_state.pop("_pending_history_target", None)
     if ("history_sel_comp" not in st.session_state) or (st.session_state.history_sel_comp not in comps_in_proj):
         st.session_state.history_sel_comp = "🌐 全部展示"
     sel_comp = st.selectbox("📌 筛选特定部件 (默认全览)", comps_in_proj, key="history_sel_comp")
