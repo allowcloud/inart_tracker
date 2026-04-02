@@ -7876,11 +7876,229 @@ def project_space_section_expanded(current_mode, section_name):
     focus_map = {
         "项目状态总览": "⚡ 日常推进",
         "项目更新": "⚡ 日常推进",
+        "项目历史": "🧠 排查与治理",
         "专项模块": "🧩 专项模块",
         "系统当前解释": "🧠 排查与治理",
     }
     desired_mode = focus_map.get(section, "")
     return bool(desired_mode) and mode == desired_mode
+
+
+def build_project_history_view_state(project_name, selected_component="🌐 全部展示"):
+    proj = str(project_name or "").strip()
+    sel_comp = str(selected_component or "🌐 全部展示").strip() or "🌐 全部展示"
+    project_data = db.get(proj, {}) if isinstance(db.get(proj, {}), dict) else {}
+    components = project_data.get("部件列表", {}) if isinstance(project_data.get("部件列表", {}), dict) else {}
+
+    for _, comp in components.items():
+        if not isinstance(comp, dict):
+            continue
+        for log in comp.get("日志流", []):
+            if is_hidden_system_log(log):
+                continue
+            if "_id" not in log:
+                log["_id"] = str(uuid.uuid4())
+
+    comps_in_proj = ["🌐 全部展示"] + list(components.keys())
+    grouped_logs = {}
+    log_ref_map = {}
+
+    for c_name, comp in components.items():
+        if sel_comp != "🌐 全部展示" and c_name != sel_comp:
+            continue
+        if not isinstance(comp, dict):
+            continue
+        for log in comp.get("日志流", []):
+            if is_hidden_system_log(log):
+                continue
+            log_id = str(log.get("_id", "")).strip()
+            if not log_id:
+                continue
+            log_ref_map[log_id] = log
+            key = (
+                log.get("日期", ""),
+                log.get("工序", ""),
+                log.get("流转", ""),
+                log.get("事件", ""),
+                log.get("提审类型", ""),
+                log.get("提审结果", ""),
+                log.get("提审轮次", ""),
+            )
+            if key not in grouped_logs:
+                grouped_logs[key] = {"_ids": [log_id], "部件": [c_name], "log": log}
+            else:
+                grouped_logs[key]["_ids"].append(log_id)
+                grouped_logs[key]["部件"].append(c_name)
+
+    flat_data = []
+    for grouped in grouped_logs.values():
+        all_imgs = []
+        seen_imgs = set()
+        for log_id in grouped["_ids"]:
+            log_row = log_ref_map.get(log_id, {})
+            images = log_row.get("图片", []) if isinstance(log_row, dict) else []
+            if not isinstance(images, list):
+                images = [images] if images else []
+            for img in images:
+                if img and img not in seen_imgs:
+                    seen_imgs.add(img)
+                    all_imgs.append(img)
+
+        rv_type = normalize_review_type(grouped["log"].get("提审类型", "(无)") or "(无)")
+        rv_res = str(grouped["log"].get("提审结果", "(无)") or "(无)")
+        if rv_type == "(无)" and rv_res == "(无)":
+            rv_state = "(无)"
+        elif rv_type != "(无)" and rv_res == "(无)":
+            rv_state = f"{rv_type} / 待补结果"
+        elif rv_type == "(无)" and rv_res != "(无)":
+            rv_state = f"仅结果:{rv_res}"
+        else:
+            rv_state = f"{rv_type} / {rv_res}"
+
+        flat_data.append(
+            {
+                "_ids": grouped["_ids"],
+                "部件": ", ".join(grouped["部件"]),
+                "日期": grouped["log"].get("日期", ""),
+                "工序": grouped["log"].get("工序", ""),
+                "类型": grouped["log"].get("流转", ""),
+                "事件": grouped["log"].get("事件", ""),
+                "提审类型": rv_type,
+                "提审结果": rv_res,
+                "提审状态": rv_state,
+                "提审轮次": grouped["log"].get("提审轮次", ""),
+                "图片": all_imgs,
+            }
+        )
+
+    return {
+        "comps_in_proj": comps_in_proj,
+        "flat_data": flat_data,
+        "log_ref_map": log_ref_map,
+    }
+
+
+def render_project_history_editor_block(project_name, selected_component, current_pm, key_prefix="history"):
+    proj = str(project_name or "").strip()
+    sel_comp = str(selected_component or "🌐 全部展示").strip() or "🌐 全部展示"
+    view_state = build_project_history_view_state(proj, sel_comp)
+    flat_data = view_state["flat_data"]
+    log_ref_map = view_state["log_ref_map"]
+
+    if not flat_data:
+        st.info("该过滤条件下暂无记录。")
+        return
+
+    df_logs = pd.DataFrame(flat_data).sort_values(by="日期", ascending=False).reset_index(drop=True)
+    df_logs.insert(0, "序号", range(len(df_logs), 0, -1))
+
+    review_ctx = df_logs["事件"].astype(str).str.contains(
+        r"提审|过审|review|打回|驳回|退回|待反馈|2d|3d|二维|三维|实物提审|产品图提审|官图提审|包装提审",
+        case=False,
+        regex=True,
+    )
+    mismatch_mask = (
+        df_logs["提审类型"].astype(str) == "(无)"
+    ) & (df_logs["提审结果"].astype(str).isin(["待反馈", "通过", "打回"])) & (~review_ctx)
+    mismatch_cnt = int(mismatch_mask.sum())
+    if mismatch_cnt > 0:
+        st.warning(f"检测到 {mismatch_cnt} 条记录疑似误判提审（无提审语义但提审结果有值）。建议改为(无)或补齐提审信息。")
+
+    st.markdown("**当前项目历史日志（文字 / 结构编辑区）**")
+    st.info("💡 这里主要用于修改已有历史记录。之前写过的提审补充说明就在“事件 / 提审补充说明”列里改；提审类型/结果/轮次改对应列。支持**双击修改文字**，或选中整行后按 **Delete** 删除。要新增一条过去记录，请回【项目空间】里的【补历史 / 速记补录】。")
+    edited_df = st.data_editor(
+        df_logs.drop(columns=["_ids", "图片"]),
+        column_config={
+            "序号": st.column_config.NumberColumn(disabled=True),
+            "部件": st.column_config.TextColumn(disabled=True),
+            "工序": st.column_config.SelectboxColumn("工序", options=STAGES_UNIFIED, required=True),
+            "类型": st.column_config.TextColumn("类型"),
+            "事件": st.column_config.TextColumn("事件 / 提审补充说明"),
+            "提审类型": st.column_config.SelectboxColumn("提审类型", options=REVIEW_TYPE_OPTIONS, required=True),
+            "提审结果": st.column_config.SelectboxColumn("提审结果", options=REVIEW_RESULT_OPTIONS, required=True),
+            "提审状态": st.column_config.TextColumn("提审状态", disabled=True),
+            "提审轮次": st.column_config.NumberColumn("提审轮次", min_value=1, step=1),
+        },
+        num_rows="dynamic",
+        width="stretch",
+        key=f"{key_prefix}_editor_{norm_text(proj)}_{norm_text(sel_comp)}",
+    )
+
+    if st.button("💾 确认并覆盖保存历史记录", type="primary", key=f"{key_prefix}_save_{norm_text(proj)}_{norm_text(sel_comp)}"):
+        new_logs_by_comp = {}
+        for idx, row in edited_df.iterrows():
+            if pd.isna(row.get("部件")) or str(row.get("部件")).strip() in ["", "None", "nan"]:
+                continue
+            comp_list = [x.strip() for x in str(row["部件"]).split(",")]
+            for comp_name in comp_list:
+                comp_key = comp_name or "全局进度"
+                new_logs_by_comp.setdefault(comp_key, [])
+                old_ids = df_logs.at[idx, "_ids"] if idx in df_logs.index else []
+                old_images = log_ref_map[old_ids[0]].get("图片", []) if old_ids and old_ids[0] in log_ref_map else []
+                if not isinstance(old_images, list):
+                    old_images = [old_images] if old_images else []
+                new_logs_by_comp[comp_key].append(
+                    {
+                        "_id": str(uuid.uuid4()),
+                        "日期": str(row["日期"]),
+                        "工序": str(row["工序"]),
+                        "流转": str(row["类型"]),
+                        "事件": str(row["事件"]),
+                        "提审类型": normalize_review_type(row.get("提审类型", "(无)")),
+                        "提审结果": str(row.get("提审结果", "(无)")),
+                        "提审轮次": normalize_review_round(row.get("提审轮次", "")),
+                        "图片": old_images,
+                    }
+                )
+
+        comps_in_scope = (
+            [sel_comp]
+            if sel_comp != "🌐 全部展示"
+            else list(db.get(proj, {}).get("部件列表", {}).keys())
+        )
+        for comp_name in comps_in_scope:
+            if comp_name in db.get(proj, {}).get("部件列表", {}):
+                db[proj]["部件列表"][comp_name]["日志流"] = sorted(
+                    new_logs_by_comp.get(comp_name, []),
+                    key=lambda x: x.get("日期", ""),
+                )
+
+        sync_save_db(proj)
+        if append_history_refresh_standard_event(proj, actor=current_pm if current_pm != "所有人" else "系统"):
+            sync_save_db("系统配置")
+        st.success("✅ 历史记录已更新，已刷新当前解释 / To-do 最近联动！")
+        st.rerun()
+
+    st.divider()
+    st.subheader("🖼️ 历史参考图画廊（同源记录的图片视图）")
+    st.caption("这里不是另一套历史，只是把上面同一批日志里带图的记录单独按时间倒序展示，方便翻图。")
+    img_groups = [
+        (
+            grouped,
+            grouped["图片"] if isinstance(grouped["图片"], list) else ([grouped["图片"]] if grouped["图片"] else []),
+        )
+        for grouped in flat_data
+    ]
+    img_groups = [(grouped, imgs) for grouped, imgs in img_groups if imgs]
+
+    if not img_groups:
+        st.caption("该过滤条件下暂无历史参考图片。")
+        return
+
+    st.caption(f"共 {len(img_groups)} 组参考图，点击展开查看")
+    for grouped, images in img_groups:
+        raw_evt = grouped["事件"]
+        clean_detail = raw_evt
+        if "补充:" in raw_evt:
+            clean_detail = raw_evt.split("补充:")[-1].split("[系统]")[0].strip()
+        elif "】" in raw_evt:
+            clean_detail = raw_evt.split("】")[-1].split("[系统]")[0].strip()
+        label = f"📅 {grouped['日期']} | 📍 {grouped['工序']} | 🧩 {grouped['部件']} — {clean_detail[:30]}{'…' if len(clean_detail) > 30 else ''}"
+        with st.expander(label, expanded=False):
+            cols = st.columns(min(len(images), 4))
+            for idx, img_b64 in enumerate(images):
+                with cols[idx % 4]:
+                    render_image(img_b64, width="stretch")
 
 
 def build_home_project_warning_rows(project_names, pm_view):
@@ -12388,7 +12606,7 @@ elif menu == MENU_PROJECTS:
     st.title("📁 项目空间")
     with st.expander("🧭 项目空间说明", expanded=False):
         st.markdown(
-            "这页专注单个项目：**项目状态总览**负责看整体推进，**项目更新**负责补进展/补历史，专项能力继续跟在当前项目后面。"
+            "这页专注单个项目：**项目状态总览**负责看整体推进，**项目更新**负责补新进展，**项目历史**负责回看/改旧记录，专项能力继续跟在当前项目后面。"
         )
         st.caption("默认心智：先在【今日视图】或【我的待办】确认今天要推进什么，再进入这里处理某一个具体项目。")
         st.caption("这轮先把入口层改成 PRD 结构；专项模块仍保留在当前项目页里，避免你找不到原有能力。")
@@ -12508,11 +12726,11 @@ elif menu == MENU_PROJECTS:
             key=f"project_space_mode_{norm_text(sel_proj)}",
         )
         if project_space_mode == "⚡ 日常推进":
-            st.caption("当前只展示最常用的推进路径：项目状态总览 + 项目更新。")
+            st.caption("当前只展示最常用的推进路径：项目状态总览 + 项目更新；项目历史保留在本页里，按需要展开。")
         elif project_space_mode == "🧩 专项模块":
             st.caption("当前只展示低频但必要的专项维护模块，避免和日常推进混在一起。")
         else:
-            st.caption("当前只展示识别排查和历史治理入口；日常推进信息已先收起。")
+            st.caption("当前只展示识别排查和历史治理入口；当前项目历史也会在这里优先展开。")
 
         with st.expander(
             "📈 项目状态总览",
@@ -13573,6 +13791,29 @@ elif menu == MENU_PROJECTS:
                             st.rerun()
 
         with st.expander(
+            "🕰️ 项目历史（当前项目）",
+            expanded=project_space_section_expanded(project_space_mode, "项目历史"),
+        ):
+            st.caption("这里放当前项目已有历史。适合回看、改旧记录、翻历史参考图；如果要新增过去某一天的信息，仍然回上面的【补历史 / 速记补录】。")
+            history_view_state = build_project_history_view_state(sel_proj)
+            history_comp_options = history_view_state["comps_in_proj"]
+            history_comp_key = f"project_space_history_comp_{norm_text(sel_proj)}"
+            if (history_comp_key not in st.session_state) or (st.session_state.get(history_comp_key) not in history_comp_options):
+                st.session_state[history_comp_key] = "🌐 全部展示"
+            project_space_history_comp = st.selectbox(
+                "📌 查看当前项目的哪个部件历史",
+                history_comp_options,
+                key=history_comp_key,
+            )
+            st.caption("这里只放当前项目的历史编辑与图片回看；如果要看统一事件、待办演进或做跨项目修正，再去【数据维护】。")
+            render_project_history_editor_block(
+                sel_proj,
+                project_space_history_comp,
+                current_pm,
+                key_prefix=f"project_space_history_{norm_text(sel_proj)}",
+            )
+
+        with st.expander(
             "🧩 专项模块",
             expanded=project_space_section_expanded(project_space_mode, "专项模块"),
         ):
@@ -14290,13 +14531,6 @@ elif menu == MENU_MAINTENANCE:
                 })
             st.dataframe(pd.DataFrame(quick_rows), width="stretch", hide_index=True)
 
-    for c_name, comp in db[sel_proj].get("部件列表", {}).items():
-        for log in comp.get("日志流", []):
-            if is_hidden_system_log(log):
-                continue
-            if "_id" not in log:
-                log["_id"] = str(uuid.uuid4())
-
     comps_in_proj = ["🌐 全部展示"] + list(db[sel_proj].get("部件列表", {}).keys())
     if isinstance(pending_history_target, dict) and str(pending_history_target.get("project", "")).strip() == str(sel_proj).strip():
         pending_comp = str(pending_history_target.get("component", "")).strip() or "🌐 全部展示"
@@ -14310,55 +14544,9 @@ elif menu == MENU_MAINTENANCE:
     if ("history_sel_comp" not in st.session_state) or (st.session_state.history_sel_comp not in comps_in_proj):
         st.session_state.history_sel_comp = "🌐 全部展示"
     sel_comp = st.selectbox("📌 筛选特定部件 (默认全览)", comps_in_proj, key="history_sel_comp")
-
-    grouped_logs = {}
-    log_ref_map  = {}
-    log_comp_map = {}
-    for c_name, comp in db[sel_proj].get("部件列表", {}).items():
-        if sel_comp != "🌐 全部展示" and c_name != sel_comp:
-            continue
-        for log in comp.get("日志流", []):
-            if is_hidden_system_log(log):
-                continue
-            log_ref_map[log["_id"]] = log
-            log_comp_map[log["_id"]] = c_name
-            key = (log.get("日期",""), log.get("工序",""), log.get("流转",""), log.get("事件",""), log.get("提审类型",""), log.get("提审结果",""), log.get("提审轮次",""))
-            if key not in grouped_logs:
-                grouped_logs[key] = {"_ids": [log["_id"]], "部件": [c_name], "log": log}
-            else:
-                grouped_logs[key]["_ids"].append(log["_id"])
-                grouped_logs[key]["部件"].append(c_name)
-
-    flat_data = []
-    for g in grouped_logs.values():
-        all_imgs   = []
-        seen_imgs  = set()
-        for log_id in g["_ids"]:
-            if log_id in log_ref_map:
-                for img in log_ref_map[log_id].get("图片", []):
-                    if img and img not in seen_imgs:
-                        seen_imgs.add(img)
-                        all_imgs.append(img)
-                rv_type = normalize_review_type(g["log"].get("提审类型", "(无)") or "(无)")
-        rv_res = str(g["log"].get("提审结果", "(无)") or "(无)")
-        if rv_type == "(无)" and rv_res == "(无)":
-            rv_state = "(无)"
-        elif rv_type != "(无)" and rv_res == "(无)":
-            rv_state = f"{rv_type} / 待补结果"
-        elif rv_type == "(无)" and rv_res != "(无)":
-            rv_state = f"仅结果:{rv_res}"
-        else:
-            rv_state = f"{rv_type} / {rv_res}"
-        flat_data.append({
-            "_ids": g["_ids"], "部件": ", ".join(g["部件"]),
-            "日期": g["log"]["日期"], "工序": g["log"]["工序"],
-            "类型": g["log"]["流转"], "事件": g["log"]["事件"],
-            "提审类型": rv_type,
-            "提审结果": rv_res,
-            "提审状态": rv_state,
-            "提审轮次": g["log"].get("提审轮次", ""),
-            "图片": all_imgs
-        })
+    history_view_state = build_project_history_view_state(sel_proj, sel_comp)
+    flat_data = history_view_state["flat_data"]
+    log_ref_map = history_view_state["log_ref_map"]
 
     st.divider()
     st.subheader("🕒 待办关联历史（关联此项目）")
@@ -14797,90 +14985,12 @@ elif menu == MENU_MAINTENANCE:
         else:
             st.caption("跨项目按日修正工具已改成延迟加载；需要时再勾选，上面的历史页会顺很多。")
 
-        review_ctx = df_logs["事件"].astype(str).str.contains(r"提审|过审|review|打回|驳回|退回|待反馈|2d|3d|二维|三维|实物提审|产品图提审|官图提审|包装提审", case=False, regex=True)
-        mismatch_mask = (df_logs['提审类型'].astype(str) == '(无)') & (df_logs['提审结果'].astype(str).isin(['待反馈', '通过', '打回'])) & (~review_ctx)
-        mismatch_cnt = int(mismatch_mask.sum())
-        if mismatch_cnt > 0:
-            st.warning(f"检测到 {mismatch_cnt} 条记录疑似误判提审（无提审语义但提审结果有值）。建议改为(无)或补齐提审信息。")
-
-        st.markdown("**当前项目历史日志（文字 / 结构编辑区）**")
-        st.info("💡 这里主要用于修改已有历史记录。之前写过的提审补充说明就在“事件 / 提审补充说明”列里改；提审类型/结果/轮次改对应列。支持**双击修改文字**，或选中整行后按 **Delete** 删除。要新增一条过去记录，请回【特定项目操作】里的【补历史 / 速记补录】。")
-        edited_df = st.data_editor(
-            df_logs.drop(columns=["_ids", "图片"]),
-            column_config={
-                "序号":  st.column_config.NumberColumn(disabled=True),
-                "部件":  st.column_config.TextColumn(disabled=True),
-                "工序":  st.column_config.SelectboxColumn("工序", options=STAGES_UNIFIED, required=True),
-                "类型": st.column_config.TextColumn("类型"),
-                "事件": st.column_config.TextColumn("事件 / 提审补充说明"),
-                "提审类型": st.column_config.SelectboxColumn("提审类型", options=REVIEW_TYPE_OPTIONS, required=True),
-                "提审结果": st.column_config.SelectboxColumn("提审结果", options=REVIEW_RESULT_OPTIONS, required=True),
-                "提审状态": st.column_config.TextColumn("提审状态", disabled=True),
-                "提审轮次": st.column_config.NumberColumn("提审轮次", min_value=1, step=1)
-            },
-            num_rows="dynamic", width='stretch'
+        render_project_history_editor_block(
+            sel_proj,
+            sel_comp,
+            current_pm,
+            key_prefix=f"maintenance_history_{norm_text(sel_proj)}",
         )
-
-        if st.button("💾 确认并覆盖保存历史记录", type="primary"):
-            new_logs_by_comp = {}
-            for i, row in edited_df.iterrows():
-                if pd.isna(row.get("部件")) or str(row.get("部件")).strip() in ["", "None", "nan"]:
-                    continue
-                c_list = [x.strip() for x in str(row["部件"]).split(",")]
-                for c in c_list:
-                    if not c: c = "全局进度"
-                    if c not in new_logs_by_comp:
-                        new_logs_by_comp[c] = []
-                    old_ids    = df_logs.at[i, "_ids"] if i in df_logs.index else []
-                    old_images = log_ref_map[old_ids[0]].get("图片", []) if old_ids and old_ids[0] in log_ref_map else []
-                    if not isinstance(old_images, list):
-                        old_images = [old_images] if old_images else []
-                    new_logs_by_comp[c].append({
-                        "_id": str(uuid.uuid4()),
-                        "日期": str(row["日期"]), "工序": str(row["工序"]),
-                        "流转": str(row["类型"]), "事件": str(row["事件"]),
-                        "提审类型": normalize_review_type(row.get("提审类型", "(无)")),
-                        "提审结果": str(row.get("提审结果", "(无)")),
-                        "提审轮次": normalize_review_round(row.get("提审轮次", "")),
-                        "图片": old_images
-                    })
-            comps_in_scope = ([sel_comp] if sel_comp != "🌐 全部展示"
-                              else list(db[sel_proj].get("部件列表", {}).keys()))
-            for c in comps_in_scope:
-                if c in db[sel_proj].get("部件列表", {}):
-                    db[sel_proj]["部件列表"][c]["日志流"] = sorted(
-                        new_logs_by_comp.get(c, []), key=lambda x: x.get("日期", "")
-                    )
-            sync_save_db(sel_proj)
-            if append_history_refresh_standard_event(sel_proj, actor=current_pm if current_pm != "所有人" else "系统"):
-                sync_save_db("系统配置")
-            st.success("✅ 历史记录已更新，已刷新当前解释 / To-do 最近联动！")
-            st.rerun()
-
-        st.divider()
-        st.subheader("🖼️ 历史参考图画廊（同源记录的图片视图）")
-        st.caption("这里不是另一套历史，只是把上面同一批日志里带图的记录单独按时间倒序展示，方便翻图。")
-        has_images = False
-        img_groups = [(g, g["图片"] if isinstance(g["图片"], list) else ([g["图片"]] if g["图片"] else [])) 
-                      for g in flat_data]
-        img_groups = [(g, imgs) for g, imgs in img_groups if imgs]
-        
-        if not img_groups:
-            st.caption("该过滤条件下暂无历史参考图片。")
-        else:
-            has_images = True
-            st.caption(f"共 {len(img_groups)} 组参考图，点击展开查看")
-            for g_data, images in img_groups:
-                raw_evt = g_data['事件']
-                clean_detail = raw_evt
-                if "补充:" in raw_evt: clean_detail = raw_evt.split("补充:")[-1].split("[系统]")[0].strip()
-                elif "】" in raw_evt: clean_detail = raw_evt.split("】")[-1].split("[系统]")[0].strip()
-                label = f"📅 {g_data['日期']} | 📍 {g_data['工序']} | 🧩 {g_data['部件']} — {clean_detail[:30]}{'…' if len(clean_detail)>30 else ''}"
-                with st.expander(label, expanded=False):
-                    cols = st.columns(min(len(images), 4))
-                    for i, img_b64 in enumerate(images):
-                        with cols[i % 4]:
-                            render_image(img_b64, width='stretch')
     else:
         st.info("该过滤条件下暂无记录。")
 
