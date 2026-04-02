@@ -7495,12 +7495,49 @@ def render_pm_todo_manager(valid_projs, current_pm):
         with q2:
             st.caption("上方快速新增不会直接落库；你可以连续加入多条，最后在底部一个保存键里统一提交。")
 
+        def handle_queue_click(editor_snapshot=None):
+            if (todo_new_proj_option in todo_ref_projs) and (not str(new_proj_name).strip()):
+                st.warning("你选择了【新增项目】，请先填写项目名称。")
+                return False
+            if not str(todo_title).strip():
+                st.warning("请先填写任务内容。")
+                return False
+
+            add_result = build_todo_quick_add_entry(
+                todo_title,
+                todo_cpddl,
+                resolved_ref_proj_list,
+                people_input,
+                todo_scope,
+                current_pm,
+                valid_projs,
+                new_proj_owner=new_proj_owner,
+                new_proj_ratio=new_proj_ratio,
+                new_proj_ip_owner=new_proj_ip_owner,
+                today=today,
+                apply_side_effects=False,
+            )
+            if add_result.get("error"):
+                st.warning(str(add_result.get("error", "")).strip() or "这条待办暂时没能加入列表。")
+                return False
+
+            if isinstance(editor_snapshot, list):
+                st.session_state["todo_editor_pending_snapshot"] = editor_snapshot
+            todo_pending_drafts.append(add_result["todo"])
+            set_todo_pending_drafts(st.session_state, todo_pending_drafts)
+            clear_todo_quick_add_form_state(st.session_state, preserve_scope=True)
+            st.session_state["todo_queue_notice"] = "已加入待保存列表，可继续录下一条。"
+            st.rerun()
+            return True
+
     if st.session_state.get("todo_queue_notice"):
         st.toast(str(st.session_state.get("todo_queue_notice", "")).strip() or "已加入待保存列表。")
         st.session_state.pop("todo_queue_notice", None)
 
     st.markdown("##### 待办表格")
     if not todo_list:
+        if queue_clicked:
+            handle_queue_click()
         st.info("当前视角下暂无待办。")
         return todo_list
 
@@ -7643,34 +7680,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
     )
 
     if queue_clicked:
-        if (todo_new_proj_option in todo_ref_projs) and (not str(new_proj_name).strip()):
-            st.warning("你选择了【新增项目】，请先填写项目名称。")
-        elif not str(todo_title).strip():
-            st.warning("请先填写任务内容。")
-        else:
-            add_result = build_todo_quick_add_entry(
-                todo_title,
-                todo_cpddl,
-                resolved_ref_proj_list,
-                people_input,
-                todo_scope,
-                current_pm,
-                valid_projs,
-                new_proj_owner=new_proj_owner,
-                new_proj_ratio=new_proj_ratio,
-                new_proj_ip_owner=new_proj_ip_owner,
-                today=today,
-                apply_side_effects=False,
-            )
-            if add_result.get("error"):
-                st.warning(str(add_result.get("error", "")).strip() or "这条待办暂时没能加入列表。")
-            else:
-                st.session_state["todo_editor_pending_snapshot"] = edited_df.to_dict("records")
-                todo_pending_drafts.append(add_result["todo"])
-                set_todo_pending_drafts(st.session_state, todo_pending_drafts)
-                clear_todo_quick_add_form_state(st.session_state, preserve_scope=True)
-                st.session_state["todo_queue_notice"] = "已加入待保存列表，可继续录下一条。"
-                st.rerun()
+        handle_queue_click(edited_df.to_dict("records"))
 
     if st.button("💾 保存待办变更（含新增）", key="todo_save_global"):
         quick_add_used = bool(
