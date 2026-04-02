@@ -3554,14 +3554,99 @@ def build_todo_scope_options(current_pm):
     return list(dict.fromkeys([x for x in scope_vals if x and x != "所有人"]))
 
 
-def build_todo_manager_visible_items(todo_all, current_pm):
+def build_todo_manager_visible_items(todo_all, current_pm, draft_items=None):
     visible = []
+    draft_visible = []
+    for td in (draft_items or []):
+        if not isinstance(td, dict):
+            continue
+        draft_visible.append(td)
     for td in (todo_all or []):
         if not isinstance(td, dict):
             continue
-        if bool(td.get("_待保存新增")) or todo_visible_for_view(td, current_pm):
+        if bool(td.get("_待保存新增")):
+            draft_visible.append(td)
+            continue
+        if todo_visible_for_view(td, current_pm):
             visible.append(td)
-    return visible
+    return list(draft_visible) + visible
+
+
+def get_todo_pending_drafts(state_obj):
+    state = state_obj if hasattr(state_obj, "get") else {}
+    drafts = state.get("todo_pending_drafts", [])
+    if not isinstance(drafts, list):
+        drafts = []
+        try:
+            state["todo_pending_drafts"] = drafts
+        except Exception:
+            pass
+    cleaned = []
+    for td in drafts:
+        if not isinstance(td, dict):
+            continue
+        td_copy = dict(td)
+        if not bool(td_copy.get("_待保存新增")):
+            td_copy["_待保存新增"] = True
+        if not str(td_copy.get("_id", "")).strip():
+            td_copy["_id"] = uuid.uuid4().hex[:10]
+        cleaned.append(td_copy)
+    if cleaned != drafts:
+        try:
+            state["todo_pending_drafts"] = cleaned
+        except Exception:
+            pass
+    return cleaned
+
+
+def set_todo_pending_drafts(state_obj, draft_items):
+    state = state_obj if hasattr(state_obj, "get") else {}
+    cleaned = []
+    for td in (draft_items or []):
+        if not isinstance(td, dict):
+            continue
+        td_copy = dict(td)
+        td_copy["_待保存新增"] = True
+        if not str(td_copy.get("_id", "")).strip():
+            td_copy["_id"] = uuid.uuid4().hex[:10]
+        cleaned.append(td_copy)
+    try:
+        state["todo_pending_drafts"] = cleaned
+    except Exception:
+        pass
+    return cleaned
+
+
+def apply_todo_editor_pending_snapshot(state_obj, row_items):
+    state = state_obj if hasattr(state_obj, "get") else {}
+    snapshot_rows = state.get("todo_editor_pending_snapshot")
+    if not isinstance(snapshot_rows, list):
+        return row_items
+
+    editable_fields = ["完成", "任务", "CP/DDL", "关联项目", "关联人员", "所属视角", "删除"]
+    snapshot_map = {}
+    for row in snapshot_rows:
+        if not isinstance(row, dict):
+            continue
+        row_id = str(row.get("_id", "")).strip()
+        if row_id:
+            snapshot_map[row_id] = row
+
+    merged_rows = []
+    for row in (row_items or []):
+        row_copy = dict(row)
+        snap = snapshot_map.get(str(row_copy.get("_id", "")).strip())
+        if isinstance(snap, dict):
+            for field_name in editable_fields:
+                if field_name in snap:
+                    row_copy[field_name] = snap[field_name]
+        merged_rows.append(row_copy)
+
+    try:
+        state.pop("todo_editor_pending_snapshot", None)
+    except Exception:
+        pass
+    return merged_rows
 
 
 def todo_manager_display_sort_key(td, today=None):
@@ -7085,6 +7170,17 @@ def render_pm_todo_manager(valid_projs, current_pm):
     st.caption("这里专注提醒、DDL 和人员协作；过去日期会自动按已完成入历史，未来日期保留为待办。")
     cfg = db.setdefault("系统配置", {})
     todo_all = cfg.setdefault("PM_TODO_LIST", [])
+    todo_pending_drafts = get_todo_pending_drafts(st.session_state)
+    stale_live_drafts = [dict(td) for td in todo_all if isinstance(td, dict) and bool(td.get("_待保存新增"))]
+    if stale_live_drafts:
+        merged_draft_map = {str(td.get("_id", "")).strip(): td for td in todo_pending_drafts if isinstance(td, dict)}
+        for td in stale_live_drafts:
+            merged_draft_map[str(td.get("_id", "")).strip()] = td
+        todo_pending_drafts = set_todo_pending_drafts(st.session_state, list(merged_draft_map.values()))
+        todo_all[:] = [td for td in todo_all if not (isinstance(td, dict) and bool(td.get("_待保存新增")))]
+        cfg["PM_TODO_LIST"] = todo_all
+        persist_project_scope_batch([], recompute_projects=False)
+        st.session_state["todo_queue_notice"] = f"已恢复 {len(stale_live_drafts)} 条待保存草稿，可继续改表格后再统一保存。"
     apply_todo_quick_add_form_state_clear_request(st.session_state)
 
     todo_new_proj_option = "➕ 新增项目..."
@@ -7201,7 +7297,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
         if scope_hint and scope_hint not in scope_options:
             scope_options.append(scope_hint)
 
-    todo_list = build_todo_manager_visible_items(todo_all, current_pm)
+    todo_list = build_todo_manager_visible_items(todo_all, current_pm, draft_items=todo_pending_drafts)
     pending = [x for x in todo_list if not x.get("完成")]
     overdue = [x for x in pending if todo_due_date(x) and (todo_due_date(x) - today).days < 0]
     near_due = [x for x in pending if todo_due_date(x) and 0 <= (todo_due_date(x) - today).days <= 3]
@@ -7216,10 +7312,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
 
     with st.container():
         st.markdown("##### 快速新增（直接加到下方表格）")
-        queued_draft_count = len([
-            td for td in todo_all
-            if isinstance(td, dict) and bool(td.get("_待保存新增"))
-        ])
+        queued_draft_count = len([td for td in todo_pending_drafts if isinstance(td, dict)])
         if queued_draft_count:
             st.caption(f"当前有 {queued_draft_count} 条待新增草稿，已进入下方表格，等你最后统一保存。")
 
@@ -7401,34 +7494,6 @@ def render_pm_todo_manager(valid_projs, current_pm):
             queue_clicked = st.button("➕ 加入待保存列表", key="todo_queue_global", type="secondary")
         with q2:
             st.caption("上方快速新增不会直接落库；你可以连续加入多条，最后在底部一个保存键里统一提交。")
-        if queue_clicked:
-            if (todo_new_proj_option in todo_ref_projs) and (not str(new_proj_name).strip()):
-                st.warning("你选择了【新增项目】，请先填写项目名称。")
-            elif not str(todo_title).strip():
-                st.warning("请先填写任务内容。")
-            else:
-                add_result = build_todo_quick_add_entry(
-                    todo_title,
-                    todo_cpddl,
-                    resolved_ref_proj_list,
-                    people_input,
-                    todo_scope,
-                    current_pm,
-                    valid_projs,
-                    new_proj_owner=new_proj_owner,
-                    new_proj_ratio=new_proj_ratio,
-                    new_proj_ip_owner=new_proj_ip_owner,
-                    today=today,
-                    apply_side_effects=False,
-                )
-                if add_result.get("error"):
-                    st.warning(str(add_result.get("error", "")).strip() or "这条待办暂时没能加入列表。")
-                else:
-                    todo_all.append(add_result["todo"])
-                    cfg["PM_TODO_LIST"] = todo_all
-                    clear_todo_quick_add_form_state(st.session_state, preserve_scope=True)
-                    st.session_state["todo_queue_notice"] = "已加入待保存列表，可继续录下一条。"
-                    st.rerun()
 
     if st.session_state.get("todo_queue_notice"):
         st.toast(str(st.session_state.get("todo_queue_notice", "")).strip() or "已加入待保存列表。")
@@ -7537,6 +7602,8 @@ def render_pm_todo_manager(valid_projs, current_pm):
             row_obj["联动状态"] = todo_link_status_text(td)
         rows.append(row_obj)
 
+    rows = apply_todo_editor_pending_snapshot(st.session_state, rows)
+
     editor_df = pd.DataFrame(rows)
 
     if load_todo_diagnostics:
@@ -7575,6 +7642,36 @@ def render_pm_todo_manager(valid_projs, current_pm):
         key=build_todo_editor_widget_key(sorted_items),
     )
 
+    if queue_clicked:
+        if (todo_new_proj_option in todo_ref_projs) and (not str(new_proj_name).strip()):
+            st.warning("你选择了【新增项目】，请先填写项目名称。")
+        elif not str(todo_title).strip():
+            st.warning("请先填写任务内容。")
+        else:
+            add_result = build_todo_quick_add_entry(
+                todo_title,
+                todo_cpddl,
+                resolved_ref_proj_list,
+                people_input,
+                todo_scope,
+                current_pm,
+                valid_projs,
+                new_proj_owner=new_proj_owner,
+                new_proj_ratio=new_proj_ratio,
+                new_proj_ip_owner=new_proj_ip_owner,
+                today=today,
+                apply_side_effects=False,
+            )
+            if add_result.get("error"):
+                st.warning(str(add_result.get("error", "")).strip() or "这条待办暂时没能加入列表。")
+            else:
+                st.session_state["todo_editor_pending_snapshot"] = edited_df.to_dict("records")
+                todo_pending_drafts.append(add_result["todo"])
+                set_todo_pending_drafts(st.session_state, todo_pending_drafts)
+                clear_todo_quick_add_form_state(st.session_state, preserve_scope=True)
+                st.session_state["todo_queue_notice"] = "已加入待保存列表，可继续录下一条。"
+                st.rerun()
+
     if st.button("💾 保存待办变更（含新增）", key="todo_save_global"):
         quick_add_used = bool(
             str(todo_title).strip()
@@ -7584,14 +7681,21 @@ def render_pm_todo_manager(valid_projs, current_pm):
             or (todo_new_proj_option in todo_ref_projs)
             or str(todo_new_person_token).strip()
         )
-        id_map = {str(td.get("_id", "")): td for td in todo_all}
+        todo_pending_drafts = get_todo_pending_drafts(st.session_state)
+        live_id_map = {str(td.get("_id", "")): td for td in todo_all}
+        draft_id_map = {str(td.get("_id", "")): td for td in todo_pending_drafts}
+        id_map = {}
+        id_map.update(live_id_map)
+        id_map.update(draft_id_map)
         delete_ids = set()
+        draft_delete_ids = set()
         skipped = 0
         project_history_updates = set()
         created_projects = set()
         removed_todo_events = 0
         quick_add_warning = ""
         quick_add_added = 0
+        saved_draft_ids = set()
         if quick_add_used:
             quick_add_warning = "快速新增区还有未加入表格的内容；先点【➕ 加入待保存列表】，再统一保存。"
 
@@ -7601,7 +7705,10 @@ def render_pm_todo_manager(valid_projs, current_pm):
             if not td:
                 continue
             if bool(row.get("删除", False)):
-                delete_ids.add(rid)
+                if rid in draft_id_map:
+                    draft_delete_ids.add(rid)
+                else:
+                    delete_ids.add(rid)
                 continue
 
             title = str(row.get("任务", "")).strip()
@@ -7746,9 +7853,25 @@ def render_pm_todo_manager(valid_projs, current_pm):
                 if is_pending_create:
                     quick_add_added += 1
                     td.pop("_待保存新增", None)
+                    saved_draft_ids.add(rid)
 
-        todo_all[:] = [x for x in todo_all if str(x.get("_id", "")).strip() not in delete_ids and str(x.get("任务", "")).strip()]
+        live_keep = [
+            x for x in todo_all
+            if str(x.get("_id", "")).strip() not in delete_ids and str(x.get("任务", "")).strip()
+        ]
+        saved_new_rows = [
+            draft_id_map[draft_id]
+            for draft_id in [str(td.get("_id", "")).strip() for td in todo_pending_drafts]
+            if draft_id in saved_draft_ids and draft_id in draft_id_map and str(draft_id_map[draft_id].get("任务", "")).strip()
+        ]
+        todo_all[:] = live_keep + saved_new_rows
         cfg["PM_TODO_LIST"] = todo_all
+        remaining_drafts = [
+            td for td in todo_pending_drafts
+            if str(td.get("_id", "")).strip() not in draft_delete_ids
+            and str(td.get("_id", "")).strip() not in saved_draft_ids
+        ]
+        set_todo_pending_drafts(st.session_state, remaining_drafts)
         if delete_ids:
             removed_todo_events = purge_deleted_todo_standard_events(delete_ids)
 
@@ -7757,7 +7880,8 @@ def render_pm_todo_manager(valid_projs, current_pm):
 
         if quick_add_warning:
             st.warning(quick_add_warning)
-        success_msg = f"待办已保存：新增 {quick_add_added} 条，保留 {len(todo_all)} 条，删除 {len(delete_ids)} 条，跳过 {skipped} 条空任务。"
+        total_deleted = len(delete_ids) + len(draft_delete_ids)
+        success_msg = f"待办已保存：新增 {quick_add_added} 条，保留 {len(todo_all)} 条，删除 {total_deleted} 条，跳过 {skipped} 条空任务。"
         if removed_todo_events:
             success_msg += f" 已同步清理 {removed_todo_events} 条旧待办提醒事件。"
         if quick_add_added:
