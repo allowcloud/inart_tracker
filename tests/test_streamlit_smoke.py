@@ -112,6 +112,58 @@ class StreamlitSmokeTest(unittest.TestCase):
         )
         self.assertIn("HOME_DASHBOARD_JUMP_OK", proc.stdout)
 
+    def test_fastlog_renders_without_exceptions(self) -> None:
+        script = textwrap.dedent(
+            f"""
+            from pathlib import Path
+            from streamlit.testing.v1 import AppTest
+
+            app_path = Path(r"{APP_PATH}")
+            at = AppTest.from_file(str(app_path), default_timeout=30)
+            at.run()
+            if at.exception:
+                raise SystemExit("initial run exceptions: " + " | ".join(str(x.value) for x in at.exception))
+
+            nav_radio = None
+            for r in at.radio:
+                label = str(r.label or "")
+                options = [str(o) for o in r.options]
+                if "功能导航" in label or any("速记" in str(o) for o in options):
+                    nav_radio = r
+                    break
+            if nav_radio is None:
+                raise SystemExit("navigation radio not found")
+
+            fastlog_option = next((o for o in nav_radio.options if "速记" in str(o)), None)
+            if fastlog_option is None:
+                raise SystemExit("fastlog option not found")
+
+            nav_radio.set_value(fastlog_option)
+            at.run()
+            if at.exception:
+                raise SystemExit("fastlog exceptions: " + " | ".join(str(x.value) for x in at.exception))
+
+            print("FASTLOG_OK")
+            """
+        )
+
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=REPO_ROOT,
+            env={**os.environ, "INART_ALLOW_MEMORY_DB": "1"},
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+
+        self.assertEqual(
+            proc.returncode,
+            0,
+            f"stdout:\n{proc.stdout}\n\nstderr:\n{proc.stderr}",
+        )
+        self.assertIn("FASTLOG_OK", proc.stdout)
+
     def test_todo_queue_works_when_list_is_initially_empty(self) -> None:
         script = textwrap.dedent(
             f"""
