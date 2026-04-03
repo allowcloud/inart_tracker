@@ -4171,6 +4171,32 @@ def safe_infer_todo_people_bundle(td, options_bundle=None):
             pass
     return infer_fn(td)
 
+
+def extend_role_person_bundle(options_bundle, added_people_tokens):
+    src_bundle = options_bundle if isinstance(options_bundle, dict) else {}
+    labels = [str(x).strip() for x in (src_bundle.get("labels", []) or []) if str(x).strip()]
+    raw_name_map = src_bundle.get("name_map", {}) or {}
+    name_map = {}
+    for key, info in raw_name_map.items():
+        key_txt = str(key).strip()
+        if not key_txt:
+            continue
+        info_obj = info if isinstance(info, dict) else {}
+        name_map[key_txt] = {
+            "display": str(info_obj.get("display", "")).strip(),
+            "labels": [str(x).strip() for x in (info_obj.get("labels", []) or []) if str(x).strip()],
+        }
+
+    for token in added_people_tokens or []:
+        role, person = parse_role_person_label(token)
+        _append_role_person_to_maps(role, person, labels, name_map)
+
+    labels = sorted(
+        list(dict.fromkeys([x for x in labels if x])),
+        key=lambda x: (x.split("-", 1)[0] if "-" in x else "综合", x.split("-", 1)[-1]),
+    )
+    return {"labels": labels, "name_map": name_map}
+
 def todo_link_status_text(td):
     td_obj = td or {}
     mod = str(td_obj.get("最近联动模块", "")).strip()
@@ -7831,7 +7857,9 @@ def render_pm_todo_manager(valid_projs, current_pm):
             people_bundle = safe_infer_todo_people_bundle(people_td, options_bundle=role_person_bundle)
             if not people_raw and people_bundle["labels"]:
                 people_raw = ", ".join(people_bundle["labels"])
-            register_extra_role_people(split_people_text(people_raw))
+            added_people = register_extra_role_people(split_people_text(people_raw))
+            if added_people:
+                role_person_bundle = extend_role_person_bundle(role_person_bundle, added_people)
 
             for p_name in proj_list:
                 if p_name and p_name not in db:
