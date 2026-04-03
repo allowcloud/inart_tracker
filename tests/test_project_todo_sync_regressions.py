@@ -2055,6 +2055,22 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         self.assertEqual(merged[1]["任务"], "第二条")
         self.assertNotIn("todo_editor_pending_snapshot", state)
 
+    def test_merge_todo_pending_drafts_keeps_multiple_stale_rows_without_ids(self) -> None:
+        ns = load_app_functions("merge_todo_pending_drafts")
+
+        merged = ns.merge_todo_pending_drafts(
+            [{"_id": "draft_live", "任务": "已有草稿", "_待保存新增": True}],
+            [
+                {"任务": "脏草稿A", "_待保存新增": True},
+                {"任务": "脏草稿B", "_待保存新增": True},
+            ],
+        )
+
+        self.assertEqual(len(merged), 3)
+        self.assertEqual([row["任务"] for row in merged], ["已有草稿", "脏草稿A", "脏草稿B"])
+        self.assertTrue(all(str(row.get("_id", "")).strip() for row in merged))
+        self.assertEqual(len({str(row.get("_id", "")).strip() for row in merged}), 3)
+
     def test_build_home_project_warning_rows_uses_explanation_date_and_dynamic(self) -> None:
         ns = load_app_functions("build_home_project_warning_rows")
         globals_map = ns.build_home_project_warning_rows.__globals__

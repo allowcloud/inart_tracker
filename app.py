@@ -3617,6 +3617,27 @@ def set_todo_pending_drafts(state_obj, draft_items):
     return cleaned
 
 
+def merge_todo_pending_drafts(existing_drafts, stale_live_drafts):
+    ordered_ids = []
+    merged_map = {}
+
+    for draft_group in [existing_drafts or [], stale_live_drafts or []]:
+        for td in draft_group:
+            if not isinstance(td, dict):
+                continue
+            td_copy = dict(td)
+            td_copy["_待保存新增"] = True
+            draft_id = str(td_copy.get("_id", "")).strip()
+            if not draft_id:
+                draft_id = uuid.uuid4().hex[:10]
+                td_copy["_id"] = draft_id
+            if draft_id not in merged_map:
+                ordered_ids.append(draft_id)
+            merged_map[draft_id] = td_copy
+
+    return [merged_map[draft_id] for draft_id in ordered_ids if draft_id in merged_map]
+
+
 def apply_todo_editor_pending_snapshot(state_obj, row_items):
     state = state_obj if hasattr(state_obj, "get") else {}
     snapshot_rows = state.get("todo_editor_pending_snapshot")
@@ -7173,10 +7194,10 @@ def render_pm_todo_manager(valid_projs, current_pm):
     todo_pending_drafts = get_todo_pending_drafts(st.session_state)
     stale_live_drafts = [dict(td) for td in todo_all if isinstance(td, dict) and bool(td.get("_待保存新增"))]
     if stale_live_drafts:
-        merged_draft_map = {str(td.get("_id", "")).strip(): td for td in todo_pending_drafts if isinstance(td, dict)}
-        for td in stale_live_drafts:
-            merged_draft_map[str(td.get("_id", "")).strip()] = td
-        todo_pending_drafts = set_todo_pending_drafts(st.session_state, list(merged_draft_map.values()))
+        todo_pending_drafts = set_todo_pending_drafts(
+            st.session_state,
+            merge_todo_pending_drafts(todo_pending_drafts, stale_live_drafts),
+        )
         todo_all[:] = [td for td in todo_all if not (isinstance(td, dict) and bool(td.get("_待保存新增")))]
         cfg["PM_TODO_LIST"] = todo_all
         persist_project_scope_batch([], recompute_projects=False)
