@@ -222,15 +222,26 @@ def detect_high_similarity_project_pairs(project_names):
     return rows
 
 
-def build_project_attention_map(project_names):
-    names = [str(x).strip() for x in (project_names or []) if str(x).strip() and str(x).strip() != "系统配置"]
+@lru_cache(maxsize=64)
+def _build_project_attention_map_cached(project_names_key):
+    names = [str(x).strip() for x in (project_names_key or ()) if str(x).strip() and str(x).strip() != "系统配置"]
     attention = {}
     for row in detect_project_name_noise_pairs(names):
         attention.setdefault(str(row["异常项目"]).strip(), []).append("命名噪音")
     for row in detect_high_similarity_project_pairs(names):
         attention.setdefault(str(row["异常项目"]).strip(), []).append("疑似重复")
         attention.setdefault(str(row["建议并入"]).strip(), []).append("疑似重复")
-    return {k: list(dict.fromkeys(v)) for k, v in attention.items()}
+    return {k: tuple(dict.fromkeys(v)) for k, v in attention.items()}
+
+
+def build_project_attention_map(project_names):
+    names = tuple(
+        str(x).strip()
+        for x in (project_names or [])
+        if str(x).strip() and str(x).strip() != "系统配置"
+    )
+    cached = _build_project_attention_map_cached(names)
+    return {k: list(v) for k, v in cached.items()}
 
 
 def format_project_option_label(project_name, attention_map=None):
@@ -4103,7 +4114,7 @@ def infer_todo_target_hint(td, valid_projs):
     return " / ".join(out)
 
 
-def infer_todo_form_defaults(task_text, cpddl_text, valid_projs, current_people_text="", include_people=True):
+def infer_todo_form_defaults(task_text, cpddl_text, valid_projs, current_people_text="", include_people=True, role_person_bundle=None):
     task_raw = str(task_text or "").strip()
     cpddl_raw = str(cpddl_text or "").strip()
     merged_text = f"{task_raw} {cpddl_raw}".strip()
@@ -4127,7 +4138,14 @@ def infer_todo_form_defaults(task_text, cpddl_text, valid_projs, current_people_
     people_bundle = {"labels": [], "ambiguous": [], "unknown": []}
     inferred_people = []
     if include_people:
-        people_bundle = infer_todo_people_bundle(td_probe)
+        safe_infer_fn = globals().get("safe_infer_todo_people_bundle")
+        if callable(safe_infer_fn):
+            people_bundle = safe_infer_fn(td_probe, options_bundle=role_person_bundle)
+        else:
+            try:
+                people_bundle = infer_todo_people_bundle(td_probe, options_bundle=role_person_bundle)
+            except TypeError:
+                people_bundle = infer_todo_people_bundle(td_probe)
         inferred_people = [
             x for x in people_bundle.get("labels", [])
             if x and x != TODO_NEW_PERSON_OPTION
@@ -4140,6 +4158,18 @@ def infer_todo_form_defaults(task_text, cpddl_text, valid_projs, current_people_
         "people": inferred_people,
         "people_bundle": people_bundle,
     }
+
+
+def safe_infer_todo_people_bundle(td, options_bundle=None):
+    infer_fn = globals().get("infer_todo_people_bundle")
+    if not callable(infer_fn):
+        return {"labels": [], "ambiguous": [], "unknown": []}
+    if options_bundle is not None:
+        try:
+            return infer_fn(td, options_bundle=options_bundle)
+        except TypeError:
+            pass
+    return infer_fn(td)
 
 def todo_link_status_text(td):
     td_obj = td or {}
@@ -4697,9 +4727,21 @@ def normalize_people_text(raw_text):
     return ", ".join(uniq)
 
 
-def infer_todo_people_bundle(td):
+def infer_todo_people_bundle(td, options_bundle=None):
     td_obj = td or {}
-    labels, name_map = collect_role_person_options()
+    if isinstance(options_bundle, dict):
+        labels = list(options_bundle.get("labels", []) or [])
+        raw_name_map = options_bundle.get("name_map", {}) or {}
+        name_map = {
+            str(k): {
+                "display": str((v or {}).get("display", "")).strip(),
+                "labels": list((v or {}).get("labels", []) or []),
+            }
+            for k, v in raw_name_map.items()
+            if str(k).strip()
+        }
+    else:
+        labels, name_map = collect_role_person_options()
     label_map = {norm_text(label): label for label in labels}
     matched, ambiguous, unknown = [], [], []
 
@@ -4774,8 +4816,15 @@ def infer_todo_people_bundle(td):
     return {"labels": matched, "ambiguous": ambiguous, "unknown": unknown}
 
 
-def format_todo_people_hint(td):
-    bundle = infer_todo_people_bundle(td)
+def format_todo_people_hint(td, options_bundle=None):
+    safe_infer_fn = globals().get("safe_infer_todo_people_bundle")
+    if callable(safe_infer_fn):
+        bundle = safe_infer_fn(td, options_bundle=options_bundle)
+    else:
+        try:
+            bundle = infer_todo_people_bundle(td, options_bundle=options_bundle)
+        except TypeError:
+            bundle = infer_todo_people_bundle(td)
     notes = []
     if bundle["labels"]:
         notes.append("已识别：" + " / ".join(bundle["labels"][:4]))
@@ -7212,7 +7261,8 @@ def render_pm_todo_manager(valid_projs, current_pm):
     todo_proj_options_create = valid_projs + [todo_new_proj_option]
 
     scope_options = build_todo_scope_options(current_pm)
-    role_person_options, _ = collect_role_person_options()
+    role_person_options, role_person_name_map = collect_role_person_options()
+    role_person_bundle = {"labels": role_person_options, "name_map": role_person_name_map}
     role_person_options_create = role_person_options + [todo_new_person_option]
     owner_pool = list(dict.fromkeys([
         "Mo", "越", "袁",
@@ -7339,185 +7389,191 @@ def render_pm_todo_manager(valid_projs, current_pm):
         queued_draft_count = len([td for td in todo_pending_drafts if isinstance(td, dict)])
         if queued_draft_count:
             st.caption(f"当前有 {queued_draft_count} 条待新增草稿，已进入下方表格，等你最后统一保存。")
-
-        todo_title_state = str(st.session_state.get("todo_title_global", "")).strip()
-        todo_cpddl_state = str(st.session_state.get("todo_cpddl_global", "")).strip()
-        todo_proj_state = st.session_state.get("todo_ref_global_multi", [])
-        if not isinstance(todo_proj_state, list):
-            todo_proj_state = list(todo_proj_state) if todo_proj_state else []
-        todo_people_state = st.session_state.get("todo_people_global", [])
-        if not isinstance(todo_people_state, list):
-            todo_people_state = list(todo_people_state) if todo_people_state else []
-        todo_people_state_clean = [x for x in todo_people_state if x and x != todo_new_person_option]
-        auto_sig = "||".join([
-            todo_title_state,
-            todo_cpddl_state,
-            ",".join(todo_proj_state),
-            ",".join(todo_people_state_clean),
-        ])
-        if st.session_state.get("todo_global_autofill_sig", "") != auto_sig:
-            todo_auto = infer_todo_form_defaults(
+        preview_clicked = False
+        queue_clicked = False
+        with st.form("todo_quick_add_form", clear_on_submit=False):
+            todo_title_state = str(st.session_state.get("todo_title_global", "")).strip()
+            todo_cpddl_state = str(st.session_state.get("todo_cpddl_global", "")).strip()
+            todo_proj_state = st.session_state.get("todo_ref_global_multi", [])
+            if not isinstance(todo_proj_state, list):
+                todo_proj_state = list(todo_proj_state) if todo_proj_state else []
+            todo_people_state = st.session_state.get("todo_people_global", [])
+            if not isinstance(todo_people_state, list):
+                todo_people_state = list(todo_people_state) if todo_people_state else []
+            todo_people_state_clean = [x for x in todo_people_state if x and x != todo_new_person_option]
+            auto_sig = "||".join([
                 todo_title_state,
                 todo_cpddl_state,
-                valid_projs,
-                current_people_text=", ".join(todo_people_state_clean),
-                include_people=False,
-            )
-            st.session_state["todo_global_autofill_preview"] = todo_auto
-            if todo_title_state:
-                if (not todo_cpddl_state) and todo_auto.get("cpddl"):
-                    st.session_state["todo_cpddl_global"] = todo_auto["cpddl"]
-                if (not todo_proj_state) and todo_auto.get("projects"):
-                    st.session_state["todo_ref_global_multi"] = list(todo_auto["projects"])
-                if (not todo_people_state_clean) and todo_auto.get("people"):
-                    st.session_state["todo_people_global"] = list(todo_auto["people"])
-            st.session_state["todo_global_autofill_sig"] = "||".join([
-                todo_title_state,
-                str(st.session_state.get("todo_cpddl_global", "")).strip(),
-                ",".join(st.session_state.get("todo_ref_global_multi", []) if isinstance(st.session_state.get("todo_ref_global_multi", []), list) else []),
-                ",".join([x for x in (st.session_state.get("todo_people_global", []) if isinstance(st.session_state.get("todo_people_global", []), list) else []) if x and x != todo_new_person_option]),
+                ",".join(todo_proj_state),
+                ",".join(todo_people_state_clean),
             ])
+            if st.session_state.get("todo_global_autofill_sig", "") != auto_sig:
+                todo_auto = infer_todo_form_defaults(
+                    todo_title_state,
+                    todo_cpddl_state,
+                    valid_projs,
+                    current_people_text=", ".join(todo_people_state_clean),
+                    include_people=False,
+                    role_person_bundle=role_person_bundle,
+                )
+                st.session_state["todo_global_autofill_preview"] = todo_auto
+                if todo_title_state:
+                    if (not todo_cpddl_state) and todo_auto.get("cpddl"):
+                        st.session_state["todo_cpddl_global"] = todo_auto["cpddl"]
+                    if (not todo_proj_state) and todo_auto.get("projects"):
+                        st.session_state["todo_ref_global_multi"] = list(todo_auto["projects"])
+                    if (not todo_people_state_clean) and todo_auto.get("people"):
+                        st.session_state["todo_people_global"] = list(todo_auto["people"])
+                st.session_state["todo_global_autofill_sig"] = "||".join([
+                    todo_title_state,
+                    str(st.session_state.get("todo_cpddl_global", "")).strip(),
+                    ",".join(st.session_state.get("todo_ref_global_multi", []) if isinstance(st.session_state.get("todo_ref_global_multi", []), list) else []),
+                    ",".join([x for x in (st.session_state.get("todo_people_global", []) if isinstance(st.session_state.get("todo_people_global", []), list) else []) if x and x != todo_new_person_option]),
+                ])
 
-        c1, c2, c3, c4 = st.columns([2.3, 1.6, 1.8, 1.0])
-        with c1:
-            todo_title = st.text_input("任务", key="todo_title_global", placeholder="例：3/7 金克丝 T2 结构件确认")
-        with c2:
-            todo_cpddl = st.text_input("CP/DDL(合并)", key="todo_cpddl_global", placeholder="例：3/7 结构件确认")
-        with c3:
-            todo_ref_projs = st.multiselect(
-                "关联项目（可多选）",
-                todo_proj_options_create,
-                key="todo_ref_global_multi",
-                placeholder="请选择关联项目",
-                format_func=lambda x: todo_new_proj_option if x == todo_new_proj_option else format_project_option_label(x, proj_attention),
-            )
-        with c4:
-            if current_pm == "所有人":
-                todo_scope = st.selectbox("所属视角", scope_options, key="todo_scope_global")
-            else:
-                todo_scope = current_pm
-                st.text_input("所属视角", value=current_pm, key="todo_scope_ro", disabled=True)
-
-        resolved_ref_proj_list = [x for x in todo_ref_projs if x and x != todo_new_proj_option]
-        new_proj_name = ""
-        all_view = "所有人"
-        new_proj_owner = current_pm if current_pm != all_view else (owner_pool[0] if owner_pool else "Mo")
-        tpl_cfg = db.get("系统配置", {}).get("PROJECT_TEMPLATE", {}) if isinstance(db.get("系统配置", {}), dict) else {}
-        ratio_opts = tpl_cfg.get("ratio_options", PROJECT_RATIO_OPTIONS)
-        if not isinstance(ratio_opts, list) or not ratio_opts:
-            ratio_opts = PROJECT_RATIO_OPTIONS
-        default_ratio = str(tpl_cfg.get("default_ratio", "1/6")).strip() or "1/6"
-        if default_ratio not in ratio_opts:
-            default_ratio = ratio_opts[0]
-        new_proj_ratio = default_ratio
-        new_proj_ip_owner = str(tpl_cfg.get("default_ip_owner", "")).strip()
-
-        if todo_new_proj_option in todo_ref_projs:
-            np1, np2, np3, np4 = st.columns([1.7, 1.0, 0.9, 1.4])
-            with np1:
-                new_proj_name = st.text_input("新增项目名", key="todo_new_proj_name", placeholder="例：1/6 New IP")
-            with np2:
-                if current_pm == all_view:
-                    new_proj_owner = st.selectbox("新增项目负责人", owner_pool or ["Mo"], key="todo_new_proj_owner")
+            c1, c2, c3, c4 = st.columns([2.3, 1.6, 1.8, 1.0])
+            with c1:
+                todo_title = st.text_input("任务", key="todo_title_global", placeholder="例：3/7 金克丝 T2 结构件确认")
+            with c2:
+                todo_cpddl = st.text_input("CP/DDL(合并)", key="todo_cpddl_global", placeholder="例：3/7 结构件确认")
+            with c3:
+                todo_ref_projs = st.multiselect(
+                    "关联项目（可多选）",
+                    todo_proj_options_create,
+                    key="todo_ref_global_multi",
+                    placeholder="请选择关联项目",
+                    format_func=lambda x: todo_new_proj_option if x == todo_new_proj_option else format_project_option_label(x, proj_attention),
+                )
+            with c4:
+                if current_pm == "所有人":
+                    todo_scope = st.selectbox("所属视角", scope_options, key="todo_scope_global")
                 else:
-                    new_proj_owner = current_pm
-                    st.text_input("新增项目负责人", value=current_pm, key="todo_new_proj_owner_ro", disabled=True)
-            with np3:
-                new_proj_ratio = st.selectbox("比例", ratio_opts, index=ratio_opts.index(default_ratio) if default_ratio in ratio_opts else 0, key="todo_new_proj_ratio")
-            with np4:
-                new_proj_ip_owner = st.text_input("版权方", value=new_proj_ip_owner, key="todo_new_proj_ip_owner", placeholder="可选")
-            if str(new_proj_name).strip():
-                resolved_ref_proj_list.append(str(new_proj_name).strip())
+                    todo_scope = current_pm
+                    st.text_input("所属视角", value=current_pm, key="todo_scope_ro", disabled=True)
 
-        resolved_ref_proj_list = list(dict.fromkeys([p for p in resolved_ref_proj_list if p]))
-        todo_people_sel = st.multiselect("关联人员（可多选/留空）", role_person_options_create, key="todo_people_global", placeholder="请选择关联人员")
+            resolved_ref_proj_list = [x for x in todo_ref_projs if x and x != todo_new_proj_option]
+            new_proj_name = ""
+            all_view = "所有人"
+            new_proj_owner = current_pm if current_pm != all_view else (owner_pool[0] if owner_pool else "Mo")
+            tpl_cfg = db.get("系统配置", {}).get("PROJECT_TEMPLATE", {}) if isinstance(db.get("系统配置", {}), dict) else {}
+            ratio_opts = tpl_cfg.get("ratio_options", PROJECT_RATIO_OPTIONS)
+            if not isinstance(ratio_opts, list) or not ratio_opts:
+                ratio_opts = PROJECT_RATIO_OPTIONS
+            default_ratio = str(tpl_cfg.get("default_ratio", "1/6")).strip() or "1/6"
+            if default_ratio not in ratio_opts:
+                default_ratio = ratio_opts[0]
+            new_proj_ratio = default_ratio
+            new_proj_ip_owner = str(tpl_cfg.get("default_ip_owner", "")).strip()
 
-        todo_people_sel_clean = [x for x in todo_people_sel if x != todo_new_person_option]
-        todo_new_person_token = ""
-        if todo_new_person_option in todo_people_sel:
-            pp1, pp2 = st.columns([1.2, 1.5])
-            with pp1:
-                todo_new_person_role = st.text_input("新增人员角色", key="todo_new_person_role", placeholder="例：设计")
-            with pp2:
-                todo_new_person_name = st.text_input("新增人员姓名", key="todo_new_person_name", placeholder="例：宇涵")
-            if str(todo_new_person_name).strip():
-                role_txt = str(todo_new_person_role).strip()
-                name_txt = str(todo_new_person_name).strip()
-                todo_new_person_token = f"{role_txt}-{name_txt}" if role_txt else name_txt
+            if todo_new_proj_option in todo_ref_projs:
+                np1, np2, np3, np4 = st.columns([1.7, 1.0, 0.9, 1.4])
+                with np1:
+                    new_proj_name = st.text_input("新增项目名", key="todo_new_proj_name", placeholder="例：1/6 New IP")
+                with np2:
+                    if current_pm == all_view:
+                        new_proj_owner = st.selectbox("新增项目负责人", owner_pool or ["Mo"], key="todo_new_proj_owner")
+                    else:
+                        new_proj_owner = current_pm
+                        st.text_input("新增项目负责人", value=current_pm, key="todo_new_proj_owner_ro", disabled=True)
+                with np3:
+                    new_proj_ratio = st.selectbox("比例", ratio_opts, index=ratio_opts.index(default_ratio) if default_ratio in ratio_opts else 0, key="todo_new_proj_ratio")
+                with np4:
+                    new_proj_ip_owner = st.text_input("版权方", value=new_proj_ip_owner, key="todo_new_proj_ip_owner", placeholder="可选")
+                if str(new_proj_name).strip():
+                    resolved_ref_proj_list.append(str(new_proj_name).strip())
 
-        people_tokens = list(todo_people_sel_clean)
-        if todo_new_person_token:
-            people_tokens.append(todo_new_person_token)
-        people_input = normalize_people_text(", ".join(people_tokens))
+            resolved_ref_proj_list = list(dict.fromkeys([p for p in resolved_ref_proj_list if p]))
+            todo_people_sel = st.multiselect("关联人员（可多选/留空）", role_person_options_create, key="todo_people_global", placeholder="请选择关联人员")
 
-        todo_auto_preview = st.session_state.get("todo_global_autofill_preview", {})
-        auto_notes = []
-        auto_cpddl = str(todo_auto_preview.get("cpddl", "")).strip() if isinstance(todo_auto_preview, dict) else ""
-        auto_projects = todo_auto_preview.get("projects", []) if isinstance(todo_auto_preview, dict) else []
-        auto_people = todo_auto_preview.get("people", []) if isinstance(todo_auto_preview, dict) else []
-        if auto_cpddl and auto_cpddl == str(todo_cpddl).strip():
-            auto_notes.append(f"CP/DDL 已自动带入：{auto_cpddl}")
-        elif auto_cpddl and not str(todo_cpddl).strip():
-            auto_notes.append(f"可识别 CP/DDL：{auto_cpddl}")
-        if auto_projects:
-            picked_proj_set = set([x for x in resolved_ref_proj_list if x])
-            if set(auto_projects).issubset(picked_proj_set):
-                auto_notes.append("项目已自动识别：" + " / ".join(auto_projects[:3]))
-            elif not picked_proj_set:
-                auto_notes.append("可识别项目：" + " / ".join(auto_projects[:3]))
-        if auto_people:
-            picked_people_set = set(todo_people_sel_clean)
-            if set(auto_people).issubset(picked_people_set):
-                auto_notes.append("人员已自动识别：" + " / ".join(auto_people[:3]))
-            elif not picked_people_set:
-                auto_notes.append("可识别人员：" + " / ".join(auto_people[:3]))
-        preview_projects = resolved_ref_proj_list or auto_projects
-        preview_people = split_people_text(people_input) or auto_people
-        preview_component = ""
-        preview_stage = ""
-        if len(preview_projects) == 1 and preview_projects[0] in db:
-            todo_prefill_preview = infer_todo_handoff_prefill(
-                {
-                    "任务": todo_title,
-                    "CPDDL": todo_cpddl,
-                    "关联项目": preview_projects[0],
-                    "关联项目列表": preview_projects,
-                    "关联人员": people_input,
-                },
-                preview_projects[0],
+            todo_people_sel_clean = [x for x in todo_people_sel if x != todo_new_person_option]
+            todo_new_person_token = ""
+            if todo_new_person_option in todo_people_sel:
+                pp1, pp2 = st.columns([1.2, 1.5])
+                with pp1:
+                    todo_new_person_role = st.text_input("新增人员角色", key="todo_new_person_role", placeholder="例：设计")
+                with pp2:
+                    todo_new_person_name = st.text_input("新增人员姓名", key="todo_new_person_name", placeholder="例：宇涵")
+                if str(todo_new_person_name).strip():
+                    role_txt = str(todo_new_person_role).strip()
+                    name_txt = str(todo_new_person_name).strip()
+                    todo_new_person_token = f"{role_txt}-{name_txt}" if role_txt else name_txt
+
+            people_tokens = list(todo_people_sel_clean)
+            if todo_new_person_token:
+                people_tokens.append(todo_new_person_token)
+            people_input = normalize_people_text(", ".join(people_tokens))
+
+            todo_auto_preview = st.session_state.get("todo_global_autofill_preview", {})
+            auto_notes = []
+            auto_cpddl = str(todo_auto_preview.get("cpddl", "")).strip() if isinstance(todo_auto_preview, dict) else ""
+            auto_projects = todo_auto_preview.get("projects", []) if isinstance(todo_auto_preview, dict) else []
+            auto_people = todo_auto_preview.get("people", []) if isinstance(todo_auto_preview, dict) else []
+            if auto_cpddl and auto_cpddl == str(todo_cpddl).strip():
+                auto_notes.append(f"CP/DDL 已自动带入：{auto_cpddl}")
+            elif auto_cpddl and not str(todo_cpddl).strip():
+                auto_notes.append(f"可识别 CP/DDL：{auto_cpddl}")
+            if auto_projects:
+                picked_proj_set = set([x for x in resolved_ref_proj_list if x])
+                if set(auto_projects).issubset(picked_proj_set):
+                    auto_notes.append("项目已自动识别：" + " / ".join(auto_projects[:3]))
+                elif not picked_proj_set:
+                    auto_notes.append("可识别项目：" + " / ".join(auto_projects[:3]))
+            if auto_people:
+                picked_people_set = set(todo_people_sel_clean)
+                if set(auto_people).issubset(picked_people_set):
+                    auto_notes.append("人员已自动识别：" + " / ".join(auto_people[:3]))
+                elif not picked_people_set:
+                    auto_notes.append("可识别人员：" + " / ".join(auto_people[:3]))
+            preview_projects = resolved_ref_proj_list or auto_projects
+            preview_people = split_people_text(people_input) or auto_people
+            preview_component = ""
+            preview_stage = ""
+            if len(preview_projects) == 1 and preview_projects[0] in db:
+                todo_prefill_preview = infer_todo_handoff_prefill(
+                    {
+                        "任务": todo_title,
+                        "CPDDL": todo_cpddl,
+                        "关联项目": preview_projects[0],
+                        "关联项目列表": preview_projects,
+                        "关联人员": people_input,
+                    },
+                    preview_projects[0],
+                )
+                preview_component = " / ".join(todo_prefill_preview.get("部件", [])[:2]) if isinstance(todo_prefill_preview.get("部件", []), list) else ""
+                preview_stage = str(todo_prefill_preview.get("阶段", "")).strip()
+                segment_preview = [str(x).strip() for x in todo_prefill_preview.get("分句提示", []) if str(x).strip()]
+                if segment_preview:
+                    auto_notes.append("分句识别：" + "；".join(segment_preview[:2]))
+            route_label = summarize_temporal_route_label(f"{todo_title} {todo_cpddl}".strip(), ref_date=today) if str(todo_title).strip() else ""
+            render_compact_recognition_preview(
+                projects=preview_projects,
+                component_name=preview_component,
+                stage_name=preview_stage,
+                people=preview_people,
+                route_label=route_label,
+                extra_label=("；".join(auto_notes[:2]) if auto_notes else ""),
             )
-            preview_component = " / ".join(todo_prefill_preview.get("部件", [])[:2]) if isinstance(todo_prefill_preview.get("部件", []), list) else ""
-            preview_stage = str(todo_prefill_preview.get("阶段", "")).strip()
-            segment_preview = [str(x).strip() for x in todo_prefill_preview.get("分句提示", []) if str(x).strip()]
-            if segment_preview:
-                auto_notes.append("分句识别：" + "；".join(segment_preview[:2]))
-        route_label = summarize_temporal_route_label(f"{todo_title} {todo_cpddl}".strip(), ref_date=today) if str(todo_title).strip() else ""
-        render_compact_recognition_preview(
-            projects=preview_projects,
-            component_name=preview_component,
-            stage_name=preview_stage,
-            people=preview_people,
-            route_label=route_label,
-            extra_label=("；".join(auto_notes[:2]) if auto_notes else ""),
-        )
 
-        tmp_td = {
-            "任务": todo_title,
-            "CPDDL": todo_cpddl,
-            "关联项目": (resolved_ref_proj_list[0] if resolved_ref_proj_list else ""),
-            "关联项目列表": resolved_ref_proj_list,
-            "关联人员": people_input,
-        }
-        people_bundle = {"labels": [], "ambiguous": [], "unknown": []}
-        if people_input:
-            people_bundle = infer_todo_people_bundle(tmp_td)
-        if people_input and (people_bundle["ambiguous"] or people_bundle["unknown"]):
-            st.warning("人员没有唯一识别，建议在待办里直接补充【关联人员】；图片和细节再放到下方进度明细。")
-        q1, q2 = st.columns([1.2, 4.0])
-        with q1:
-            queue_clicked = st.button("➕ 加入待保存列表", key="todo_queue_global", type="secondary")
-        with q2:
-            st.caption("上方快速新增不会直接落库；你可以连续加入多条，最后在底部一个保存键里统一提交。")
+            tmp_td = {
+                "任务": todo_title,
+                "CPDDL": todo_cpddl,
+                "关联项目": (resolved_ref_proj_list[0] if resolved_ref_proj_list else ""),
+                "关联项目列表": resolved_ref_proj_list,
+                "关联人员": people_input,
+            }
+            people_bundle = {"labels": [], "ambiguous": [], "unknown": []}
+            if people_input:
+                people_bundle = safe_infer_todo_people_bundle(tmp_td, options_bundle=role_person_bundle)
+            if people_input and (people_bundle["ambiguous"] or people_bundle["unknown"]):
+                st.warning("人员没有唯一识别，建议在待办里直接补充【关联人员】；图片和细节再放到下方进度明细。")
+
+            q1, q2, q3 = st.columns([1.0, 1.2, 4.0])
+            with q1:
+                preview_clicked = st.form_submit_button("🔎 识别预览", use_container_width=True)
+            with q2:
+                queue_clicked = st.form_submit_button("➕ 加入待保存列表", type="secondary", use_container_width=True)
+            with q3:
+                st.caption("为了提速，上方输入改成提交式；点【识别预览】或【加入待保存列表】时才会刷新。")
 
         def handle_queue_click(editor_snapshot=None):
             if (todo_new_proj_option in todo_ref_projs) and (not str(new_proj_name).strip()):
@@ -7658,7 +7714,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
             "删除": False,
         }
         if load_todo_diagnostics:
-            row_obj["人员识别"] = format_todo_people_hint(td)
+            row_obj["人员识别"] = format_todo_people_hint(td, options_bundle=role_person_bundle)
             row_obj["开定识别"] = infer_todo_target_hint(td, valid_projs)
             row_obj["联动状态"] = todo_link_status_text(td)
         rows.append(row_obj)
@@ -7772,7 +7828,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
                 "关联项目列表": proj_list,
                 "关联人员": people_raw,
             }
-            people_bundle = infer_todo_people_bundle(people_td)
+            people_bundle = safe_infer_todo_people_bundle(people_td, options_bundle=role_person_bundle)
             if not people_raw and people_bundle["labels"]:
                 people_raw = ", ".join(people_bundle["labels"])
             register_extra_role_people(split_people_text(people_raw))
