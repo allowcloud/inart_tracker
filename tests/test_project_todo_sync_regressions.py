@@ -1983,6 +1983,19 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
 
         self.assertEqual([row["_id"] for row in rows], ["draft1"])
 
+    def test_build_todo_manager_visible_items_keeps_session_drafts_visible(self) -> None:
+        ns = load_app_functions("build_todo_manager_visible_items")
+        globals_map = ns.build_todo_manager_visible_items.__globals__
+        globals_map["todo_visible_for_view"] = lambda td, pm_view: False
+
+        rows = ns.build_todo_manager_visible_items(
+            [{"_id": "live1", "任务": "正式待办"}],
+            "袁",
+            draft_items=[{"_id": "draft1", "任务": "草稿待办", "_待保存新增": True}],
+        )
+
+        self.assertEqual([row["_id"] for row in rows], ["draft1"])
+
     def test_todo_manager_display_sort_key_puts_queued_draft_first(self) -> None:
         ns = load_app_functions("todo_manager_display_sort_key")
         globals_map = ns.todo_manager_display_sort_key.__globals__
@@ -1992,6 +2005,71 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         live_key = ns.todo_manager_display_sort_key({"_id": "live1"})
 
         self.assertLess(draft_key, live_key)
+
+    def test_apply_todo_editor_pending_snapshot_restores_unsaved_table_edits_once(self) -> None:
+        ns = load_app_functions("apply_todo_editor_pending_snapshot")
+
+        state = {
+            "todo_editor_pending_snapshot": [
+                {
+                    "_id": "live1",
+                    "完成": True,
+                    "任务": "改过的任务",
+                    "CP/DDL": "4/1",
+                    "关联项目": "1/6马尔福",
+                    "关联人员": "设计-雨萱",
+                    "所属视角": "袁",
+                    "删除": False,
+                }
+            ]
+        }
+        rows = [
+            {
+                "_id": "live1",
+                "完成": False,
+                "任务": "原任务",
+                "CP/DDL": "",
+                "关联项目": "(不关联项目)",
+                "关联人员": "",
+                "所属视角": "未分配",
+                "删除": False,
+            },
+            {
+                "_id": "live2",
+                "完成": False,
+                "任务": "第二条",
+                "CP/DDL": "",
+                "关联项目": "(不关联项目)",
+                "关联人员": "",
+                "所属视角": "未分配",
+                "删除": False,
+            },
+        ]
+
+        merged = ns.apply_todo_editor_pending_snapshot(state, rows)
+
+        self.assertEqual(merged[0]["任务"], "改过的任务")
+        self.assertEqual(merged[0]["CP/DDL"], "4/1")
+        self.assertEqual(merged[0]["关联人员"], "设计-雨萱")
+        self.assertTrue(merged[0]["完成"])
+        self.assertEqual(merged[1]["任务"], "第二条")
+        self.assertNotIn("todo_editor_pending_snapshot", state)
+
+    def test_merge_todo_pending_drafts_keeps_multiple_stale_rows_without_ids(self) -> None:
+        ns = load_app_functions("merge_todo_pending_drafts")
+
+        merged = ns.merge_todo_pending_drafts(
+            [{"_id": "draft_live", "任务": "已有草稿", "_待保存新增": True}],
+            [
+                {"任务": "脏草稿A", "_待保存新增": True},
+                {"任务": "脏草稿B", "_待保存新增": True},
+            ],
+        )
+
+        self.assertEqual(len(merged), 3)
+        self.assertEqual([row["任务"] for row in merged], ["已有草稿", "脏草稿A", "脏草稿B"])
+        self.assertTrue(all(str(row.get("_id", "")).strip() for row in merged))
+        self.assertEqual(len({str(row.get("_id", "")).strip() for row in merged}), 3)
 
     def test_build_home_project_warning_rows_uses_explanation_date_and_dynamic(self) -> None:
         ns = load_app_functions("build_home_project_warning_rows")
