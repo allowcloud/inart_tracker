@@ -8912,6 +8912,188 @@ def save_fastlog_rows_to_db(edited_df, rec_date, source_name, image_bindings=Non
     }
 
 
+def apply_mobile_fastlog_clear_request(state_obj):
+    state = state_obj if hasattr(state_obj, "get") else {}
+    clear_req = state.get("_mobile_fastlog_clear_request")
+    if not isinstance(clear_req, dict):
+        return False
+
+    preserve_project = bool(clear_req.get("preserve_project", True))
+    preserve_date = bool(clear_req.get("preserve_date", True))
+
+    if not preserve_project:
+        try:
+            state.pop("mobile_fastlog_project", None)
+        except Exception:
+            pass
+    if not preserve_date:
+        try:
+            state.pop("mobile_fastlog_date", None)
+        except Exception:
+            pass
+
+    state["mobile_fastlog_text"] = ""
+    state["mobile_fastlog_force"] = False
+    state["mobile_fastlog_autolearn"] = True
+    state["mobile_fastlog_uploader_seq"] = int(state.get("mobile_fastlog_uploader_seq", 0) or 0) + 1
+    try:
+        state.pop("_mobile_fastlog_clear_request", None)
+    except Exception:
+        pass
+    return True
+
+
+def render_mobile_fastlog_panel(visible_projects, current_pm):
+    apply_mobile_fastlog_clear_request(st.session_state)
+    st.subheader("📱 手机快速记录")
+    st.caption("适合手机随手记：先选当前项目，再写一句话。这里优先追求快，不强迫你先校对大表。")
+
+    project_options = [str(x).strip() for x in (visible_projects or []) if str(x).strip()]
+    if not project_options:
+        st.info("当前视角下暂无可记录项目。可以先去【项目空间】建档，或切换视角后再试。")
+        return
+
+    current_proj = str(st.session_state.get("current_proj_context", "")).strip()
+    default_proj = current_proj if current_proj in project_options else project_options[0]
+    if st.session_state.get("mobile_fastlog_project") not in project_options:
+        st.session_state["mobile_fastlog_project"] = default_proj
+    if "mobile_fastlog_date" not in st.session_state:
+        st.session_state["mobile_fastlog_date"] = datetime.date.today()
+    if "mobile_fastlog_autolearn" not in st.session_state:
+        st.session_state["mobile_fastlog_autolearn"] = True
+    if "mobile_fastlog_force" not in st.session_state:
+        st.session_state["mobile_fastlog_force"] = False
+    if "mobile_fastlog_uploader_seq" not in st.session_state:
+        st.session_state["mobile_fastlog_uploader_seq"] = 0
+
+    proj_attention = build_project_attention_map(project_options)
+    comp_kw = get_component_keyword_map()
+    stage_kw = get_stage_keyword_map()
+
+    c1, c2 = st.columns([1.8, 1.1])
+    with c1:
+        sel_proj = st.selectbox(
+            "当前项目",
+            project_options,
+            key="mobile_fastlog_project",
+            format_func=lambda x: format_project_option_label(x, proj_attention),
+        )
+    with c2:
+        rec_date = st.date_input("记录日期", key="mobile_fastlog_date")
+
+    raw_txt = st.text_area(
+        "一句话记录（可用分号 / 换行一次写多条）",
+        key="mobile_fastlog_text",
+        height=150,
+        placeholder="例：头雕已于4/3交老师确认；配件待工程回文件；4/10马海毛到货",
+    )
+
+    uploader_seq = int(st.session_state.get("mobile_fastlog_uploader_seq", 0) or 0)
+    files = st.file_uploader(
+        "图片（可选，多张一起上传）",
+        type=["png", "jpg", "jpeg"],
+        accept_multiple_files=True,
+        key=f"mobile_fastlog_files_{uploader_seq}",
+    )
+    st.caption("手机入口默认把本次上传的图片挂到这次保存的所有记录上。更细的图片绑定，回电脑再在项目空间里补。")
+
+    parsed_preview_rows = []
+    route_counts = {"past": 0, "todo": 0, "neutral": 0}
+    for seg in [x.strip() for x in re.split(r"[;；\n]+", str(raw_txt)) if x.strip()]:
+        route_key = str(classify_temporal_event_route(seg, ref_date=rec_date, prefer_past=False).get("route", "neutral")).strip() or "neutral"
+        if route_key not in route_counts:
+            route_key = "neutral"
+        route_counts[route_key] += 1
+    if str(raw_txt).strip():
+        parsed_preview_rows = parse_fastlog_rows(
+            raw_txt,
+            comp_kw,
+            stage_kw,
+            unresolved_comp="全局进度",
+        )
+        preview_components = []
+        preview_stages = []
+        for row in parsed_preview_rows[:3]:
+            comp_name = str(row.get("部件", "")).strip()
+            stage_name = str(row.get("阶段", "")).strip()
+            if comp_name:
+                preview_components.append(comp_name)
+            if stage_name and stage_name not in ["", "(维持原阶段)"]:
+                preview_stages.append(stage_name)
+        route_bits = []
+        if route_counts["past"]:
+            route_bits.append(f"历史 {route_counts['past']} 条")
+        if route_counts["todo"]:
+            route_bits.append(f"待办 {route_counts['todo']} 条")
+        if route_counts["neutral"]:
+            route_bits.append(f"仅记录 {route_counts['neutral']} 条")
+        render_compact_recognition_preview(
+            prefix="手机预览",
+            projects=[sel_proj],
+            component_name=" / ".join(list(dict.fromkeys(preview_components[:2]))),
+            stage_name=" / ".join(list(dict.fromkeys(preview_stages[:2]))),
+            route_label=" / ".join(route_bits),
+            extra_label=f"预计拆成 {len(parsed_preview_rows)} 条",
+        )
+
+    with st.expander("高级选项", expanded=False):
+        st.checkbox(
+            "🤖 自动学习新词（默认开启）",
+            key="mobile_fastlog_autolearn",
+            help="手机上默认开启，便于你常写的句子逐步学进去。",
+        )
+        st.checkbox(
+            "⚠️ 强制提交（忽略阶段 / 提审 warning）",
+            key="mobile_fastlog_force",
+            help="只有你明确知道这条该落什么阶段时再开。",
+        )
+        st.caption("如果这次是复杂批量复盘，建议切到下方【晚间批量复盘】再做完整校对。")
+
+    if st.button("⚡ 直接保存到当前项目", type="primary", use_container_width=True, key="mobile_fastlog_save"):
+        if not str(raw_txt).strip():
+            st.warning("请先输入一条记录。")
+        else:
+            parsed_rows = parse_fastlog_rows(
+                raw_txt,
+                comp_kw,
+                stage_kw,
+                unresolved_comp="全局进度",
+            )
+            if not parsed_rows:
+                st.warning("没有识别到可保存的记录。")
+            else:
+                image_bindings = build_uploaded_image_bindings(
+                    files,
+                    {idx: "全部记录" for idx, _ in enumerate(files or [])},
+                    prefix="mobile_fastlog",
+                )
+                result = save_fastlog_rows_to_db(
+                    pd.DataFrame(parsed_rows),
+                    rec_date,
+                    source_name="PM手机速记",
+                    image_bindings=image_bindings,
+                    auto_learn=bool(st.session_state.get("mobile_fastlog_autolearn", True)),
+                    auto_learn_chars=6,
+                    force_submit=bool(st.session_state.get("mobile_fastlog_force", False)),
+                    target_project=sel_proj,
+                    unresolved_comp=None,
+                )
+                if result["saved_count"] > 0 or result["todo_created"] > 0 or result["todo_updated"] > 0:
+                    st.session_state["_mobile_fastlog_clear_request"] = {
+                        "preserve_project": True,
+                        "preserve_date": True,
+                    }
+                    msg = f"已写入 {result['saved_count']} 条项目记录"
+                    if result["todo_created"] or result["todo_updated"]:
+                        msg += f"，并联动待办 新建 {result['todo_created']} / 更新 {result['todo_updated']}"
+                    if result["skipped_count"]:
+                        msg += f"，跳过 {result['skipped_count']} 条"
+                    st.success(msg + "。")
+                    st.rerun()
+                else:
+                    st.warning("这次没有成功写入；如果是阶段 warning 挡住了，可以先去下方批量复盘校对后再存。")
+
+
 def render_pm_batch_fastlog_integrated(visible_projects, default_proj=""):
     st.subheader("📝 批量速记（多项目）")
     st.caption("用于晚间复盘：过去日期进历史，未来日期进待办。")
@@ -14042,12 +14224,22 @@ elif menu == MENU_PRINT:
 # ==========================================
 elif menu == MENU_FASTLOG:
     st.title("📝 速记")
-    _fastlog_first_expand = not st.session_state.get("fastlog_expanded_once", False)
-    with st.expander("每晚复盘（多项目）", expanded=_fastlog_first_expand):
-        render_pm_batch_fastlog_integrated(valid_projs)
-    if _fastlog_first_expand:
-        st.session_state["fastlog_expanded_once"] = True
-    st.caption("该页面已切换为新版多项目晚间复盘入口。")
+    st.caption("这页现在分成两种用法：手机上先用【手机快速记录】，晚上回电脑再用【晚间批量复盘】做完整校对。")
+    fastlog_mode = st.radio(
+        "记录方式",
+        ["📱 手机快速记录", "📝 晚间批量复盘"],
+        horizontal=True,
+        key="fastlog_mode_global",
+    )
+    if fastlog_mode == "📱 手机快速记录":
+        render_mobile_fastlog_panel(valid_projs, current_pm)
+    else:
+        _fastlog_first_expand = not st.session_state.get("fastlog_expanded_once", False)
+        with st.expander("每晚复盘（多项目）", expanded=_fastlog_first_expand):
+            render_pm_batch_fastlog_integrated(valid_projs)
+        if _fastlog_first_expand:
+            st.session_state["fastlog_expanded_once"] = True
+        st.caption("晚间批量复盘保留原来的多项目拆解/校对路径，更适合回电脑集中整理。")
     st.stop()
 
     MANUAL_PICK = "⚠️冲突: 请手动选择"
