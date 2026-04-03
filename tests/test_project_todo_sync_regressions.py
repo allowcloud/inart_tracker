@@ -2086,6 +2086,39 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
 
         self.assertEqual(result["people"], ["工程-谭工"])
 
+    def test_extend_role_person_bundle_makes_new_people_visible_to_later_rows(self) -> None:
+        ns = load_app_functions(
+            "norm_text",
+            "split_people_text",
+            "is_noise_people_candidate",
+            "clean_people_candidate_token",
+            "parse_role_person_label",
+            "_append_role_person_to_maps",
+            "resolve_people_alias",
+            "get_people_alias_map",
+            "todo_cpddl_text",
+            "infer_todo_people_bundle",
+            "extend_role_person_bundle",
+        )
+        globals_map = ns.infer_todo_people_bundle.__globals__
+        globals_map["collect_role_person_options"] = lambda: ([], {})
+        globals_map["resolve_people_alias"] = lambda text: str(text or "").strip()
+        globals_map["get_people_alias_map"] = lambda: {}
+
+        bundle = {"labels": [], "name_map": {}}
+        bundle = ns.extend_role_person_bundle(bundle, ["工程-谭工"])
+        inferred = ns.infer_todo_people_bundle(
+            {
+                "任务": "玛奇玛素体待件回来确认脖子的效果",
+                "CPDDL": "4/10",
+                "关联人员": "谭工",
+            },
+            options_bundle=bundle,
+        )
+
+        self.assertEqual(inferred["labels"], ["工程-谭工"])
+        self.assertEqual(inferred["ambiguous"], [])
+
     def test_build_home_project_warning_rows_uses_explanation_date_and_dynamic(self) -> None:
         ns = load_app_functions("build_home_project_warning_rows")
         globals_map = ns.build_home_project_warning_rows.__globals__
