@@ -776,6 +776,9 @@ MENU_PACKING      = "📦 包装与入库特殊领用（隐藏）"
 MENU_COST         = "💰 专属成本台账（隐藏）"
 MENU_GUIDE        = "📖 新手使用指南（隐藏）"
 
+TODO_NEW_PROJECT_OPTION = "➕ 新增项目..."
+TODO_NEW_PERSON_OPTION = "➕ 新增关联人员..."
+
 STD_MILESTONES  = ["待立项", "研发中", "暂停研发", "下模中", "生产中", "生产结束", "项目结束撒花🎉"]
 HANDOFF_METHODS = ["内部正常推进", "微信", "飞书", "实物/打印件交接", "网盘链接", "当面沟通"]
 FILE_FLOW_RECORD_TYPES = ["📤 文件流转/交接", "📥 收到反馈/退回"]
@@ -4127,7 +4130,7 @@ def infer_todo_form_defaults(task_text, cpddl_text, valid_projs, current_people_
         people_bundle = infer_todo_people_bundle(td_probe)
         inferred_people = [
             x for x in people_bundle.get("labels", [])
-            if x and x != todo_new_person_option
+            if x and x != TODO_NEW_PERSON_OPTION
         ]
     return {
         "cleaned_task": cleaned_task,
@@ -7204,8 +7207,8 @@ def render_pm_todo_manager(valid_projs, current_pm):
         st.session_state["todo_queue_notice"] = f"已恢复 {len(stale_live_drafts)} 条待保存草稿，可继续改表格后再统一保存。"
     apply_todo_quick_add_form_state_clear_request(st.session_state)
 
-    todo_new_proj_option = "➕ 新增项目..."
-    todo_new_person_option = "➕ 新增关联人员..."
+    todo_new_proj_option = TODO_NEW_PROJECT_OPTION
+    todo_new_person_option = TODO_NEW_PERSON_OPTION
     todo_proj_options_create = valid_projs + [todo_new_proj_option]
 
     scope_options = build_todo_scope_options(current_pm)

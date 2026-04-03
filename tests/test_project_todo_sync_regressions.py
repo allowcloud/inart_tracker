@@ -2071,6 +2071,21 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         self.assertTrue(all(str(row.get("_id", "")).strip() for row in merged))
         self.assertEqual(len({str(row.get("_id", "")).strip() for row in merged}), 3)
 
+    def test_infer_todo_form_defaults_filters_new_person_option_without_name_error(self) -> None:
+        ns = load_app_functions("infer_todo_form_defaults")
+        globals_map = ns.infer_todo_form_defaults.__globals__
+        globals_map["classify_temporal_event_route"] = lambda text, ref_date=None, prefer_past=False: {"date": None, "body": text}
+        globals_map["extract_deadline_from_text"] = lambda text: None
+        globals_map["clean_auto_todo_task_text"] = lambda text: str(text or "").strip()
+        globals_map["normalize_todo_cpddl_for_storage"] = lambda cpddl_text, task_text, due_dt=None: str(cpddl_text or "").strip()
+        globals_map["infer_todo_projects_from_text"] = lambda td, valid_projs: []
+        globals_map["infer_todo_people_bundle"] = lambda td: {"labels": ["工程-谭工", "➕ 新增关联人员..."], "ambiguous": [], "unknown": []}
+        globals_map["TODO_NEW_PERSON_OPTION"] = "➕ 新增关联人员..."
+
+        result = ns.infer_todo_form_defaults("玛奇玛素体待件回来确认脖子的效果", "4/10", ["1/6玛奇玛"])
+
+        self.assertEqual(result["people"], ["工程-谭工"])
+
     def test_build_home_project_warning_rows_uses_explanation_date_and_dynamic(self) -> None:
         ns = load_app_functions("build_home_project_warning_rows")
         globals_map = ns.build_home_project_warning_rows.__globals__
