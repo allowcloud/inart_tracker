@@ -2149,6 +2149,40 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         self.assertNotIn("工程-谭工", labels_before)
         self.assertIn("工程-谭工", labels_after)
 
+    def test_get_macro_phase_treats_factory_resample_as_rework_not_production(self) -> None:
+        ns = load_app_functions("_allows_design_phase", "_macro_phase_rule_matches", "get_macro_phase")
+        globals_map = ns.get_macro_phase.__globals__
+        globals_map["MACRO_PHASE_RULES"] = [
+            {"phase": "结束", "stage_any": ["完成", "结束", "撒花"]},
+            {"phase": "暂停", "stage_any": ["暂停", "搁置"], "when": "pause_stage"},
+            {"phase": "暂停", "when": "global_pause"},
+            {"phase": "生产", "stage_any": ["大货", "量产"]},
+            {"phase": "修模", "stage_any": ["复样"]},
+            {"phase": "打印", "when": "print_signal"},
+            {"phase": "涂装", "stage_any": ["涂装", "喷涂", "涂色", "上色"]},
+            {"phase": "开模", "when": "mold_signal"},
+            {"phase": "设计", "when": "design_signal"},
+            {"phase": "工程", "stage_any": ["拆件", "手板", "结构"], "event_any": ["拆件", "结构", "手板", "工程"]},
+            {"phase": "工程", "stage_any": ["设计", "官图"]},
+            {"phase": "建模", "stage_any": ["建模"]},
+            {"phase": "预研", "stage_any": ["预研", "资料验证", "资料确认", "资料预判"]},
+            {"phase": "立项", "stage_any": ["立项"]},
+        ]
+        globals_map["is_pause_stage"] = lambda stage_name: False
+        globals_map["has_pause_signal"] = lambda text: False
+        globals_map["_is_packaging_context"] = lambda comp_name="", event_text="", detail_stage="": False
+        globals_map["_is_small_scale_project"] = lambda proj_label="", proj_data=None: False
+
+        phase = ns.get_macro_phase(
+            "工厂复样(含胶件/上色等)",
+            "哈波火焰杯最新头雕0402寄出给12寸植发",
+            comp_name="头雕(表情)",
+            proj_label="1/6哈波火焰杯",
+            proj_data={"Milestone": "研发中"},
+        )
+
+        self.assertEqual(phase, "修模")
+
     def test_build_home_project_warning_rows_uses_explanation_date_and_dynamic(self) -> None:
         ns = load_app_functions("build_home_project_warning_rows")
         globals_map = ns.build_home_project_warning_rows.__globals__
