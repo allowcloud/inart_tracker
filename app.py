@@ -3545,6 +3545,29 @@ def todo_visible_for_sidebar(td, pm_view):
 
 
 def build_todo_scope_options(current_pm):
+    scope_signature_parts = [f"current:{str(current_pm or '').strip()}"]
+    for proj_name, proj_data in db.items():
+        if proj_name == "系统配置" or not isinstance(proj_data, dict):
+            continue
+        owner = str(proj_data.get("负责人", "")).strip()
+        if owner:
+            scope_signature_parts.append(f"proj|{str(proj_name).strip()}|{owner}")
+
+    todo_all = db.get("系统配置", {}).get("PM_TODO_LIST", [])
+    for td in todo_all:
+        scope = str((td or {}).get("所属视角", "")).strip()
+        creator = str((td or {}).get("创建者视角", "")).strip()
+        if scope:
+            scope_signature_parts.append(f"scope|{scope}")
+        if creator:
+            scope_signature_parts.append(f"creator|{creator}")
+
+    scope_signature = "\n".join(sorted(scope_signature_parts))
+    cache_store = globals().setdefault("_TODO_SCOPE_OPTIONS_CACHE", {})
+    cached = cache_store.get(scope_signature)
+    if isinstance(cached, (list, tuple)):
+        return [str(x).strip() for x in cached if str(x).strip()]
+
     scope_vals = []
     for proj_name, proj_data in db.items():
         if proj_name == "系统配置" or not isinstance(proj_data, dict):
@@ -3565,7 +3588,10 @@ def build_todo_scope_options(current_pm):
     if current_pm and current_pm != "所有人":
         scope_vals.insert(0, current_pm)
     scope_vals.append("未分配")
-    return list(dict.fromkeys([x for x in scope_vals if x and x != "所有人"]))
+    result = list(dict.fromkeys([x for x in scope_vals if x and x != "所有人"]))
+    cache_store.clear()
+    cache_store[scope_signature] = list(result)
+    return result
 
 
 def build_todo_manager_visible_items(todo_all, current_pm, draft_items=None):
@@ -3701,7 +3727,10 @@ def build_todo_editor_widget_key(todo_items):
         if not td_id:
             continue
         tokens.append(f"{td_id}:{'draft' if bool(td.get('_待保存新增')) else 'live'}")
-    return "todo_editor_df" if not tokens else "todo_editor_df::" + "|".join(tokens)
+    if not tokens:
+        return "todo_editor_df"
+    digest = hashlib.md5("|".join(tokens).encode("utf-8")).hexdigest()[:12]
+    return "todo_editor_df::" + digest
 
 
 def parse_target_year_month(target_str):
@@ -4254,6 +4283,23 @@ def _append_role_person_to_maps(role, person, labels, name_map):
 
 
 def collect_role_person_options():
+    signature = _collect_role_person_options_signature()
+    cache_store = globals().setdefault("_ROLE_PERSON_OPTIONS_CACHE", {})
+    cached = cache_store.get(signature)
+    if isinstance(cached, dict):
+        cached_labels = [str(x).strip() for x in (cached.get("labels", []) or []) if str(x).strip()]
+        cached_name_map = {}
+        for key, info in (cached.get("name_map", {}) or {}).items():
+            key_txt = str(key).strip()
+            if not key_txt:
+                continue
+            info_obj = info if isinstance(info, dict) else {}
+            cached_name_map[key_txt] = {
+                "display": str(info_obj.get("display", "")).strip(),
+                "labels": [str(x).strip() for x in (info_obj.get("labels", []) or []) if str(x).strip()],
+            }
+        return cached_labels, cached_name_map
+
     labels = []
     name_map = {}
     for proj_name, proj_data in db.items():
@@ -4279,6 +4325,18 @@ def collect_role_person_options():
             _append_role_person_to_maps(role, person, labels, name_map)
 
     labels = sorted(labels, key=lambda x: (x.split("-", 1)[0] if "-" in x else "综合", x.split("-", 1)[-1]))
+    cache_store.clear()
+    cache_store[signature] = {
+        "labels": list(labels),
+        "name_map": {
+            str(key).strip(): {
+                "display": str(info.get("display", "")).strip(),
+                "labels": [str(x).strip() for x in (info.get("labels", []) or []) if str(x).strip()],
+            }
+            for key, info in name_map.items()
+            if str(key).strip()
+        },
+    }
     return labels, name_map
 
 
@@ -4751,6 +4809,38 @@ def normalize_people_text(raw_text):
         if token not in uniq:
             uniq.append(token)
     return ", ".join(uniq)
+
+
+def _collect_role_person_options_signature():
+    signature_parts = []
+    for proj_name, proj_data in db.items():
+        if proj_name == "系统配置" or not isinstance(proj_data, dict):
+            continue
+        comp_map = proj_data.get("部件列表", {})
+        if not isinstance(comp_map, dict):
+            continue
+        for comp_name, comp_data in comp_map.items():
+            if not isinstance(comp_data, dict):
+                continue
+            owner_str = str(comp_data.get("负责人", "")).strip()
+            if owner_str:
+                signature_parts.append(
+                    "proj|{0}|{1}|{2}".format(
+                        str(proj_name).strip(),
+                        str(comp_name).strip(),
+                        owner_str,
+                    )
+                )
+
+    extra_people = db.get("系统配置", {}).get("TODO_EXTRA_ROLE_PEOPLE", [])
+    if isinstance(extra_people, str):
+        extra_people = split_people_text(extra_people)
+    if isinstance(extra_people, list):
+        for pair in extra_people:
+            pair_txt = str(pair).strip()
+            if pair_txt:
+                signature_parts.append(f"extra|{pair_txt}")
+    return "\n".join(sorted(signature_parts))
 
 
 def infer_todo_people_bundle(td, options_bundle=None):

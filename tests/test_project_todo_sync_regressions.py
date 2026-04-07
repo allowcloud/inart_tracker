@@ -2119,6 +2119,36 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         self.assertEqual(inferred["labels"], ["工程-谭工"])
         self.assertEqual(inferred["ambiguous"], [])
 
+    def test_collect_role_person_options_refreshes_when_extra_people_change(self) -> None:
+        ns = load_app_functions(
+            "norm_text",
+            "split_people_text",
+            "parse_role_person_label",
+            "_append_role_person_to_maps",
+            "_collect_role_person_options_signature",
+            "collect_role_person_options",
+        )
+        globals_map = ns.collect_role_person_options.__globals__
+        globals_map["resolve_people_alias"] = lambda text: str(text or "").strip()
+        ns.db.update(
+            {
+                "系统配置": {"TODO_EXTRA_ROLE_PEOPLE": []},
+                "1/6玛奇玛": {
+                    "部件列表": {
+                        "素体": {"负责人": "设计-宇涵"},
+                    }
+                },
+            }
+        )
+
+        labels_before, _ = ns.collect_role_person_options()
+        ns.db["系统配置"]["TODO_EXTRA_ROLE_PEOPLE"] = ["工程-谭工"]
+        labels_after, _ = ns.collect_role_person_options()
+
+        self.assertIn("设计-宇涵", labels_before)
+        self.assertNotIn("工程-谭工", labels_before)
+        self.assertIn("工程-谭工", labels_after)
+
     def test_build_home_project_warning_rows_uses_explanation_date_and_dynamic(self) -> None:
         ns = load_app_functions("build_home_project_warning_rows")
         globals_map = ns.build_home_project_warning_rows.__globals__
