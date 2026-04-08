@@ -8129,6 +8129,13 @@ def render_sidebar_todo_panel(pm_view):
 
 def apply_pending_main_navigation(menu_options, valid_projects=None):
     pending_menu = str(st.session_state.pop("_pending_main_nav_menu", "")).strip()
+    legacy_print_menu = globals().get("MENU_PRINT", "🖨️ 打印追踪（过渡）")
+    settings_menu = globals().get("MENU_SETTINGS", "⚙️ 系统设置")
+    print_settings_mode = "🖨️ 打印追踪工具"
+    if pending_menu == legacy_print_menu:
+        pending_menu = settings_menu
+        st.session_state["_pending_settings_mode"] = print_settings_mode
+        st.session_state["settings_workspace_mode"] = print_settings_mode
     if pending_menu and pending_menu in list(menu_options or []):
         st.session_state["main_nav_menu"] = pending_menu
 
@@ -8151,8 +8158,18 @@ def try_set_session_state_value(key, value):
 
 def switch_main_menu(target_menu, project_name=""):
     pending_menu = str(target_menu or "").strip()
-    st.session_state["_pending_main_nav_menu"] = pending_menu
+    legacy_print_menu = globals().get("MENU_PRINT", "🖨️ 打印追踪（过渡）")
+    settings_menu = globals().get("MENU_SETTINGS", "⚙️ 系统设置")
+    print_settings_mode = "🖨️ 打印追踪工具"
     safe_setter = globals().get("try_set_session_state_value")
+    if pending_menu == legacy_print_menu:
+        pending_menu = settings_menu
+        st.session_state["_pending_settings_mode"] = print_settings_mode
+        if callable(safe_setter):
+            safe_setter("settings_workspace_mode", print_settings_mode)
+        else:
+            st.session_state["settings_workspace_mode"] = print_settings_mode
+    st.session_state["_pending_main_nav_menu"] = pending_menu
     if pending_menu:
         if callable(safe_setter):
             safe_setter("main_nav_menu", pending_menu)
@@ -8205,13 +8222,15 @@ def open_project_maintenance(project_name, component_name="🌐 全部展示", l
 
 def project_space_section_expanded(current_mode, section_name):
     mode = str(current_mode or "").strip()
+    if mode == "🧠 排查与治理":
+        mode = "🕰️ 历史 / 排查"
     section = str(section_name or "").strip()
     focus_map = {
         "项目状态总览": "⚡ 日常推进",
         "项目更新": "⚡ 日常推进",
-        "项目历史": "🧠 排查与治理",
+        "项目历史": "🕰️ 历史 / 排查",
         "专项模块": "🧩 专项模块",
-        "系统当前解释": "🧠 排查与治理",
+        "系统当前解释": "🕰️ 历史 / 排查",
     }
     desired_mode = focus_map.get(section, "")
     return bool(desired_mode) and mode == desired_mode
@@ -11578,15 +11597,16 @@ menu_options = [
     MENU_DASHBOARD,
     MENU_TASKS,
     MENU_FASTLOG,
-    MENU_PRINT,
     MENU_SETTINGS,
     MENU_MAINTENANCE,
 ]
 apply_pending_main_navigation(menu_options, valid_projects=valid_projs)
+if st.session_state.get("main_nav_menu") == MENU_PRINT:
+    st.session_state["main_nav_menu"] = MENU_SETTINGS
 if st.session_state.get("main_nav_menu") not in menu_options:
     st.session_state["main_nav_menu"] = MENU_HOME
 menu = st.sidebar.radio("📂 功能导航", menu_options, key="main_nav_menu")
-st.sidebar.caption("建议流程：先看今日视图，再进项目空间；全局大盘与甘特图仍保留独立入口，待办和速记已独立出来。")
+st.sidebar.caption("建议流程：先看今日视图，再进项目空间；全局大盘与甘特图仍保留独立入口，待办和速记独立，打印追踪已收进【系统设置】。")
 
 # 备份与恢复
 st.sidebar.divider()
@@ -13119,36 +13139,15 @@ elif menu == MENU_DASHBOARD:
 # ==========================================
 elif menu == MENU_PROJECTS:
     st.title("📁 项目空间")
-    with st.expander("🧭 项目空间说明", expanded=False):
-        st.markdown(
-            "这页专注单个项目：**项目状态总览**负责看整体推进，**项目更新**负责补新进展，**项目历史**负责回看/改旧记录，专项能力继续跟在当前项目后面。"
-        )
-        st.caption("默认心智：先在【今日视图】或【我的待办】确认今天要推进什么，再进入这里处理某一个具体项目。")
-        st.caption("这轮先把入口层改成 PRD 结构；专项模块仍保留在当前项目页里，避免你找不到原有能力。")
+    st.caption("先选一个项目，再决定现在是日常推进、回看历史 / 排查，还是处理专项模块。")
     todo_all_cfg = db.get("系统配置", {}).get("PM_TODO_LIST", []) if isinstance(db.get("系统配置", {}), dict) else []
     todo_list = [td for td in todo_all_cfg if todo_visible_for_view(td, current_pm)]
-    with st.container(border=True):
-        st.markdown("**今日协作提醒（项目空间过渡提示）**")
-        st.caption("待办现在有独立入口。这里保留的是当前视角的简要提醒，避免项目页再把整套 To-do 编辑器堆回来。")
-        pending_count = len([td for td in todo_list if not bool(td.get("完成"))])
-        overdue_count = len([
-            td for td in todo_list
-            if (not bool(td.get("完成"))) and todo_due_date(td) and todo_due_date(td) < datetime.date.today()
-        ])
-        hp1, hp2, hp3 = st.columns([1.1, 1.1, 1.8])
-        hp1.metric("当前未完成待办", pending_count)
-        hp2.metric("其中已逾期", overdue_count)
-        with hp3:
-            st.write("")
-            if st.button("✅ 去我的待办集中处理", key="project_space_jump_tasks", use_container_width=True):
-                switch_main_menu(MENU_TASKS)
-    st.divider()
-    with st.expander("🎯 特定项目操作", expanded=True):
-        st.caption("这里专注某一个项目。先选当前项目，再决定现在是在做日常推进、专项维护，还是排查治理。")
+    with st.container():
+        st.caption("这里专注某一个项目。先选项目，再切到对应工作区直接处理。")
 
         c_proj_top1, c_proj_top2 = st.columns([4.2, 1.2])
         with c_proj_top1:
-            st.caption("只有当你想排查系统为什么这样理解时，再看【系统当前解释】或去【数据维护】。")
+            st.caption("高频入口已经收成 3 个工作区；要查系统为什么这样理解，再切到【历史 / 排查】。")
         with c_proj_top2:
             if st.button("➕ 手动建档新项目"):
                 st.session_state.new_proj_mode = not st.session_state.get('new_proj_mode', False)
@@ -13197,12 +13196,18 @@ elif menu == MENU_PROJECTS:
             st.session_state.current_proj_context = valid_projs[0] if valid_projs else None
         if ('pm_sel_proj' not in st.session_state) or (st.session_state.pm_sel_proj not in valid_projs):
             st.session_state.pm_sel_proj = st.session_state.current_proj_context
-        sel_proj = st.selectbox(
-            "📌 选择当前要操作的项目（支持键盘打字模糊搜索）",
-            valid_projs,
-            key="pm_sel_proj",
-            format_func=lambda x: format_project_option_label(x, project_attention_map),
-        )
+        psel1, psel2 = st.columns([4.4, 1.2])
+        with psel1:
+            sel_proj = st.selectbox(
+                "📌 选择当前要操作的项目（支持键盘打字模糊搜索）",
+                valid_projs,
+                key="pm_sel_proj",
+                format_func=lambda x: format_project_option_label(x, project_attention_map),
+            )
+        with psel2:
+            st.write("")
+            if st.button("✅ 去我的待办", key="project_space_jump_tasks_inline", use_container_width=True):
+                switch_main_menu(MENU_TASKS)
         if sel_proj != st.session_state.current_proj_context:
             st.session_state.pasted_cache        = {}
             st.session_state.config_pasted_cache = {}
@@ -13236,21 +13241,20 @@ elif menu == MENU_PROJECTS:
 
         project_space_mode = st.radio(
             "当前工作区",
-            ["⚡ 日常推进", "🧩 专项模块", "🧠 排查与治理"],
+            ["⚡ 日常推进", "🕰️ 历史 / 排查", "🧩 专项模块"],
             horizontal=True,
             key=f"project_space_mode_{norm_text(sel_proj)}",
         )
         if project_space_mode == "⚡ 日常推进":
-            st.caption("当前只展示最常用的推进路径：项目状态总览 + 项目更新；项目历史保留在本页里，按需要展开。")
-        elif project_space_mode == "🧩 专项模块":
-            st.caption("当前只展示低频但必要的专项维护模块，避免和日常推进混在一起。")
+            st.caption("当前只放最常用的推进路径：项目状态总览 + 项目更新，选完项目就能直接动手。")
+        elif project_space_mode == "🕰️ 历史 / 排查":
+            st.caption("当前只放历史回看、当前解释和串联排查入口，避免和日常推进混在一起。")
         else:
-            st.caption("当前只展示识别排查和历史治理入口；当前项目历史也会在这里优先展开。")
+            st.caption("当前只展示低频但必要的专项维护模块，避免高频推进和低频治理混在一起。")
 
-        with st.expander(
-            "📈 项目状态总览",
-            expanded=project_space_section_expanded(project_space_mode, "项目状态总览"),
-        ):
+        if project_space_mode == "⚡ 日常推进":
+            with st.container(border=True):
+                st.markdown("**📈 项目状态总览**")
             st.caption("这是日常主入口之一：先看项目现在整体走到哪一步，再决定要不要补历史或进专项模块。")
             st.markdown("**🔬 项目进度透视矩阵 (并行连消追踪)**")
             st.caption("颜色说明：🟩 已完成 ｜ 🟦 进行中/生产中 ｜ ⬛ 暂停前已流转 ｜ 🟨 Delay ｜ ⬜ 未流转")
@@ -13427,7 +13431,7 @@ elif menu == MENU_PROJECTS:
                     },
                 )
 
-        if project_space_mode == "🧠 排查与治理":
+        if project_space_mode == "🕰️ 历史 / 排查":
             with st.container(border=True):
                 st.markdown("**🛠️ 排查与治理快捷入口**")
                 st.caption("识别不对、想查历史、想看统一事件时，从这里直接跳去【数据维护】对应项目。")
@@ -13442,10 +13446,9 @@ elif menu == MENU_PROJECTS:
                     if st.button("✅ 去数据维护看待办历史", key=f"proj_jump_todo_hist_{norm_text(sel_proj)}", use_container_width=True):
                         open_project_maintenance(sel_proj, load_todo_history=True)
 
-        with st.expander(
-            "🧠 系统当前解释（识别排查用）",
-            expanded=project_space_section_expanded(project_space_mode, "系统当前解释"),
-        ):
+        if project_space_mode == "🕰️ 历史 / 排查":
+            with st.container(border=True):
+                st.markdown("**🧠 系统当前解释（识别排查用）**")
             st.caption("如果你只是日常推进，这块可以先不看；只有当你想知道系统当前是按哪条记录在解释时，再展开排查。")
             explain_bits = [
                 f"来源：{str(proj_explain.get('来源', '')).strip() or '-'}",
@@ -13534,27 +13537,24 @@ elif menu == MENU_PROJECTS:
             else:
                 st.caption("当前解释若来自原始项目日志，可去【数据维护】改原日志；标准事件类解释可直接在这里修正。")
 
-        with st.expander(
-            "⚡ 项目更新（当前项目主入口）",
-            expanded=project_space_section_expanded(project_space_mode, "项目更新"),
-        ):
+        if project_space_mode == "⚡ 日常推进":
+            with st.container(border=True):
+                st.markdown("**⚡ 项目更新（当前项目主入口）**")
             st.markdown(
                 """
                 <div class='pm-subsection-card'>
                     <div class='pm-subsection-title'>当前项目先在这里推进</div>
-                    <div class='pm-subsection-note'>一句话推进走左边，文件/图片/待办联动走右边；两块都只作用于当前选中的项目。</div>
+                    <div class='pm-subsection-note'>一句话推进放前面，文件/图片/待办联动放后面；不再套 tabs，只保留当前项目这一条主路径。</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
-            st.divider()
-            quick_tab, handoff_tab = st.tabs(["⚡ 一句话更新", "📂 文件流转与交接"])
-
-            with quick_tab:
+            with st.container(border=True):
+                st.markdown("**⚡ 一句话更新**")
                 st.caption("适合改项目基础信息、补历史、补一条速记，属于当前项目的轻量更新。")
                 st.info("想补过去某一天的信息，直接在下面【补历史 / 速记补录】里选日期即可；不用去【数据维护】新增。")
-                with st.expander("🕰️ 补历史 / 速记补录（可指定日期）", expanded=True):
-                    render_pm_fastlog_integrated(sel_proj, show_header=False)
+                st.markdown("**🕰️ 补历史 / 速记补录（可指定日期）**")
+                render_pm_fastlog_integrated(sel_proj, show_header=False)
                 cur_pm     = db[sel_proj].get('负责人', 'Mo')
                 cur_ms     = db[sel_proj].get('Milestone', '')
                 cur_target = db[sel_proj].get('Target', 'TBD')
@@ -13630,9 +13630,10 @@ elif menu == MENU_PROJECTS:
                         st.success("大盘基础信息已更新。")
                         st.rerun()
 
-            st.caption("计划排期、版权审核、配置清单、包装、成本等重模块已收进下方【专项模块】折叠区。")
+            st.caption("计划排期、版权审核、配置清单、包装、成本等重模块已收进【专项模块】工作区。")
 
-            with handoff_tab:
+            with st.container(border=True):
+                st.markdown("**📂 文件流转与交接**")
                 st.caption("这里的内容全部属于当前项目：待办带入、文件交接、挂图留痕都会落到这个项目下面。")
                 project_pending_todos = [
                     x for x in todo_list
@@ -13683,8 +13684,6 @@ elif menu == MENU_PROJECTS:
                 st.divider()
                 st.markdown("**📂 当前项目文件流转区**")
                 st.caption("下面先看最近流转，再新建记录。默认只保留核心字段；提审与强制提交放在高级选项里。")
-
-        with handoff_tab:
             fk = st.session_state.form_key
             handoff_todos = [
                 x for x in db.get("系统配置", {}).get("PM_TODO_LIST", [])
@@ -14305,10 +14304,9 @@ elif menu == MENU_PROJECTS:
                             ))
                             st.rerun()
 
-        with st.expander(
-            "🕰️ 项目历史（当前项目）",
-            expanded=project_space_section_expanded(project_space_mode, "项目历史"),
-        ):
+        if project_space_mode == "🕰️ 历史 / 排查":
+            with st.container(border=True):
+                st.markdown("**🕰️ 项目历史（当前项目）**")
             st.caption("这里放当前项目已有历史。适合回看、改旧记录、翻历史参考图；如果要新增过去某一天的信息，仍然回上面的【补历史 / 速记补录】。")
             history_view_state = build_project_history_view_state(sel_proj)
             history_comp_options = history_view_state["comps_in_proj"]
@@ -14328,11 +14326,14 @@ elif menu == MENU_PROJECTS:
                 key_prefix=f"project_space_history_{norm_text(sel_proj)}",
             )
 
-        with st.expander(
-            "🧩 专项模块",
-            expanded=project_space_section_expanded(project_space_mode, "专项模块"),
-        ):
-            st.caption("专项模块默认折叠，按需要展开。常规项目先用【项目状态总览】和【项目更新】就够了。")
+        if project_space_mode == "🧩 专项模块":
+            with st.container(border=True):
+                st.markdown("**🧩 专项模块**")
+                st.caption("低频但必要的专项维护都放在这里，常规项目先用【日常推进】工作区就够了。")
+                if st.button("🖨️ 打开打印追踪工具", key=f"proj_open_print_tool_{norm_text(sel_proj)}", use_container_width=True):
+                    st.session_state["_pending_settings_mode"] = "🖨️ 打印追踪工具"
+                    switch_main_menu(MENU_SETTINGS)
+                    st.rerun()
             with st.expander("🗒️ 项目备忘录", expanded=False):
                 memo_txt_pm = st.text_area("记录跨部门叮嘱等杂项", value=db[sel_proj].get("备忘录", ""), height=90, key=f"pm_memo_{sel_proj}")
                 if st.button("保存项目备忘录", key=f"pm_save_memo_{sel_proj}"):
@@ -14393,9 +14394,9 @@ elif menu == MENU_TASKS:
     # 模块 4：打印追踪（过渡）
 # ==========================================
 elif menu == MENU_PRINT:
-    st.title("🖨️ 打印追踪（过渡入口）")
-    st.caption("按 PRD 方向，这块后续会并入项目空间；这轮先保留独立入口，避免你现有流程中断。")
-    render_print_tracking_board(current_pm, valid_projs, ui_prefix="print_track_global")
+    st.session_state["_pending_settings_mode"] = "🖨️ 打印追踪工具"
+    switch_main_menu(MENU_SETTINGS)
+    st.rerun()
 
 # ==========================================
 # 模块 5：AI 速记
@@ -15524,7 +15525,23 @@ elif menu == MENU_MAINTENANCE:
 # ==========================================
 elif menu == MENU_SETTINGS:
     st.title("⚙️ 系统设置")
-    st.caption("这里保留团队成员、词典、排期基线和导入等全局配置；低频治理型操作会逐步转去【数据维护】。")
+    st.caption("这里保留全局配置、词典、导入和低频工具；打印追踪也已从主导航收进这里。")
+    pending_settings_mode = str(st.session_state.pop("_pending_settings_mode", "")).strip()
+    settings_workspace_options = ["⚙️ 全局配置", "🖨️ 打印追踪工具"]
+    if pending_settings_mode in settings_workspace_options:
+        st.session_state["settings_workspace_mode"] = pending_settings_mode
+    if st.session_state.get("settings_workspace_mode") not in settings_workspace_options:
+        st.session_state["settings_workspace_mode"] = "⚙️ 全局配置"
+    settings_workspace_mode = st.radio(
+        "当前工作区",
+        settings_workspace_options,
+        horizontal=True,
+        key="settings_workspace_mode",
+    )
+    if settings_workspace_mode == "🖨️ 打印追踪工具":
+        st.caption("打印追踪已从主导航移入这里，避免低频工具和高频入口并排；你原来的功能都还在。")
+        render_print_tracking_board(current_pm, valid_projs, ui_prefix="print_track_settings")
+        st.stop()
     render_rd_csv_import_panel(expanded=False)
     st.divider()
 
