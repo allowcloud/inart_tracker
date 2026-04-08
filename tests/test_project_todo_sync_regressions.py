@@ -2157,7 +2157,7 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
             {"phase": "暂停", "stage_any": ["暂停", "搁置"], "when": "pause_stage"},
             {"phase": "暂停", "when": "global_pause"},
             {"phase": "生产", "stage_any": ["大货", "量产"]},
-            {"phase": "修模", "stage_any": ["复样"]},
+            {"phase": "复样", "stage_any": ["复样"]},
             {"phase": "打印", "when": "print_signal"},
             {"phase": "涂装", "stage_any": ["涂装", "喷涂", "涂色", "上色"]},
             {"phase": "开模", "when": "mold_signal"},
@@ -2182,6 +2182,40 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         )
 
         self.assertEqual(phase, "工程")
+
+    def test_get_macro_phase_maps_factory_resample_to_resample_stage(self) -> None:
+        ns = load_app_functions("_allows_design_phase", "_macro_phase_rule_matches", "get_macro_phase")
+        globals_map = ns.get_macro_phase.__globals__
+        globals_map["MACRO_PHASE_RULES"] = [
+            {"phase": "结束", "stage_any": ["完成", "结束", "撒花"]},
+            {"phase": "暂停", "stage_any": ["暂停", "搁置"], "when": "pause_stage"},
+            {"phase": "暂停", "when": "global_pause"},
+            {"phase": "生产", "stage_any": ["大货", "量产"]},
+            {"phase": "复样", "stage_any": ["复样"]},
+            {"phase": "打印", "when": "print_signal"},
+            {"phase": "涂装", "stage_any": ["涂装", "喷涂", "涂色", "上色"]},
+            {"phase": "开模", "when": "mold_signal"},
+            {"phase": "设计", "when": "design_signal"},
+            {"phase": "工程", "stage_any": ["拆件", "手板", "结构"], "event_any": ["拆件", "结构", "手板", "工程"]},
+            {"phase": "工程", "stage_any": ["设计", "官图"]},
+            {"phase": "建模", "stage_any": ["建模"]},
+            {"phase": "预研", "stage_any": ["预研", "资料验证", "资料确认", "资料预判"]},
+            {"phase": "立项", "stage_any": ["立项"]},
+        ]
+        globals_map["is_pause_stage"] = lambda stage_name: False
+        globals_map["has_pause_signal"] = lambda text: False
+        globals_map["_is_packaging_context"] = lambda comp_name="", event_text="", detail_stage="": False
+        globals_map["_is_small_scale_project"] = lambda proj_label="", proj_data=None: False
+
+        phase = ns.get_macro_phase(
+            "工厂复样(含胶件/上色等)",
+            "眼睛review通过，等待工厂继续复样",
+            comp_name="头雕(表情)",
+            proj_label="1/6马尔福",
+            proj_data={"Milestone": "生产中"},
+        )
+
+        self.assertEqual(phase, "复样")
 
     def test_expand_workbench_segment_entries_maps_hair_testing_to_structure_board(self) -> None:
         ns = load_app_functions(
@@ -2215,7 +2249,7 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         globals_map["is_pause_stage"] = lambda stage_name: "暂停" in str(stage_name or "")
         globals_map["get_macro_phase"] = lambda detail_stage, event_text="", comp_name="", proj_label="", proj_data=None: (
             "工程" if "手板/结构板" in str(detail_stage or "") else
-            "修模" if "工厂复样" in str(detail_stage or "") else
+            "复样" if "工厂复样" in str(detail_stage or "") else
             "生产" if "大货" in str(detail_stage or "") else
             "建模"
         )
@@ -2238,8 +2272,43 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         })
 
         self.assertIn("工程", current)
-        self.assertNotIn("修模", current)
+        self.assertNotIn("复样", current)
         self.assertNotIn("生产", current)
+
+    def test_infer_current_macro_stages_keeps_latest_factory_resample_out_of_production(self) -> None:
+        ns = load_app_functions("infer_current_macro_stages")
+        globals_map = ns.infer_current_macro_stages.__globals__
+        globals_map["db"] = {"系统配置": {"PM_TODO_LIST": []}}
+        globals_map["STAGES_UNIFIED"] = [
+            "预研", "立项", "建模(含打印/签样)", "设计", "工程拆件",
+            "手板/结构板", "工厂复样(含胶件/上色等)", "大货", "⏸️ 暂停/搁置", "✅ 已完成(结束)"
+        ]
+        globals_map["is_hidden_system_log"] = lambda log: False
+        globals_map["is_pause_stage"] = lambda stage_name: "暂停" in str(stage_name or "")
+        globals_map["get_macro_phase"] = lambda detail_stage, event_text="", comp_name="", proj_label="", proj_data=None: (
+            "工程" if "手板/结构板" in str(detail_stage or "") else
+            "复样" if "工厂复样" in str(detail_stage or "") else
+            "生产" if "大货" in str(detail_stage or "") else
+            "建模"
+        )
+        globals_map["todo_matches_project"] = lambda td, proj: False
+        globals_map["infer_todo_handoff_prefill"] = lambda td, proj: {}
+        globals_map["parse_date_safe"] = lambda text: datetime.datetime.strptime(str(text), "%Y-%m-%d").date()
+
+        current = ns.infer_current_macro_stages("1/6马尔福", {
+            "项目名称": "1/6马尔福",
+            "Milestone": "生产中",
+            "部件列表": {
+                "头雕(表情)": {
+                    "主流程": "工厂复样(含胶件/上色等)",
+                    "日志流": [
+                        {"日期": "2026-04-06", "工序": "工厂复样(含胶件/上色等)", "事件": "眼睛review通过，继续复样"},
+                    ],
+                }
+            },
+        })
+
+        self.assertEqual(current, {"复样"})
 
     def test_build_home_project_warning_rows_uses_explanation_date_and_dynamic(self) -> None:
         ns = load_app_functions("build_home_project_warning_rows")
