@@ -2545,6 +2545,13 @@ def get_macro_phase(detail_stage, event_text="", comp_name="", proj_label="", pr
     lower_evt = evt.lower()
     proj_obj = proj_data if isinstance(proj_data, dict) else {}
     milestone = str(proj_obj.get("Milestone", "")).strip()
+    hair_testing_signal = (
+        any(x in evt for x in ["植发", "种发", "补毛", "马海毛"])
+        and ("到货" not in evt)
+        and any(x in evt for x in ["寄出", "寄给", "送去", "送给", "试", "测试", "确认效果", "看效果", "拆件", "拆眼", "拆头", "返回"])
+    )
+    if hair_testing_signal:
+        return "工程"
     if milestone in ["待立项", "待开定", ""] and not any(x in s for x in ["立项", "暂停", "结束"]):
         pre_research_signal = any(x in s for x in ["建模", "打印", "涂装", "预研", "资料"]) or any(
             x in evt for x in ["资料", "版权资料", "身高", "比例", "细节", "试打", "一体", "效果下模", "待确认效果下模", "确认效果下模"]
@@ -5047,6 +5054,11 @@ def extract_todo_segment_hints(text, project_components=None, comp_kw=None, stag
             return "工厂复样(含胶件/上色等)"
         if any(tok in seg_text_value for tok in hair_tokens):
             if (
+                ("到货" not in seg_text_value)
+                and any(tok in seg_text_value for tok in ["寄出", "寄给", "送去", "送给", "试", "测试", "确认效果", "看效果", "拆件", "拆眼", "拆头", "返回"])
+            ):
+                return "手板/结构板"
+            if (
                 ("到货" in seg_text_value)
                 and any(tok in seg_text_value for tok in ["马海毛", "毛到货", "植发", "种发", "开始植发", "开始种发"])
             ):
@@ -6871,28 +6883,43 @@ def infer_current_macro_stages(proj_label, proj_data=None):
         stage_txt = str(stage_name or "").strip()
         return STAGES_UNIFIED.index(stage_txt) if stage_txt in STAGES_UNIFIED else -1
 
+    date_parser = globals().get("parse_date_safe")
+
     for comp_name, comp_info in proj_obj.get("部件列表", {}).items():
-        macro = get_macro_phase(comp_info.get("主流程", ""), comp_name=comp_name, proj_label=proj_base_label, proj_data=proj_obj)
-        if macro and macro not in ["立项", "暂停", "结束"]:
-            current.add(macro)
-            continue
+        macro = ""
         best_log_stage = ""
-        best_log_idx = -1
+        best_log_order = None
         best_log_event = ""
-        for log in comp_info.get("日志流", []):
+        for idx, log in enumerate(comp_info.get("日志流", [])):
             if is_hidden_system_log(log):
                 continue
             raw_stage = str((log or {}).get("工序", "")).strip()
             evt = str((log or {}).get("事件", "")).strip()
             stage_idx = _stage_index(raw_stage)
-            if stage_idx > best_log_idx and raw_stage and raw_stage != "✅ 已完成(结束)" and not is_pause_stage(raw_stage):
+            if stage_idx < 0 or raw_stage == "✅ 已完成(结束)" or is_pause_stage(raw_stage):
+                continue
+            log_dt = None
+            if callable(date_parser):
+                try:
+                    log_dt = date_parser((log or {}).get("日期", ""))
+                except Exception:
+                    log_dt = None
+            order_key = (log_dt or datetime.date.min, idx)
+            if (best_log_order is None) or (order_key >= best_log_order):
                 best_log_stage = raw_stage
-                best_log_idx = stage_idx
+                best_log_order = order_key
                 best_log_event = evt
         if best_log_stage:
             log_macro = get_macro_phase(best_log_stage, best_log_event, comp_name=comp_name, proj_label=proj_base_label, proj_data=proj_obj)
             if log_macro and log_macro not in ["立项", "暂停", "结束"]:
-                current.add(log_macro)
+                macro = log_macro
+        if not macro:
+            main_stage = str(comp_info.get("主流程", "")).strip()
+            main_macro = get_macro_phase(main_stage, comp_name=comp_name, proj_label=proj_base_label, proj_data=proj_obj)
+            if main_macro and main_macro not in ["立项", "暂停", "结束"]:
+                macro = main_macro
+        if macro:
+            current.add(macro)
 
     if not current and proj_base_label:
         todo_all = db.get("系统配置", {}).get("PM_TODO_LIST", []) if isinstance(db.get("系统配置", {}), dict) else []
@@ -6930,9 +6957,11 @@ def infer_current_macro_stages(proj_label, proj_data=None):
     if milestone == "暂停研发":
         current.add("暂停")
     elif milestone == "下模中":
-        current.add("开模")
+        if not current:
+            current.add("开模")
     elif milestone == "生产中":
-        current.add("生产")
+        if not current:
+            current.add("生产")
     elif milestone in ["待立项", "待开定", "已开定"] and not current:
         current.add("预研")
     elif milestone in ["研发中"] and not current:

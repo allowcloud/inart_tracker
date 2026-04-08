@@ -2149,7 +2149,7 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         self.assertNotIn("工程-谭工", labels_before)
         self.assertIn("工程-谭工", labels_after)
 
-    def test_get_macro_phase_treats_factory_resample_as_rework_not_production(self) -> None:
+    def test_get_macro_phase_treats_hair_testing_as_engineering_not_production(self) -> None:
         ns = load_app_functions("_allows_design_phase", "_macro_phase_rule_matches", "get_macro_phase")
         globals_map = ns.get_macro_phase.__globals__
         globals_map["MACRO_PHASE_RULES"] = [
@@ -2181,7 +2181,65 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
             proj_data={"Milestone": "研发中"},
         )
 
-        self.assertEqual(phase, "修模")
+        self.assertEqual(phase, "工程")
+
+    def test_expand_workbench_segment_entries_maps_hair_testing_to_structure_board(self) -> None:
+        ns = load_app_functions(
+            "norm_text",
+            "extract_todo_segment_hints",
+            "expand_workbench_segment_entries",
+        )
+
+        rows = ns.expand_workbench_segment_entries(
+            "哈波火焰杯最新头雕0402寄出给12寸植发",
+            default_component="头雕(表情)",
+            default_stage="建模(含打印/签样)",
+            project_components=["头雕(表情)", "配件", "全局进度"],
+            comp_kw={"头雕": "头雕(表情)", "植发": "头雕(表情)"},
+            stage_kw_map={},
+        )
+
+        self.assertTrue(rows)
+        self.assertEqual(rows[0]["component"], "头雕(表情)")
+        self.assertEqual(rows[0]["stage"], "手板/结构板")
+
+    def test_infer_current_macro_stages_prefers_latest_log_over_stale_main_flow_and_milestone(self) -> None:
+        ns = load_app_functions("infer_current_macro_stages")
+        globals_map = ns.infer_current_macro_stages.__globals__
+        globals_map["db"] = {"系统配置": {"PM_TODO_LIST": []}}
+        globals_map["STAGES_UNIFIED"] = [
+            "预研", "立项", "建模(含打印/签样)", "设计", "工程拆件",
+            "手板/结构板", "工厂复样(含胶件/上色等)", "大货", "⏸️ 暂停/搁置", "✅ 已完成(结束)"
+        ]
+        globals_map["is_hidden_system_log"] = lambda log: False
+        globals_map["is_pause_stage"] = lambda stage_name: "暂停" in str(stage_name or "")
+        globals_map["get_macro_phase"] = lambda detail_stage, event_text="", comp_name="", proj_label="", proj_data=None: (
+            "工程" if "手板/结构板" in str(detail_stage or "") else
+            "修模" if "工厂复样" in str(detail_stage or "") else
+            "生产" if "大货" in str(detail_stage or "") else
+            "建模"
+        )
+        globals_map["todo_matches_project"] = lambda td, proj: False
+        globals_map["infer_todo_handoff_prefill"] = lambda td, proj: {}
+        globals_map["parse_date_safe"] = lambda text: datetime.datetime.strptime(str(text), "%Y-%m-%d").date()
+
+        current = ns.infer_current_macro_stages("1/6哈波火焰杯", {
+            "项目名称": "1/6哈波火焰杯",
+            "Milestone": "生产中",
+            "部件列表": {
+                "头雕(表情)": {
+                    "主流程": "工厂复样(含胶件/上色等)",
+                    "日志流": [
+                        {"日期": "2026-04-01", "工序": "工厂复样(含胶件/上色等)", "事件": "旧复样记录"},
+                        {"日期": "2026-04-03", "工序": "手板/结构板", "事件": "0402寄出给12寸植发测试效果"},
+                    ],
+                }
+            },
+        })
+
+        self.assertIn("工程", current)
+        self.assertNotIn("修模", current)
+        self.assertNotIn("生产", current)
 
     def test_build_home_project_warning_rows_uses_explanation_date_and_dynamic(self) -> None:
         ns = load_app_functions("build_home_project_warning_rows")
