@@ -8130,8 +8130,12 @@ def render_sidebar_todo_panel(pm_view):
 def apply_pending_main_navigation(menu_options, valid_projects=None):
     pending_menu = str(st.session_state.pop("_pending_main_nav_menu", "")).strip()
     legacy_print_menu = globals().get("MENU_PRINT", "🖨️ 打印追踪（过渡）")
+    settings_menu = globals().get("MENU_SETTINGS", "⚙️ 系统设置")
+    print_settings_mode = "🖨️ 打印追踪工具"
     if pending_menu == legacy_print_menu:
-        pending_menu = MENU_SETTINGS
+        pending_menu = settings_menu
+        st.session_state["_pending_settings_mode"] = print_settings_mode
+        st.session_state["settings_workspace_mode"] = print_settings_mode
     if pending_menu and pending_menu in list(menu_options or []):
         st.session_state["main_nav_menu"] = pending_menu
 
@@ -8155,10 +8159,17 @@ def try_set_session_state_value(key, value):
 def switch_main_menu(target_menu, project_name=""):
     pending_menu = str(target_menu or "").strip()
     legacy_print_menu = globals().get("MENU_PRINT", "🖨️ 打印追踪（过渡）")
-    if pending_menu == legacy_print_menu:
-        pending_menu = MENU_SETTINGS
-    st.session_state["_pending_main_nav_menu"] = pending_menu
+    settings_menu = globals().get("MENU_SETTINGS", "⚙️ 系统设置")
+    print_settings_mode = "🖨️ 打印追踪工具"
     safe_setter = globals().get("try_set_session_state_value")
+    if pending_menu == legacy_print_menu:
+        pending_menu = settings_menu
+        st.session_state["_pending_settings_mode"] = print_settings_mode
+        if callable(safe_setter):
+            safe_setter("settings_workspace_mode", print_settings_mode)
+        else:
+            st.session_state["settings_workspace_mode"] = print_settings_mode
+    st.session_state["_pending_main_nav_menu"] = pending_menu
     if pending_menu:
         if callable(safe_setter):
             safe_setter("main_nav_menu", pending_menu)

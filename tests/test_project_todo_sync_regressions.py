@@ -2230,6 +2230,34 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         self.assertEqual(fake_state["pm_sel_proj"], "1/6马尔福")
         self.assertEqual(rerun_calls, [True])
 
+    def test_switch_main_menu_legacy_print_routes_to_settings_print_workspace(self) -> None:
+        ns = load_app_functions("switch_main_menu")
+
+        class FakeSessionState(dict):
+            def __getattr__(self, name):
+                return self[name]
+
+            def __setattr__(self, name, value):
+                self[name] = value
+
+        fake_state = FakeSessionState()
+        rerun_calls = []
+        globals_map = ns.switch_main_menu.__globals__
+        globals_map["st"] = types.SimpleNamespace(
+            session_state=fake_state,
+            rerun=lambda: rerun_calls.append(True),
+        )
+        globals_map["MENU_PRINT"] = "🖨️ 打印追踪（过渡）"
+        globals_map["MENU_SETTINGS"] = "⚙️ 系统设置"
+
+        ns.switch_main_menu("🖨️ 打印追踪（过渡）")
+
+        self.assertEqual(fake_state["main_nav_menu"], "⚙️ 系统设置")
+        self.assertEqual(fake_state["_pending_main_nav_menu"], "⚙️ 系统设置")
+        self.assertEqual(fake_state["_pending_settings_mode"], "🖨️ 打印追踪工具")
+        self.assertEqual(fake_state["settings_workspace_mode"], "🖨️ 打印追踪工具")
+        self.assertEqual(rerun_calls, [True])
+
     def test_open_project_maintenance_prefills_history_context(self) -> None:
         ns = load_app_functions("open_project_maintenance")
 
@@ -2297,6 +2325,33 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         self.assertEqual(fake_state["main_nav_menu"], "📊 全局大盘与甘特图")
         self.assertEqual(fake_state["current_proj_context"], "1/6马尔福")
         self.assertEqual(fake_state["pm_sel_proj"], "1/6马尔福")
+
+    def test_apply_pending_main_navigation_legacy_print_restores_print_workspace(self) -> None:
+        ns = load_app_functions("apply_pending_main_navigation")
+
+        class FakeSessionState(dict):
+            def __getattr__(self, name):
+                return self[name]
+
+            def __setattr__(self, name, value):
+                self[name] = value
+
+        fake_state = FakeSessionState(
+            _pending_main_nav_menu="🖨️ 打印追踪（过渡）",
+        )
+        globals_map = ns.apply_pending_main_navigation.__globals__
+        globals_map["st"] = types.SimpleNamespace(session_state=fake_state)
+        globals_map["MENU_PRINT"] = "🖨️ 打印追踪（过渡）"
+        globals_map["MENU_SETTINGS"] = "⚙️ 系统设置"
+
+        ns.apply_pending_main_navigation(
+            ["🏠 今日视图", "⚙️ 系统设置", "🛠️ 数据维护"],
+            valid_projects=["1/6马尔福", "1/6超女"],
+        )
+
+        self.assertEqual(fake_state["main_nav_menu"], "⚙️ 系统设置")
+        self.assertEqual(fake_state["_pending_settings_mode"], "🖨️ 打印追踪工具")
+        self.assertEqual(fake_state["settings_workspace_mode"], "🖨️ 打印追踪工具")
         self.assertNotIn("_pending_main_nav_menu", fake_state)
         self.assertNotIn("_pending_current_proj_context", fake_state)
         self.assertNotIn("_pending_pm_sel_proj", fake_state)
