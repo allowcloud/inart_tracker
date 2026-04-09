@@ -880,8 +880,8 @@ DEFAULT_RECOGNITION_DICT = {
 DEFAULT_SYS_CFG = {
     "标准部件": ["头雕(表情)", "素体", "手型", "服装", "配件", "地台", "包装"],
     "标准阶段": ["预研", "立项", "建模(含打印/签样)", "涂装", "设计", "工程拆件", "手板/结构板", "官图", "工厂复样(含胶件/上色等)", "大货", "⏸️ 暂停/搁置", "✅ 已完成(结束)"],
-    "宏观阶段": ["预研", "立项", "建模", "打印", "涂装", "设计", "工程", "模具", "修模", "生产", "暂停", "结束"],
-    "排期基线": {"预研": 14, "立项": 1, "建模": 42, "打印": 14, "涂装": 14, "设计": 35, "工程": 49, "模具": 28, "修模": 14, "生产": 30},
+    "宏观阶段": ["预研", "立项", "建模", "打印", "涂装", "设计", "工程", "开模", "复样", "生产", "暂停", "结束"],
+    "排期基线": {"预研": 14, "立项": 1, "建模": 42, "打印": 14, "涂装": 14, "设计": 35, "工程": 49, "开模": 28, "复样": 14, "生产": 30},
     "项目别名": {},
     "AI_COMP_KW":  {},
     "AI_STAGE_KW":  {},
@@ -1416,18 +1416,33 @@ def ensure_ordered_value(seq, value, after=None, before=None):
 
 STAGES_UNIFIED = ensure_ordered_value(STAGES_UNIFIED, "预研", before="立项")
 STAGES_UNIFIED = ensure_ordered_value(STAGES_UNIFIED, "开模", after="官图")
-MACRO_STAGES = ["开模" if str(x) == "模具" else str(x) for x in MACRO_STAGES]
+MACRO_STAGES = [
+    "开模" if str(x) == "模具" else ("复样" if str(x) == "修模" else str(x))
+    for x in MACRO_STAGES
+]
 MACRO_STAGES = ensure_ordered_value(MACRO_STAGES, "预研", before="立项")
 MACRO_STAGES = ensure_ordered_value(MACRO_STAGES, "打印", after="建模")
 MACRO_STAGES = ensure_ordered_value(MACRO_STAGES, "涂装", after="打印")
-MACRO_STAGES = ensure_ordered_value(list(dict.fromkeys(MACRO_STAGES)), "开模", before="修模")
+MACRO_STAGES = ensure_ordered_value(list(dict.fromkeys(MACRO_STAGES)), "开模", before="复样")
+MACRO_STAGES = ensure_ordered_value(MACRO_STAGES, "复样", after="开模")
+SYS_CFG["宏观阶段"] = MACRO_STAGES.copy()
 SYS_CFG.setdefault("排期基线", DEFAULT_SYS_CFG["排期基线"].copy())
 if "模具" in SYS_CFG["排期基线"] and "开模" not in SYS_CFG["排期基线"]:
     SYS_CFG["排期基线"]["开模"] = SYS_CFG["排期基线"].get("模具", 28)
+if "修模" in SYS_CFG["排期基线"] and "复样" not in SYS_CFG["排期基线"]:
+    SYS_CFG["排期基线"]["复样"] = SYS_CFG["排期基线"].get("修模", 14)
 SYS_CFG["排期基线"].setdefault("预研", 14)
 SYS_CFG["排期基线"].setdefault("开模", 28)
+SYS_CFG["排期基线"].setdefault("复样", 14)
 SYS_CFG["排期基线"].setdefault("打印", 14)
 SYS_CFG["排期基线"].setdefault("涂装", 14)
+_ordered_baseline = {}
+for _stage_name in [x for x in MACRO_STAGES if x not in ["暂停", "结束"]]:
+    _ordered_baseline[_stage_name] = int(SYS_CFG["排期基线"].get(_stage_name, DEFAULT_SYS_CFG["排期基线"].get(_stage_name, 14)))
+for _legacy_key, _legacy_val in list(SYS_CFG["排期基线"].items()):
+    if _legacy_key not in _ordered_baseline and _legacy_key not in ["模具", "修模"]:
+        _ordered_baseline[_legacy_key] = _legacy_val
+SYS_CFG["排期基线"] = _ordered_baseline
 
 def infer_review_round_from_text(text):
     s = str(text or "")
@@ -2490,7 +2505,7 @@ MACRO_PHASE_RULES = [
     {"phase": "暂停", "stage_any": ["暂停", "搁置"], "when": "pause_stage"},
     {"phase": "暂停", "when": "global_pause"},
     {"phase": "生产", "stage_any": ["大货", "量产"]},
-    {"phase": "修模", "stage_any": ["复样"]},
+    {"phase": "复样", "stage_any": ["复样"]},
     {"phase": "打印", "when": "print_signal"},
     {"phase": "涂装", "stage_any": ["涂装", "喷涂", "涂色", "上色"]},
     {"phase": "开模", "when": "mold_signal"},
@@ -5361,7 +5376,7 @@ def infer_todo_handoff_prefill(td, proj_name):
             "设计": "设计",
             "工程": "工程拆件",
             "开模": "开模",
-            "修模": "工厂复样(含胶件/上色等)",
+            "复样": "工厂复样(含胶件/上色等)",
             "生产": "大货",
             "暂停": "⏸️ 暂停/搁置",
             "结束": "✅ 已完成(结束)",
@@ -6977,7 +6992,7 @@ def infer_current_macro_stages(proj_label, proj_data=None):
 
 def build_project_stage_segments(proj_label, proj_data):
     comps = (proj_data or {}).get("部件列表", {})
-    stage_records = {k: [] for k in ["预研", "立项", "建模", "打印", "涂装", "设计", "工程", "开模", "修模", "生产", "暂停", "结束"]}
+    stage_records = {k: [] for k in ["预研", "立项", "建模", "打印", "涂装", "设计", "工程", "开模", "复样", "生产", "暂停", "结束"]}
     all_records = []
     today = datetime.date.today()
     proj_base_label = str((proj_data or {}).get("项目名称", "")).strip() or str(proj_label).split(" 📦[", 1)[0].strip()
@@ -7076,7 +7091,7 @@ def build_project_stage_segments(proj_label, proj_data):
 
     if not stage_records["建模"] and milestone not in ["暂停研发", "生产结束", "项目结束撒花🎉", "✅ 已完成(结束)"]:
         if len(unique_dates) > 1 or milestone in ["研发中", "待开定", "已开定", "下模中", "生产中"]:
-            higher_stage_exists = any(stage_records.get(s) for s in ["设计", "工程", "开模", "修模", "生产"])
+            higher_stage_exists = any(stage_records.get(s) for s in ["设计", "工程", "开模", "复样", "生产"])
             if higher_stage_exists:
                 build_seed = (launch_start + datetime.timedelta(days=1)) if launch_start else first_date
             else:
@@ -7127,7 +7142,7 @@ def build_project_stage_segments(proj_label, proj_data):
 
     if "生产" in current_macros and not stage_records["生产"]:
         prod_seed = max(
-            [max([x["date"] for x in stage_records[s]]) for s in ["开模", "修模", "工程", "设计", "建模"] if stage_records[s]],
+            [max([x["date"] for x in stage_records[s]]) for s in ["开模", "复样", "工程", "设计", "建模"] if stage_records[s]],
             default=latest_date
         )
         stage_records["生产"].append({
@@ -7142,7 +7157,7 @@ def build_project_stage_segments(proj_label, proj_data):
             "synthetic": True,
         })
 
-    live_stage_order = ["建模", "打印", "涂装", "设计", "工程", "开模", "修模", "生产"]
+    live_stage_order = ["建模", "打印", "涂装", "设计", "工程", "开模", "复样", "生产"]
     if current_macros and milestone not in ["暂停研发", "生产结束", "项目结束撒花🎉", "✅ 已完成(结束)"]:
         latest_live_record_dt = max(
             [x["date"] for x in all_records if x["stage"] not in ["立项", "暂停", "结束"]],
@@ -7274,7 +7289,7 @@ def build_project_stage_segments(proj_label, proj_data):
                 open_pause_start_dt = pause_dt
                 break
 
-    for stage in ["预研", "建模", "打印", "涂装", "设计", "工程", "开模", "修模", "生产"]:
+    for stage in ["预研", "建模", "打印", "涂装", "设计", "工程", "开模", "复样", "生产"]:
         records = stage_records.get(stage, [])
         if not records:
             continue
@@ -11807,7 +11822,7 @@ elif menu == MENU_DASHBOARD:
     gantt_cat_orders = MACRO_STAGES.copy()
     combined_color_map = {
         "预研": "#CBD5E1", "立项": "#F2C14E", "建模": "#34C6D3", "打印": "#0EA5A4", "涂装": "#F59E0B", "设计": "#8B5CF6",
-        "工程": "#4F7CFF", "开模": "#FB7185", "修模": "#F97316",
+        "工程": "#4F7CFF", "开模": "#FB7185", "复样": "#F97316",
         "生产": "#37B36B", "暂停": "#64748B", "结束": "#334155"
     }
 
@@ -13402,7 +13417,7 @@ elif menu == MENU_PROJECTS:
                                 row_vals.append(1); row_hover.append(f"{hover_base}<br>状态: ✅ 生产期前置阶段默认视作完成")
                                 continue
                             if i == factory_idx:
-                                row_vals.append(2); row_hover.append(f"{hover_base}<br>状态: 🚀 <b>生产中（工厂复样）</b>")
+                                row_vals.append(2); row_hover.append(f"{hover_base}<br>状态: 🚀 <b>工厂复样推进中</b>")
                                 continue
                         if guantu_or_later_reached and stg in guantu_complete_stages:
                             row_vals.append(1); row_hover.append(f"{hover_base}<br>状态: ✅ 官图阶段后前序工序默认视作完成")
