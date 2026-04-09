@@ -8533,6 +8533,12 @@ def render_home_view(valid_projs, current_pm):
     stale_rows = [row for row in warning_rows if isinstance(row.get("断更天数"), int) and row["断更天数"] >= 7]
     stale_rows = sorted(stale_rows, key=lambda row: (-int(row.get("断更天数", 0)), str(row.get("项目", ""))))
 
+    def _home_project_jump_button(project_name, key_text, label="进入"):
+        proj_txt = str(project_name or "").strip()
+        if proj_txt and proj_txt in valid_projs:
+            if st.button(label, key=key_text, use_container_width=True):
+                switch_main_menu(MENU_PROJECTS, project_name=proj_txt)
+
     top1, top2, top3, top4 = st.columns(4)
     top1.metric("未完成待办", len(pending))
     top2.metric("已逾期待办", len(overdue))
@@ -8581,19 +8587,25 @@ def render_home_view(valid_projs, current_pm):
         project_rows = sorted(
             warning_rows,
             key=lambda row: (
-                int(row.get("断更天数", 99999)),
+                -int(row.get("断更天数", -1)),
                 str(row.get("项目", "")),
             ),
         )[:12]
         if project_rows:
             for idx, row in enumerate(project_rows, start=1):
+                gap = int(row.get("断更天数", 0))
+                if gap >= 14:
+                    gap_label = f"🔴 断更 {gap} 天"
+                elif gap >= 7:
+                    gap_label = f"🟠 断更 {gap} 天"
+                else:
+                    gap_label = f"🟢 最近更新 {row['最近更新']}"
                 p1, p2 = st.columns([4.0, 1.0])
                 with p1:
                     st.markdown(f"`{idx}` **{row['项目']}**")
-                    st.caption(f"{row['负责人']} ｜ {row['当前阶段']} ｜ 最近更新 {row['最近更新']}")
+                    st.caption(f"{row['负责人']} ｜ {row['当前阶段']} ｜ {gap_label}")
                 with p2:
-                    if st.button("进入", key=f"home_open_proj_{idx}", use_container_width=True):
-                        switch_main_menu(MENU_PROJECTS, project_name=row["项目"])
+                    _home_project_jump_button(row["项目"], f"home_open_proj_{idx}")
         else:
             st.info("当前视角下暂无可进入的项目。")
 
@@ -8606,21 +8618,31 @@ def render_home_view(valid_projs, current_pm):
                 "类型": "待办逾期",
                 "项目": todo_project_text(td) or "未关联项目",
                 "说明": str(td.get("任务", "")).strip(),
+                "跳转项目": (todo_project_list(td)[0] if todo_project_list(td) else ""),
             })
         for td in soon[:5]:
             warning_cards.append({
                 "类型": "即将到期",
                 "项目": todo_project_text(td) or "未关联项目",
                 "说明": str(td.get("任务", "")).strip(),
+                "跳转项目": (todo_project_list(td)[0] if todo_project_list(td) else ""),
             })
         for row in stale_rows[:5]:
             warning_cards.append({
                 "类型": f"断更 {row['断更天数']} 天",
                 "项目": row["项目"],
                 "说明": str(row.get("动态", "")).strip() or "暂无动态",
+                "跳转项目": row["项目"],
             })
         if warning_cards:
-            st.dataframe(pd.DataFrame(warning_cards), width='stretch', hide_index=True)
+            for idx, row in enumerate(warning_cards, start=1):
+                w1, w2 = st.columns([4.0, 1.0])
+                with w1:
+                    with st.container(border=True):
+                        st.markdown(f"**{row['类型']}**")
+                        st.caption(f"{row['项目']} ｜ {row['说明']}")
+                with w2:
+                    _home_project_jump_button(row.get("跳转项目", ""), f"home_warning_jump_{idx}")
         else:
             st.success("当前没有需要优先处理的逾期或断更预警。")
 
@@ -8639,7 +8661,15 @@ def render_home_view(valid_projs, current_pm):
                 if str(row.get("状态", "")).strip() in ["计划-Soon", "计划-Delay"]
             ]
             if focus_rows:
-                st.dataframe(pd.DataFrame(focus_rows[:8]), width='stretch', hide_index=True)
+                for idx, row in enumerate(focus_rows[:8], start=1):
+                    p1, p2 = st.columns([4.0, 1.0])
+                    with p1:
+                        with st.container(border=True):
+                            status_icon = "⏰" if row["状态"] == "计划-Soon" else "⚠️"
+                            st.markdown(f"**{status_icon} {row['项目']}**")
+                            st.caption(f"{row['阶段']} ｜ {row['状态']}")
+                    with p2:
+                        _home_project_jump_button(row["项目"], f"home_plan_jump_{idx}")
             else:
                 st.caption("本周暂时没有计划临期或延误。")
         else:
