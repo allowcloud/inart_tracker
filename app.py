@@ -10638,6 +10638,44 @@ def _merge_print_tracking_rows(stored_rows, auto_rows):
     return _dedupe_print_rows_semantically(merged)
 
 
+def _normalize_visible_print_projects(visible_projects):
+    out = []
+    for proj in visible_projects if isinstance(visible_projects, list) else []:
+        proj_txt = str(proj or "").strip()
+        if (not proj_txt) or proj_txt == "系统配置" or proj_txt not in db:
+            continue
+        if proj_txt in out:
+            continue
+        out.append(proj_txt)
+    return out
+
+
+def _split_print_tracking_rows_by_scope(stored_rows, visible_projects):
+    normalized_rows = _normalize_print_tracking_rows(stored_rows)
+    scope_projects = _normalize_visible_print_projects(visible_projects)
+    if not scope_projects:
+        return normalized_rows, [], []
+
+    scope_set = set(scope_projects)
+    scoped_rows = []
+    outside_rows = []
+    for row in normalized_rows:
+        proj_txt = str((row or {}).get("项目", "")).strip()
+        if proj_txt in scope_set:
+            scoped_rows.append(dict(row))
+        else:
+            outside_rows.append(dict(row))
+    return scoped_rows, outside_rows, scope_projects
+
+
+def _merge_print_tracking_rows_for_scope(stored_rows, scoped_rows, visible_projects):
+    _, outside_rows, scope_projects = _split_print_tracking_rows_by_scope(stored_rows, visible_projects)
+    normalized_scope_rows = _normalize_print_tracking_rows(scoped_rows)
+    if not scope_projects:
+        return normalized_scope_rows
+    return _normalize_print_tracking_rows(outside_rows + normalized_scope_rows)
+
+
 def _get_print_tracking_status_payload(row_obj, action_type="打印追踪更新"):
     row = row_obj if isinstance(row_obj, dict) else {}
     desc = str(row.get("\u63cf\u8ff0", "")).strip() or "(\u65e0\u63cf\u8ff0)"
@@ -10741,13 +10779,16 @@ def render_print_tracking_board(pm_view, visible_projects, ui_prefix="print_trac
     st.caption("\u81ea\u52a8\u6c47\u805a\u5f85\u529e/\u65e5\u5fd7\u4e2d\u7684\u6253\u5370\u4fe1\u606f\uff0c\u5e76\u7edf\u4e00\u8ffd\u8e2a\uff1a\u662f\u5426\u5b89\u6392\u6253\u5370\u3001\u7ed9\u8c01\u6253\u3001\u662f\u5426\u6536\u5230\u4ef6\u3002")
 
     cfg = db.setdefault("\u7cfb\u7edf\u914d\u7f6e", {})
-    stored_rows = cfg.get("\u6253\u5370\u8ffd\u8e2a\u5217\u8868", []) if isinstance(cfg.get("\u6253\u5370\u8ffd\u8e2a\u5217\u8868", []), list) else []
+    stored_rows_all = cfg.get("\u6253\u5370\u8ffd\u8e2a\u5217\u8868", []) if isinstance(cfg.get("\u6253\u5370\u8ffd\u8e2a\u5217\u8868", []), list) else []
     locations = _normalize_print_location_options(cfg.get("\u6253\u5370\u5730\u70b9\u9009\u9879", []))
+    scope_projects = _normalize_visible_print_projects(visible_projects)
+    stored_rows, stored_rows_outside_scope, scoped_projects = _split_print_tracking_rows_by_scope(stored_rows_all, visible_projects)
 
     auto_rows = []
-    auto_rows.extend(_build_auto_print_rows_from_todo(pm_view, visible_projects, locations))
-    auto_rows.extend(_build_auto_print_rows_from_logs(visible_projects, locations, days=30))
+    auto_rows.extend(_build_auto_print_rows_from_todo(pm_view, scope_projects, locations))
+    auto_rows.extend(_build_auto_print_rows_from_logs(scope_projects, locations, days=30))
     merged_rows = _merge_print_tracking_rows(stored_rows, auto_rows)
+    project_locked_scope = len(scoped_projects) == 1
 
     source_cnt = {
         "Todo\u81ea\u52a8\u635e\u53d6": len([x for x in merged_rows if str(x.get("\u6765\u6e90", "")).strip() == "Todo\u81ea\u52a8\u635e\u53d6"]),
@@ -10755,6 +10796,10 @@ def render_print_tracking_board(pm_view, visible_projects, ui_prefix="print_trac
         "\u624b\u52a8\u5f55\u5165": len([x for x in merged_rows if str(x.get("\u6765\u6e90", "")).strip() == "\u624b\u52a8\u5f55\u5165"]),
     }
     st.caption(f"\U0001f4cc \u5f85\u529e\u81ea\u52a8\u635e\u53d6 {source_cnt['Todo\u81ea\u52a8\u635e\u53d6']} \u6761 \uff5c \U0001f4cb \u65e5\u5fd7\u81ea\u52a8\u635e\u53d6 {source_cnt['\u65e5\u5fd7\u81ea\u52a8\u635e\u53d6']} \u6761 \uff5c \u270f\ufe0f \u624b\u52a8\u5f55\u5165 {source_cnt['\u624b\u52a8\u5f55\u5165']} \u6761")
+    if project_locked_scope:
+        st.caption(f"\u5f53\u524d\u662f\u9879\u76ee\u7ea7\u6253\u5370\u8ffd\u8e2a\u89c6\u56fe\uff1a\u672c\u6b21\u4fdd\u5b58\u53ea\u4f1a\u5f71\u54cd\u3010{scoped_projects[0]}\u3011\u8fd9\u4e00\u9879\uff0c\u5176\u4ed6\u9879\u76ee\u8bb0\u5f55\u4f1a\u539f\u6837\u4fdd\u7559\u3002")
+    elif scoped_projects and stored_rows_outside_scope:
+        st.caption(f"\u5f53\u524d\u53ea\u5c55\u793a\u6240\u9009\u8303\u56f4\u5185\u7684\u6253\u5370\u8ffd\u8e2a\uff1b\u4fdd\u5b58\u65f6\u4f1a\u4fdd\u7559\u8303\u56f4\u5916\u7684 {len(stored_rows_outside_scope)} \u6761\u8bb0\u5f55\u3002")
 
     with st.container(border=True):
         st.markdown("**\u270f\ufe0f \u624b\u52a8\u65b0\u589e\u6253\u5370\u8ffd\u8e2a**")
@@ -10762,7 +10807,7 @@ def render_print_tracking_board(pm_view, visible_projects, ui_prefix="print_trac
         with c1:
             add_date = st.date_input("\u65e5\u671f", datetime.date.today(), key=f"{ui_prefix}_add_date")
         with c2:
-            proj_opts = [p for p in visible_projects if p in db and p != "\u7cfb\u7edf\u914d\u7f6e"]
+            proj_opts = list(scope_projects)
             add_proj = st.selectbox("\u9879\u76ee", proj_opts if proj_opts else [""], key=f"{ui_prefix}_add_proj")
         with c3:
             comp_opts = ["\u5168\u5c40\u8fdb\u5ea6"]
@@ -10801,7 +10846,11 @@ def render_print_tracking_board(pm_view, visible_projects, ui_prefix="print_trac
                 merged_rows.append(new_row)
                 if final_loc:
                     locations = _normalize_print_location_options(locations + [final_loc])
-                cfg["\u6253\u5370\u8ffd\u8e2a\u5217\u8868"] = _normalize_print_tracking_rows(merged_rows)
+                cfg["\u6253\u5370\u8ffd\u8e2a\u5217\u8868"] = _merge_print_tracking_rows_for_scope(
+                    stored_rows_all,
+                    merged_rows,
+                    scope_projects,
+                )
                 cfg["\u6253\u5370\u5730\u70b9\u9009\u9879"] = locations
                 _append_print_tracking_standard_event(new_row, action_type="打印追踪新增")
                 sync_save_db("\u7cfb\u7edf\u914d\u7f6e")
@@ -10838,7 +10887,7 @@ def render_print_tracking_board(pm_view, visible_projects, ui_prefix="print_trac
         column_config={
             "_id": st.column_config.TextColumn("_id", disabled=True, width="small"),
             "\u65e5\u671f": st.column_config.TextColumn("\u65e5\u671f(YYYY-MM-DD)", width="small"),
-            "\u9879\u76ee": st.column_config.TextColumn("\u9879\u76ee", width="medium"),
+            "\u9879\u76ee": st.column_config.TextColumn("\u9879\u76ee", width="medium", disabled=project_locked_scope),
             "\u90e8\u4ef6": st.column_config.TextColumn("\u90e8\u4ef6", width="small"),
             "\u63cf\u8ff0": st.column_config.TextColumn("\u63cf\u8ff0", width="large"),
             "\u6253\u5370\u5730\u70b9": st.column_config.SelectboxColumn(
@@ -10850,7 +10899,7 @@ def render_print_tracking_board(pm_view, visible_projects, ui_prefix="print_trac
             "\u6536\u5230\u65e5\u671f": st.column_config.TextColumn("\u6536\u5230\u65e5\u671f", width="small", help="\u52fe\u9009\u5df2\u6536\u5230\u540e\u4f1a\u81ea\u52a8\u8865\u5f53\u5929\uff0c\u53ef\u624b\u52a8\u6539\u4e3a\u5b9e\u9645\u65e5\u671f"),
             "\u6765\u6e90": st.column_config.TextColumn("\u6765\u6e90", disabled=True, width="small"),
         },
-        disabled=["_id", "\u6765\u6e90"],
+        disabled=["_id", "\u6765\u6e90"] + (["\u9879\u76ee"] if project_locked_scope else []),
     )
 
     if st.button("\U0001f4be \u4fdd\u5b58\u6253\u5370\u8ffd\u8e2a", key=f"{ui_prefix}_save"):
@@ -10903,7 +10952,11 @@ def render_print_tracking_board(pm_view, visible_projects, ui_prefix="print_trac
                 locations.append(str(row.get("\u6253\u5370\u5730\u70b9", "")).strip())
             new_rows.append(row)
 
-        cfg["\u6253\u5370\u8ffd\u8e2a\u5217\u8868"] = _normalize_print_tracking_rows(new_rows)
+        cfg["\u6253\u5370\u8ffd\u8e2a\u5217\u8868"] = _merge_print_tracking_rows_for_scope(
+            stored_rows_all,
+            new_rows,
+            scope_projects,
+        )
         cfg["\u6253\u5370\u5730\u70b9\u9009\u9879"] = _normalize_print_location_options(locations)
 
         for proj in sorted([p for p in changed_projects if p in db]):
@@ -15092,6 +15145,9 @@ elif menu == MENU_MAINTENANCE:
         horizontal=True,
         key=f"maintenance_mode_{norm_text(sel_proj)}",
     )
+    maintenance_show_history = maintenance_mode == "📝 项目历史"
+    maintenance_show_linkage = maintenance_mode == "🔗 串联排查"
+    maintenance_show_cross = maintenance_mode == "🗓️ 跨项目修正"
     if maintenance_mode == "📝 项目历史":
         st.caption("先看当前项目历史日志和图片画廊；适合回看、补校和改原记录。")
     elif maintenance_mode == "🔗 串联排查":
@@ -15099,7 +15155,7 @@ elif menu == MENU_MAINTENANCE:
     else:
         st.caption("先看跨项目按日修正；适合同一天批量修改多项目历史。")
     low_conf_events = [x for x in collect_low_confidence_standard_events(limit=80) if str(x.get("项目", "")).strip() == str(sel_proj).strip()]
-    if low_conf_events:
+    if maintenance_show_linkage and low_conf_events:
         with st.expander(f"🧭 当前项目的识别待确认 ({len(low_conf_events)} 条)", expanded=(maintenance_mode == "🔗 串联排查")):
             st.caption("这里直接显示当前项目的高风险识别记录，方便你在查历史时顺手确认，不用再切去【系统设置】。")
             quick_rows = []
@@ -15133,84 +15189,88 @@ elif menu == MENU_MAINTENANCE:
     flat_data = history_view_state["flat_data"]
     log_ref_map = history_view_state["log_ref_map"]
 
-    st.divider()
-    st.subheader("🕒 待办关联历史（关联此项目）")
-    load_todo_history = st.checkbox(
-        "加载待办关联历史（含已完成记录 / 演进）",
-        value=(maintenance_mode == "🔗 串联排查"),
-        key=f"hist_todo_load_{norm_text(sel_proj)}",
-        help="默认延迟加载，避免每次切项目都先遍历整份待办列表。",
-    )
-    if load_todo_history:
-        done_todos = collect_history_done_project_todos(sel_proj)
-        st.markdown("**✅ 已完成待办记录（关联此项目）**")
-        if done_todos:
-            done_rows = []
-            for td in done_todos:
-                done_rows.append({
-                    "完成时间": td.get("完成时间", ""),
-                    "任务": td.get("任务", ""),
-                    "CP/DDL": todo_cpddl_text(td),
-                    "关联人员": td.get("关联人员", ""),
-                    "创建": td.get("创建", ""),
-                })
-            st.dataframe(pd.DataFrame(done_rows), width="stretch", hide_index=True)
-        else:
-            st.caption("暂无已完成并关联此项目的待办记录。")
-
-        project_todos = collect_history_project_todos(sel_proj)
-        st.markdown("**🕒 待办历史演进（关联此项目）**")
-        if project_todos:
-            for td in project_todos:
-                task_title = str(td.get("任务", "")).strip() or "(空任务)"
-                item_id = str(td.get("_id", "")).strip()
-                scope_txt = todo_scope_of(td)
-                proj_txt = todo_project_text(td) or "(不关联项目)"
-                done_txt = "已完成" if bool(td.get("完成")) else "未完成"
-                with st.expander(f"{task_title} ｜ {done_txt} ｜ {proj_txt}", expanded=False):
-                    hist_rows = []
-                    for hv in td.get("历史版本", []):
-                        if not isinstance(hv, dict):
-                            continue
-                        hv_proj = normalize_todo_project_list(hv.get("关联项目列表", []))
-                        hist_rows.append({
-                            "版本": "历史",
-                            "时间": str(hv.get("时间", "")).strip(),
-                            "操作者": str(hv.get("操作者", "")).strip() or "系统",
-                            "任务": str(hv.get("任务", "")).strip(),
-                            "CP/DDL": str(hv.get("CPDDL", "")).strip(),
-                            "关联项目": " / ".join(hv_proj) if hv_proj else "(不关联项目)",
-                            "关联人员": str(hv.get("关联人员", "")).strip(),
-                            "所属视角": str(hv.get("所属视角", "")).strip() or scope_txt,
-                            "完成": "是" if bool(hv.get("完成", False)) else "否",
-                        })
-                    hist_rows.append({
-                        "版本": "当前",
-                        "时间": str(td.get("完成时间", "")).strip() if bool(td.get("完成")) else str(td.get("创建", "")).strip(),
-                        "操作者": "-",
-                        "任务": task_title,
+    if maintenance_show_linkage:
+        st.divider()
+        st.subheader("🕒 待办关联历史（关联此项目）")
+        load_todo_history = st.checkbox(
+            "加载待办关联历史（含已完成记录 / 演进）",
+            value=True,
+            key=f"hist_todo_load_{norm_text(sel_proj)}",
+            help="默认延迟加载，避免每次切项目都先遍历整份待办列表。",
+        )
+        if load_todo_history:
+            done_todos = collect_history_done_project_todos(sel_proj)
+            st.markdown("**✅ 已完成待办记录（关联此项目）**")
+            if done_todos:
+                done_rows = []
+                for td in done_todos:
+                    done_rows.append({
+                        "完成时间": td.get("完成时间", ""),
+                        "任务": td.get("任务", ""),
                         "CP/DDL": todo_cpddl_text(td),
-                        "关联项目": proj_txt,
-                        "关联人员": str(td.get("关联人员", "")).strip(),
-                        "所属视角": scope_txt,
-                        "完成": "是" if bool(td.get("完成")) else "否",
+                        "关联人员": td.get("关联人员", ""),
+                        "创建": td.get("创建", ""),
                     })
-                    st.caption(f"待办 ID: {item_id}")
-                    st.dataframe(pd.DataFrame(hist_rows), width="stretch", hide_index=True)
-        else:
-            st.caption("暂无关联此项目的待办历史。")
-    else:
-        st.caption("待办关联历史已改成延迟加载；需要时再勾选，切项目和切部件会轻很多。")
+                st.dataframe(pd.DataFrame(done_rows), width="stretch", hide_index=True)
+            else:
+                st.caption("暂无已完成并关联此项目的待办记录。")
 
-    st.divider()
-    st.subheader("🔗 统一事件时间线（跨入口互通视图）")
-    st.caption("这里会把 To-do、全局大盘与甘特图、项目空间等不同入口的写入，收束成同一种事件结构，便于你回看系统是怎么理解和联动的。")
-    load_standard_events = st.checkbox(
-        "加载统一事件时间线",
-        value=(maintenance_mode == "🔗 串联排查"),
-        key=f"hist_std_evt_load_{norm_text(sel_proj)}",
-        help="默认延迟加载，避免历史页每次重跑都先扫标准事件流和筛选大表。",
-    )
+            project_todos = collect_history_project_todos(sel_proj)
+            st.markdown("**🕒 待办历史演进（关联此项目）**")
+            if project_todos:
+                for td in project_todos:
+                    task_title = str(td.get("任务", "")).strip() or "(空任务)"
+                    item_id = str(td.get("_id", "")).strip()
+                    scope_txt = todo_scope_of(td)
+                    proj_txt = todo_project_text(td) or "(不关联项目)"
+                    done_txt = "已完成" if bool(td.get("完成")) else "未完成"
+                    with st.expander(f"{task_title} ｜ {done_txt} ｜ {proj_txt}", expanded=False):
+                        hist_rows = []
+                        for hv in td.get("历史版本", []):
+                            if not isinstance(hv, dict):
+                                continue
+                            hv_proj = normalize_todo_project_list(hv.get("关联项目列表", []))
+                            hist_rows.append({
+                                "版本": "历史",
+                                "时间": str(hv.get("时间", "")).strip(),
+                                "操作者": str(hv.get("操作者", "")).strip() or "系统",
+                                "任务": str(hv.get("任务", "")).strip(),
+                                "CP/DDL": str(hv.get("CPDDL", "")).strip(),
+                                "关联项目": " / ".join(hv_proj) if hv_proj else "(不关联项目)",
+                                "关联人员": str(hv.get("关联人员", "")).strip(),
+                                "所属视角": str(hv.get("所属视角", "")).strip() or scope_txt,
+                                "完成": "是" if bool(hv.get("完成", False)) else "否",
+                            })
+                        hist_rows.append({
+                            "版本": "当前",
+                            "时间": str(td.get("完成时间", "")).strip() if bool(td.get("完成")) else str(td.get("创建", "")).strip(),
+                            "操作者": "-",
+                            "任务": task_title,
+                            "CP/DDL": todo_cpddl_text(td),
+                            "关联项目": proj_txt,
+                            "关联人员": str(td.get("关联人员", "")).strip(),
+                            "所属视角": scope_txt,
+                            "完成": "是" if bool(td.get("完成")) else "否",
+                        })
+                        st.caption(f"待办 ID: {item_id}")
+                        st.dataframe(pd.DataFrame(hist_rows), width="stretch", hide_index=True)
+            else:
+                st.caption("暂无关联此项目的待办历史。")
+        else:
+            st.caption("待办关联历史已改成延迟加载；需要时再勾选，切项目和切部件会轻很多。")
+
+        st.divider()
+        st.subheader("🔗 统一事件时间线（跨入口互通视图）")
+        st.caption("这里会把 To-do、全局大盘与甘特图、项目空间等不同入口的写入，收束成同一种事件结构，便于你回看系统是怎么理解和联动的。")
+        load_standard_events = st.checkbox(
+            "加载统一事件时间线",
+            value=True,
+            key=f"hist_std_evt_load_{norm_text(sel_proj)}",
+            help="默认延迟加载，避免历史页每次重跑都先扫标准事件流和筛选大表。",
+        )
+    else:
+        load_standard_events = False
+
     if load_standard_events:
         standard_events = collect_history_project_standard_events(sel_proj)
         if standard_events:
@@ -15372,9 +15432,10 @@ elif menu == MENU_MAINTENANCE:
         else:
             st.caption("这个项目还没有统一事件记录。后续从 To-do / 全局大盘与甘特图 / 项目空间写入后，会自动在这里汇总。")
     else:
-        st.caption("统一事件时间线已改成延迟加载；需要排查串联时再勾选即可。")
+        if maintenance_show_linkage:
+            st.caption("统一事件时间线已改成延迟加载；需要排查串联时再勾选即可。")
 
-    if flat_data:
+    if flat_data and maintenance_show_cross:
         df_logs = pd.DataFrame(flat_data).sort_values(by="日期", ascending=False).reset_index(drop=True)
         df_logs.insert(0, '序号', range(len(df_logs), 0, -1))
 
@@ -15382,201 +15443,191 @@ elif menu == MENU_MAINTENANCE:
         if not scope_projects:
             scope_projects = valid_p
 
-        load_day_tool = st.checkbox(
-            "加载跨项目按日修正工具",
-            value=(maintenance_mode == "🗓️ 跨项目修正"),
-            key=f"hist_day_load_{norm_text(current_pm)}_{norm_text(sel_proj)}",
-            help="这个工具会遍历当前视角下多项目日志，默认延迟加载，避免历史页每次重跑都先扫全量。",
-        )
+        day_scope_state = build_history_day_scope_rows(scope_projects)
+        day_global_log_ref = day_scope_state["log_ref"]
+        day_global_proj_map = day_scope_state["proj_map"]
+        day_global_comp_map = day_scope_state["comp_map"]
 
-        if load_day_tool:
-            day_scope_state = build_history_day_scope_rows(scope_projects)
-            day_global_log_ref = day_scope_state["log_ref"]
-            day_global_proj_map = day_scope_state["proj_map"]
-            day_global_comp_map = day_scope_state["comp_map"]
+        if day_scope_state["seeded_projects"]:
+            for p_name in sorted(day_scope_state["seeded_projects"]):
+                sync_save_db(p_name)
 
-            if day_scope_state["seeded_projects"]:
-                for p_name in sorted(day_scope_state["seeded_projects"]):
-                    sync_save_db(p_name)
+        day_global_df = pd.DataFrame(day_scope_state["rows"])
+        with st.expander("📅 按日查看 / 修正操作历史", expanded=True):
+            day_scope_key = norm_text(current_pm)
+            day_scope_mode = st.radio(
+                "查看范围",
+                ["当前项目", "当前视角全项目"],
+                horizontal=True,
+                key=f"hist_day_scope_mode_{day_scope_key}_{norm_text(sel_proj)}",
+            )
 
-            day_global_df = pd.DataFrame(day_scope_state["rows"])
-            with st.expander("📅 按日查看 / 修正操作历史", expanded=True):
-                day_scope_key = norm_text(current_pm)
-                day_scope_mode = st.radio(
-                    "查看范围",
-                    ["当前项目", "当前视角全项目"],
-                    horizontal=True,
-                    key=f"hist_day_scope_mode_{day_scope_key}_{norm_text(sel_proj)}",
-                )
+            if day_scope_mode == "当前项目":
+                day_base_df = day_global_df[day_global_df["项目"].astype(str) == str(sel_proj)].copy() if not day_global_df.empty else pd.DataFrame()
+                if sel_comp != "🌐 全部展示" and (not day_base_df.empty):
+                    day_base_df = day_base_df[day_base_df["部件"].astype(str) == str(sel_comp)].copy()
+                st.caption("这里和当前项目上下文保持一致；如果上面还筛了特定部件，这里也会一起跟随。")
+                day_empty_text = "当前项目在该过滤范围下暂无可按日查看的历史记录。"
+                day_save_scope_label = "当前项目"
+            else:
+                day_base_df = day_global_df.copy()
+                st.caption("这里是当前视角下的全项目工具，不受上方项目/部件筛选限制，适合做跨项目的同日修正。")
+                day_empty_text = "当前视角下无可按日查看的历史记录。"
+                day_save_scope_label = "当前视角全项目"
 
+            day_date_values = day_base_df["日期"].tolist() if "日期" in day_base_df.columns else []
+            day_options = sorted(
+                {str(x).strip() for x in day_date_values if str(x).strip()},
+                reverse=True,
+            )
+            if day_options:
+                sel_day = st.selectbox("选择日期", day_options, key=f"hist_day_pick_scope_{day_scope_key}_{norm_text(sel_proj)}_{day_scope_mode}")
+                day_source_df = day_base_df[day_base_df["日期"].astype(str) == str(sel_day)].copy()
+                day_source_df = day_source_df.sort_values(by=["项目", "部件", "日期"]).reset_index(drop=True)
                 if day_scope_mode == "当前项目":
-                    day_base_df = day_global_df[day_global_df["项目"].astype(str) == str(sel_proj)].copy() if not day_global_df.empty else pd.DataFrame()
-                    if sel_comp != "🌐 全部展示" and (not day_base_df.empty):
-                        day_base_df = day_base_df[day_base_df["部件"].astype(str) == str(sel_comp)].copy()
-                    st.caption("这里和下方历史日志保持同一项目上下文；如果上面还筛了特定部件，这里也会一起跟随。")
-                    day_empty_text = "当前项目在该过滤范围下暂无可按日查看的历史记录。"
-                    day_save_scope_label = "当前项目"
+                    st.caption(f"当前项目在 {sel_day} 共 {len(day_source_df)} 条记录。支持编辑或勾选删除。")
                 else:
-                    day_base_df = day_global_df.copy()
-                    st.caption("这里是当前视角下的全项目工具，不受上方项目/部件筛选限制，适合做跨项目的同日修正。")
-                    day_empty_text = "当前视角下无可按日查看的历史记录。"
-                    day_save_scope_label = "当前视角全项目"
+                    st.caption(f"当前视角下 {sel_day} 共 {len(day_source_df)} 条记录。支持编辑或勾选删除。")
 
-                day_date_values = day_base_df["日期"].tolist() if "日期" in day_base_df.columns else []
-                day_options = sorted(
-                    {str(x).strip() for x in day_date_values if str(x).strip()},
-                    reverse=True,
+                day_edit_df = day_source_df.drop(columns=["_id"]).copy()
+                day_edit_df["删除"] = False
+                st.caption("如果要改之前写过的提审补充说明，请直接修改下方“事件 / 提审补充说明”这一列；提审类型/结果/轮次改右侧对应列。")
+                day_edited_df = st.data_editor(
+                    day_edit_df,
+                    column_config={
+                        "项目": st.column_config.TextColumn(disabled=True),
+                        "部件": st.column_config.TextColumn(disabled=True),
+                        "日期": st.column_config.TextColumn("日期"),
+                        "工序": st.column_config.SelectboxColumn("工序", options=STAGES_UNIFIED, required=True),
+                        "类型": st.column_config.TextColumn("类型"),
+                        "事件": st.column_config.TextColumn("事件 / 提审补充说明"),
+                        "提审类型": st.column_config.SelectboxColumn("提审类型", options=REVIEW_TYPE_OPTIONS, required=True),
+                        "提审结果": st.column_config.SelectboxColumn("提审结果", options=REVIEW_RESULT_OPTIONS, required=True),
+                        "提审状态": st.column_config.TextColumn("提审状态", disabled=True),
+                        "提审轮次": st.column_config.NumberColumn("提审轮次", min_value=1, step=1),
+                        "删除": st.column_config.CheckboxColumn("删除"),
+                    },
+                    num_rows="fixed",
+                    width='stretch',
+                    key=f"hist_day_editor_scope_{day_scope_key}_{norm_text(sel_proj)}_{sel_day}_{day_scope_mode}",
                 )
-                if day_options:
-                    sel_day = st.selectbox("选择日期", day_options, key=f"hist_day_pick_scope_{day_scope_key}_{norm_text(sel_proj)}_{day_scope_mode}")
-                    day_source_df = day_base_df[day_base_df["日期"].astype(str) == str(sel_day)].copy()
-                    day_source_df = day_source_df.sort_values(by=["项目", "部件", "日期"]).reset_index(drop=True)
-                    if day_scope_mode == "当前项目":
-                        st.caption(f"当前项目在 {sel_day} 共 {len(day_source_df)} 条记录。支持编辑或勾选删除。")
+
+                if st.button(f"💾 保存当日修正（{day_save_scope_label}）", type="primary", key=f"btn_hist_day_save_scope_{day_scope_key}_{norm_text(sel_proj)}_{sel_day}_{day_scope_mode}"):
+                    touched_projects = set()
+                    update_count = 0
+                    delete_count = 0
+                    day_errors = []
+                    delete_ids = set()
+
+                    for ridx, row in day_edited_df.iterrows():
+                        lid = str(day_source_df.at[ridx, "_id"]).strip() if ridx in day_source_df.index else ""
+                        if not lid:
+                            continue
+
+                        proj_name = str(day_global_proj_map.get(lid, "")).strip()
+
+                        if bool(row.get("删除", False)):
+                            delete_ids.add(lid)
+                            if proj_name:
+                                touched_projects.add(proj_name)
+                            continue
+
+                        new_date = str(row.get("日期", "")).strip() or str(day_source_df.at[ridx, "日期"]).strip()
+                        if parse_date_safe(new_date) is None:
+                            day_errors.append(f"{proj_name or '-'}: 无效日期 {new_date}")
+                            continue
+
+                        new_stage = str(row.get("工序", "")).strip() or str(day_source_df.at[ridx, "工序"]).strip()
+                        if new_stage not in STAGES_UNIFIED:
+                            new_stage = str(day_source_df.at[ridx, "工序"]).strip()
+
+                        new_type = str(row.get("类型", "")).strip() or str(day_source_df.at[ridx, "类型"]).strip()
+                        new_event = str(row.get("事件", "")).strip() or str(day_source_df.at[ridx, "事件"]).strip()
+
+                        new_rt = normalize_review_type(row.get("提审类型", "(无)")) or "(无)"
+                        if new_rt not in REVIEW_TYPE_OPTIONS:
+                            new_rt = "(无)"
+                        new_rr = str(row.get("提审结果", "(无)")).strip() or "(无)"
+                        if new_rr not in REVIEW_RESULT_OPTIONS:
+                            new_rr = "(无)"
+                        new_round = normalize_review_round(row.get("提审轮次", "")) if new_rt != "(无)" else ""
+
+                        lg = day_global_log_ref.get(lid)
+                        if not isinstance(lg, dict):
+                            continue
+
+                        changed = False
+                        if str(lg.get("日期", "")) != new_date:
+                            lg["日期"] = new_date
+                            changed = True
+                        if str(lg.get("工序", "")) != new_stage:
+                            lg["工序"] = new_stage
+                            changed = True
+                        if str(lg.get("流转", "")) != new_type:
+                            lg["流转"] = new_type
+                            changed = True
+                        if str(lg.get("事件", "")) != new_event:
+                            lg["事件"] = new_event
+                            changed = True
+                        if normalize_review_type(lg.get("提审类型", "(无)")) != new_rt:
+                            lg["提审类型"] = new_rt
+                            changed = True
+                        if str(lg.get("提审结果", "(无)")) != new_rr:
+                            lg["提审结果"] = new_rr
+                            changed = True
+                        if str(lg.get("提审轮次", "")) != str(new_round):
+                            lg["提审轮次"] = new_round
+                            changed = True
+
+                        if changed:
+                            update_count += 1
+                            if proj_name:
+                                touched_projects.add(proj_name)
+
+                    if delete_ids:
+                        for proj_name in sorted({day_global_proj_map.get(lid, "") for lid in delete_ids if day_global_proj_map.get(lid, "")}):
+                            for c_name, c_info in db.get(proj_name, {}).get("部件列表", {}).items():
+                                logs_old = c_info.get("日志流", [])
+                                logs_new = [lg for lg in logs_old if str((lg or {}).get("_id", "")).strip() not in delete_ids]
+                                removed = len(logs_old) - len(logs_new)
+                                if removed > 0:
+                                    c_info["日志流"] = logs_new
+                                    delete_count += removed
+                                    touched_projects.add(proj_name)
+
+                    if touched_projects:
+                        history_event_dirty = False
+                        for proj_name in sorted(touched_projects):
+                            for c_info in db.get(proj_name, {}).get("部件列表", {}).values():
+                                c_info["日志流"] = sorted(c_info.get("日志流", []), key=lambda x: str((x or {}).get("日期", "")))
+                            sync_save_db(proj_name)
+                            history_event_dirty = append_history_refresh_standard_event(
+                                proj_name,
+                                actor=current_pm if current_pm != "所有人" else "系统",
+                            ) or history_event_dirty
+                        if history_event_dirty:
+                            sync_save_db("系统配置")
+
+                        msg = f"当日修正已保存：更新 {update_count} 条，删除 {delete_count} 条，影响 {len(touched_projects)} 个项目，并已刷新当前解释 / To-do 最近联动。"
+                        if day_errors:
+                            msg += f" 另有 {len(day_errors)} 条日期无效已跳过。"
+                        st.success(msg)
+                        st.rerun()
                     else:
-                        st.caption(f"当前视角下 {sel_day} 共 {len(day_source_df)} 条记录。支持编辑或勾选删除。")
-
-                    day_edit_df = day_source_df.drop(columns=["_id"]).copy()
-                    day_edit_df["删除"] = False
-                    st.caption("如果要改之前写过的提审补充说明，请直接修改下方“事件 / 提审补充说明”这一列；提审类型/结果/轮次改右侧对应列。")
-                    day_edited_df = st.data_editor(
-                        day_edit_df,
-                        column_config={
-                            "项目": st.column_config.TextColumn(disabled=True),
-                            "部件": st.column_config.TextColumn(disabled=True),
-                            "日期": st.column_config.TextColumn("日期"),
-                            "工序": st.column_config.SelectboxColumn("工序", options=STAGES_UNIFIED, required=True),
-                            "类型": st.column_config.TextColumn("类型"),
-                            "事件": st.column_config.TextColumn("事件 / 提审补充说明"),
-                            "提审类型": st.column_config.SelectboxColumn("提审类型", options=REVIEW_TYPE_OPTIONS, required=True),
-                            "提审结果": st.column_config.SelectboxColumn("提审结果", options=REVIEW_RESULT_OPTIONS, required=True),
-                            "提审状态": st.column_config.TextColumn("提审状态", disabled=True),
-                            "提审轮次": st.column_config.NumberColumn("提审轮次", min_value=1, step=1),
-                            "删除": st.column_config.CheckboxColumn("删除"),
-                        },
-                        num_rows="fixed",
-                        width='stretch',
-                        key=f"hist_day_editor_scope_{day_scope_key}_{norm_text(sel_proj)}_{sel_day}_{day_scope_mode}",
-                    )
-
-                    if st.button(f"💾 保存当日修正（{day_save_scope_label}）", type="primary", key=f"btn_hist_day_save_scope_{day_scope_key}_{norm_text(sel_proj)}_{sel_day}_{day_scope_mode}"):
-                        touched_projects = set()
-                        update_count = 0
-                        delete_count = 0
-                        day_errors = []
-                        delete_ids = set()
-
-                        for ridx, row in day_edited_df.iterrows():
-                            lid = str(day_source_df.at[ridx, "_id"]).strip() if ridx in day_source_df.index else ""
-                            if not lid:
-                                continue
-
-                            proj_name = str(day_global_proj_map.get(lid, "")).strip()
-
-                            if bool(row.get("删除", False)):
-                                delete_ids.add(lid)
-                                if proj_name:
-                                    touched_projects.add(proj_name)
-                                continue
-
-                            new_date = str(row.get("日期", "")).strip() or str(day_source_df.at[ridx, "日期"]).strip()
-                            if parse_date_safe(new_date) is None:
-                                day_errors.append(f"{proj_name or '-'}: 无效日期 {new_date}")
-                                continue
-
-                            new_stage = str(row.get("工序", "")).strip() or str(day_source_df.at[ridx, "工序"]).strip()
-                            if new_stage not in STAGES_UNIFIED:
-                                new_stage = str(day_source_df.at[ridx, "工序"]).strip()
-
-                            new_type = str(row.get("类型", "")).strip() or str(day_source_df.at[ridx, "类型"]).strip()
-                            new_event = str(row.get("事件", "")).strip() or str(day_source_df.at[ridx, "事件"]).strip()
-
-                            new_rt = normalize_review_type(row.get("提审类型", "(无)")) or "(无)"
-                            if new_rt not in REVIEW_TYPE_OPTIONS:
-                                new_rt = "(无)"
-                            new_rr = str(row.get("提审结果", "(无)")).strip() or "(无)"
-                            if new_rr not in REVIEW_RESULT_OPTIONS:
-                                new_rr = "(无)"
-                            new_round = normalize_review_round(row.get("提审轮次", "")) if new_rt != "(无)" else ""
-
-                            lg = day_global_log_ref.get(lid)
-                            if not isinstance(lg, dict):
-                                continue
-
-                            changed = False
-                            if str(lg.get("日期", "")) != new_date:
-                                lg["日期"] = new_date
-                                changed = True
-                            if str(lg.get("工序", "")) != new_stage:
-                                lg["工序"] = new_stage
-                                changed = True
-                            if str(lg.get("流转", "")) != new_type:
-                                lg["流转"] = new_type
-                                changed = True
-                            if str(lg.get("事件", "")) != new_event:
-                                lg["事件"] = new_event
-                                changed = True
-                            if normalize_review_type(lg.get("提审类型", "(无)")) != new_rt:
-                                lg["提审类型"] = new_rt
-                                changed = True
-                            if str(lg.get("提审结果", "(无)")) != new_rr:
-                                lg["提审结果"] = new_rr
-                                changed = True
-                            if str(lg.get("提审轮次", "")) != str(new_round):
-                                lg["提审轮次"] = new_round
-                                changed = True
-
-                            if changed:
-                                update_count += 1
-                                if proj_name:
-                                    touched_projects.add(proj_name)
-
-                        if delete_ids:
-                            for proj_name in sorted({day_global_proj_map.get(lid, "") for lid in delete_ids if day_global_proj_map.get(lid, "")}):
-                                for c_name, c_info in db.get(proj_name, {}).get("部件列表", {}).items():
-                                    logs_old = c_info.get("日志流", [])
-                                    logs_new = [lg for lg in logs_old if str((lg or {}).get("_id", "")).strip() not in delete_ids]
-                                    removed = len(logs_old) - len(logs_new)
-                                    if removed > 0:
-                                        c_info["日志流"] = logs_new
-                                        delete_count += removed
-                                        touched_projects.add(proj_name)
-
-                        if touched_projects:
-                            history_event_dirty = False
-                            for proj_name in sorted(touched_projects):
-                                for c_info in db.get(proj_name, {}).get("部件列表", {}).values():
-                                    c_info["日志流"] = sorted(c_info.get("日志流", []), key=lambda x: str((x or {}).get("日期", "")))
-                                sync_save_db(proj_name)
-                                history_event_dirty = append_history_refresh_standard_event(
-                                    proj_name,
-                                    actor=current_pm if current_pm != "所有人" else "系统",
-                                ) or history_event_dirty
-                            if history_event_dirty:
-                                sync_save_db("系统配置")
-
-                            msg = f"当日修正已保存：更新 {update_count} 条，删除 {delete_count} 条，影响 {len(touched_projects)} 个项目，并已刷新当前解释 / To-do 最近联动。"
-                            if day_errors:
-                                msg += f" 另有 {len(day_errors)} 条日期无效已跳过。"
-                            st.success(msg)
-                            st.rerun()
+                        if day_errors:
+                            st.warning("\n".join(day_errors[:8]))
                         else:
-                            if day_errors:
-                                st.warning("\n".join(day_errors[:8]))
-                            else:
-                                st.info("当日无可保存变更。")
-                else:
-                    st.caption(day_empty_text)
-        else:
-            st.caption("跨项目按日修正工具已改成延迟加载；需要时再勾选，上面的历史页会顺很多。")
-
+                            st.info("当日无可保存变更。")
+            else:
+                st.caption(day_empty_text)
+    elif maintenance_show_history and flat_data:
         render_project_history_editor_block(
             sel_proj,
             sel_comp,
             current_pm,
             key_prefix=f"maintenance_history_{norm_text(sel_proj)}",
         )
-    else:
+    elif maintenance_show_history or maintenance_show_cross:
         st.info("该过滤条件下暂无记录。")
 
 # ==========================================

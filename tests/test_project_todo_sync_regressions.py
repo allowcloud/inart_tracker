@@ -154,6 +154,77 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         self.assertEqual(print_rows[0]["\u9879\u76ee"], "proj_new")
         self.assertEqual(print_rows[1]["\u9879\u76ee"], "proj_other")
 
+    def test_merge_print_tracking_rows_for_scope_preserves_other_projects(self) -> None:
+        ns = load_app_functions(
+            "_normalize_print_tracking_rows",
+            "_normalize_visible_print_projects",
+            "_split_print_tracking_rows_by_scope",
+            "_merge_print_tracking_rows_for_scope",
+        )
+        globals_map = ns._merge_print_tracking_rows_for_scope.__globals__
+        globals_map["db"] = {
+            "系统配置": {},
+            "proj_a": {},
+            "proj_b": {},
+        }
+        globals_map["PRINT_TRACK_SOURCE_LABELS"] = {
+            "Todo自动捞取": "Todo自动捞取",
+            "日志自动捞取": "日志自动捞取",
+            "手动录入": "手动录入",
+        }
+        globals_map["parse_date_safe"] = lambda text: (
+            datetime.datetime.strptime(str(text), "%Y-%m-%d").date()
+            if str(text).strip()
+            else None
+        )
+
+        stored_rows = [
+            {
+                "_id": "a_manual",
+                "日期": "2026-04-08",
+                "项目": "proj_a",
+                "部件": "头雕(表情)",
+                "描述": "A 项目手动记录",
+                "打印地点": "内部",
+                "已收到": False,
+                "收到日期": "",
+                "来源": "手动录入",
+            },
+            {
+                "_id": "b_manual",
+                "日期": "2026-04-07",
+                "项目": "proj_b",
+                "部件": "配件",
+                "描述": "B 项目手动记录",
+                "打印地点": "外部",
+                "已收到": True,
+                "收到日期": "2026-04-08",
+                "来源": "手动录入",
+            },
+        ]
+        scoped_rows = [
+            {
+                "_id": "a_manual",
+                "日期": "2026-04-09",
+                "项目": "proj_a",
+                "部件": "头雕(表情)",
+                "描述": "A 项目改过的新记录",
+                "打印地点": "内部",
+                "已收到": False,
+                "收到日期": "",
+                "来源": "手动录入",
+            }
+        ]
+
+        merged = ns._merge_print_tracking_rows_for_scope(stored_rows, scoped_rows, ["proj_a"])
+
+        self.assertEqual({row["项目"] for row in merged}, {"proj_a", "proj_b"})
+        row_a = next(row for row in merged if row["项目"] == "proj_a")
+        row_b = next(row for row in merged if row["项目"] == "proj_b")
+        self.assertEqual(row_a["描述"], "A 项目改过的新记录")
+        self.assertEqual(row_b["描述"], "B 项目手动记录")
+        self.assertTrue(row_b["已收到"])
+
     def test_build_project_stage_segments_resumes_after_latest_pause_when_project_is_active(self) -> None:
         ns = load_app_functions("build_project_stage_segments")
         globals_map = ns.build_project_stage_segments.__globals__
