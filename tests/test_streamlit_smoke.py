@@ -44,6 +44,15 @@ class StreamlitSmokeTest(unittest.TestCase):
             if at.exception:
                 raise SystemExit("project space exceptions: " + " | ".join(str(x.value) for x in at.exception))
 
+            detail_radio = next((r for r in at.radio if "项目详情标签" in str(r.label or "")), None)
+            if detail_radio is not None:
+                progress_option = next((o for o in detail_radio.options if "进展" in str(o)), None)
+                if progress_option is not None:
+                    detail_radio.set_value(progress_option)
+                    at.run()
+                    if at.exception:
+                        raise SystemExit("project progress exceptions: " + " | ".join(str(x.value) for x in at.exception))
+
             print("PROJECT_SPACE_OK")
             """
         )
@@ -76,6 +85,34 @@ class StreamlitSmokeTest(unittest.TestCase):
             at.run()
             if at.exception:
                 raise SystemExit("initial run exceptions: " + " | ".join(str(x.value) for x in at.exception))
+
+            current_view = "Mo"
+            for sel in at.selectbox:
+                if "视角切换" in str(sel.label or ""):
+                    current_view = str(sel.value or "Mo")
+                    break
+            if current_view == "所有人":
+                current_view = "Mo"
+
+            at.session_state["db"]["1/6 SMOKE"] = {{
+                "负责人": current_view,
+                "Milestone": "研发中",
+                "Target": "TBD",
+                "发货区间": "",
+                "部件列表": {{
+                    "全局进度": {{
+                        "主流程": "建模(含打印/签样)",
+                        "日志流": [
+                            {{
+                                "日期": "2026-04-09",
+                                "流转": "测试",
+                                "工序": "建模(含打印/签样)",
+                                "事件": "smoke project ready",
+                            }}
+                        ],
+                    }}
+                }},
+            }}
 
             jump_btn = None
             for btn in at.button:

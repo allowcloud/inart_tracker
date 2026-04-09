@@ -8518,13 +8518,8 @@ def build_home_project_warning_rows(project_names, pm_view):
 def render_home_view(valid_projs, current_pm):
     st.title("🏠 今日视图")
     st.caption("先看今天要做什么，再进入项目空间或速记；把日常高频动作收在首屏。")
-
-    with st.expander("🧭 首次使用建议", expanded=False):
-        st.markdown(
-            "1. 先看 **今日待办** 和 **重点预警**，确定今天最先推进什么。\n"
-            "2. 点项目名进入 **项目空间**，补进展、补历史或维护专项模块。\n"
-            "3. 需要手机快速录入时，去 **速记**；需要集中改提醒时，去 **我的待办**。"
-        )
+    with st.container(border=True):
+        st.caption("推荐路径：先看今日待办和重点预警，再点项目进入项目空间；手机随手记走速记，集中改提醒走我的待办。")
 
     cfg = db.get("系统配置", {}) if isinstance(db, dict) else {}
     todo_all = cfg.get("PM_TODO_LIST", []) if isinstance(cfg.get("PM_TODO_LIST", []), list) else []
@@ -13187,11 +13182,11 @@ elif menu == MENU_PROJECTS:
     todo_all_cfg = db.get("系统配置", {}).get("PM_TODO_LIST", []) if isinstance(db.get("系统配置", {}), dict) else []
     todo_list = [td for td in todo_all_cfg if todo_visible_for_view(td, current_pm)]
     with st.container():
-        st.caption("这里专注某一个项目。先选项目，再切到对应工作区直接处理。")
+        st.caption("这里专注某一个项目。先选项目，再切到对应详情标签直接处理。")
 
         c_proj_top1, c_proj_top2 = st.columns([4.2, 1.2])
         with c_proj_top1:
-            st.caption("高频入口已经收成 3 个工作区；要查系统为什么这样理解，再切到【历史 / 排查】。")
+            st.caption("高频操作已经收成项目详情标签；日常推进看【概览/进展】，低频专项再切到后面的标签。")
         with c_proj_top2:
             if st.button("➕ 手动建档新项目"):
                 st.session_state.new_proj_mode = not st.session_state.get('new_proj_mode', False)
@@ -13280,26 +13275,33 @@ elif menu == MENU_PROJECTS:
                 st.caption("项目备忘录")
                 st.info(project_memo)
             else:
-                st.caption("项目备忘录：暂无。可在下方专项模块继续维护。")
+                st.caption("项目备忘录：暂无。可在下方专项标签继续维护。")
+            recent_dynamic = str(proj_explain.get("内容", "")).strip()
+            if recent_dynamic:
+                st.caption("最近动态")
+                st.markdown(recent_dynamic)
             st.caption("下方的所有内容，都只作用于这个当前选定项目。")
 
-        project_space_mode = st.radio(
-            "当前工作区",
-            ["⚡ 日常推进", "🕰️ 历史 / 排查", "🧩 专项模块"],
+        project_detail_view = st.radio(
+            "项目详情标签",
+            ["📌 概览", "📝 进展", "📅 排期", "🧩 专项", "📦 包装", "💰 成本"],
             horizontal=True,
-            key=f"project_space_mode_{norm_text(sel_proj)}",
+            key=f"project_detail_view_{norm_text(sel_proj)}",
         )
-        if project_space_mode == "⚡ 日常推进":
-            st.caption("当前只放最常用的推进路径：项目状态总览 + 项目更新，选完项目就能直接动手。")
-        elif project_space_mode == "🕰️ 历史 / 排查":
-            st.caption("当前只放历史回看、当前解释和串联排查入口，避免和日常推进混在一起。")
-        else:
-            st.caption("当前只展示低频但必要的专项维护模块，避免高频推进和低频治理混在一起。")
+        detail_view_notes = {
+            "📌 概览": "先看矩阵和项目当前状态，确认这个项目今天整体推进到哪一步。",
+            "📝 进展": "这里放一句话更新、文件流转、项目历史和排查入口，是日常录入主路径。",
+            "📅 排期": "集中维护计划排期、阶段日期和周会备注，不和日常更新混在一起。",
+            "🧩 专项": "版权、配置清单、服装、小比例和打印追踪等低频模块统一收在这里。",
+            "📦 包装": "包装进度、入库和领用统一从这里维护，不再分散到别处。",
+            "💰 成本": "报价估算、实际明细和差异分析统一留在成本标签。",
+        }
+        st.caption(detail_view_notes.get(project_detail_view, ""))
 
-        if project_space_mode == "⚡ 日常推进":
+        if project_detail_view == "📌 概览":
             with st.container(border=True):
                 st.markdown("**📈 项目状态总览**")
-            st.caption("这是日常主入口之一：先看项目现在整体走到哪一步，再决定要不要补历史或进专项模块。")
+            st.caption("这是日常主入口之一：先看项目现在整体走到哪一步，再决定要不要补进展或进后面的专项标签。")
             st.markdown("**🔬 项目进度透视矩阵 (并行连消追踪)**")
             st.caption("颜色说明：🟩 已完成 ｜ 🟦 进行中/生产中 ｜ ⬛ 暂停前已流转 ｜ 🟨 Delay ｜ ⬜ 未流转")
             st.caption("默认模块（头雕/素体/手型/配件/地台）在没有单独推进前，会跟随全局进度点亮；单独改了模块进度后，再按模块自身显示。")
@@ -13475,7 +13477,7 @@ elif menu == MENU_PROJECTS:
                     },
                 )
 
-        if project_space_mode == "🕰️ 历史 / 排查":
+        if project_detail_view == "📝 进展":
             with st.container(border=True):
                 st.markdown("**🛠️ 排查与治理快捷入口**")
                 st.caption("识别不对、想查历史、想看统一事件时，从这里直接跳去【数据维护】对应项目。")
@@ -13490,7 +13492,7 @@ elif menu == MENU_PROJECTS:
                     if st.button("✅ 去数据维护看待办历史", key=f"proj_jump_todo_hist_{norm_text(sel_proj)}", use_container_width=True):
                         open_project_maintenance(sel_proj, load_todo_history=True)
 
-        if project_space_mode == "🕰️ 历史 / 排查":
+        if project_detail_view == "📝 进展":
             with st.container(border=True):
                 st.markdown("**🧠 系统当前解释（识别排查用）**")
             st.caption("如果你只是日常推进，这块可以先不看；只有当你想知道系统当前是按哪条记录在解释时，再展开排查。")
@@ -13581,7 +13583,7 @@ elif menu == MENU_PROJECTS:
             else:
                 st.caption("当前解释若来自原始项目日志，可去【数据维护】改原日志；标准事件类解释可直接在这里修正。")
 
-        if project_space_mode == "⚡ 日常推进":
+        if project_detail_view == "📝 进展":
             with st.container(border=True):
                 st.markdown("**⚡ 项目更新（当前项目主入口）**")
             st.markdown(
@@ -13674,7 +13676,7 @@ elif menu == MENU_PROJECTS:
                         st.success("大盘基础信息已更新。")
                         st.rerun()
 
-            st.caption("计划排期、版权审核、配置清单、包装、成本等重模块已收进【专项模块】工作区。")
+            st.caption("排期、专项、包装、成本都已经拆到各自的详情标签里，当前这块只保留日常推进主路径。")
 
             with st.container(border=True):
                 st.markdown("**📂 文件流转与交接**")
@@ -14348,7 +14350,7 @@ elif menu == MENU_PROJECTS:
                             ))
                             st.rerun()
 
-        if project_space_mode == "🕰️ 历史 / 排查":
+        if project_detail_view == "📝 进展":
             with st.container(border=True):
                 st.markdown("**🕰️ 项目历史（当前项目）**")
             st.caption("这里放当前项目已有历史。适合回看、改旧记录、翻历史参考图；如果要新增过去某一天的信息，仍然回上面的【补历史 / 速记补录】。")
@@ -14370,14 +14372,16 @@ elif menu == MENU_PROJECTS:
                 key_prefix=f"project_space_history_{norm_text(sel_proj)}",
             )
 
-        if project_space_mode == "🧩 专项模块":
+        if project_detail_view == "📅 排期":
+            with st.container(border=True):
+                st.markdown("**📅 排期管理**")
+                st.caption("计划排期、阶段日期和周会备注统一放在这里，不再混进日常更新区。")
+            render_project_plan_schedule_editor(sel_proj, key_prefix=f"pm_plan_tab_{norm_text(sel_proj)[:24]}")
+
+        if project_detail_view == "🧩 专项":
             with st.container(border=True):
                 st.markdown("**🧩 专项模块**")
-                st.caption("低频但必要的专项维护都放在这里，常规项目先用【日常推进】工作区就够了。")
-                if st.button("🖨️ 打开打印追踪工具", key=f"proj_open_print_tool_{norm_text(sel_proj)}", use_container_width=True):
-                    st.session_state["_pending_settings_mode"] = "🖨️ 打印追踪工具"
-                    switch_main_menu(MENU_SETTINGS)
-                    st.rerun()
+                st.caption("版权审核、打印追踪、配置清单、服装流程和小比例签板都统一收在当前项目详情里。")
             with st.expander("🗒️ 项目备忘录", expanded=False):
                 memo_txt_pm = st.text_area("记录跨部门叮嘱等杂项", value=db[sel_proj].get("备忘录", ""), height=90, key=f"pm_memo_{sel_proj}")
                 if st.button("保存项目备忘录", key=f"pm_save_memo_{sel_proj}"):
@@ -14385,8 +14389,9 @@ elif menu == MENU_PROJECTS:
                     save_project_scope(sel_proj)
                     st.success("备忘录已保存。")
                     st.rerun()
-            with st.expander("📅 计划排期", expanded=False):
-                render_project_plan_schedule_editor(sel_proj, key_prefix=f"pm_plan_special_{norm_text(sel_proj)[:24]}")
+            with st.expander("🖨️ 打印追踪（当前项目）", expanded=False):
+                st.caption("打印追踪已并回项目详情；这里默认只看当前项目。")
+                render_print_tracking_board(current_pm, [sel_proj], ui_prefix=f"print_track_project_{norm_text(sel_proj)[:24]}")
             with st.expander("🧾 版权审核信息", expanded=False):
                 review_rows = collect_project_review_rows(sel_proj)
                 if review_rows:
@@ -14420,12 +14425,22 @@ elif menu == MENU_PROJECTS:
                 render_garment_special_board(sel_proj, ui_prefix=f"pm_garment_{norm_text(sel_proj)[:24]}")
             with st.expander("🧩 小比例签板", expanded=False):
                 render_small_scale_signoff_board(sel_proj, ui_prefix=f"pm_small_{norm_text(sel_proj)[:24]}")
-            with st.expander("📦 包装进度", expanded=False):
-                render_pm_packing_integrated(sel_proj)
-            with st.expander("🧾 入库台账", expanded=False):
-                render_pm_inventory_integrated(sel_proj)
-            with st.expander("💰 成本台账", expanded=False):
-                render_pm_cost_integrated(sel_proj)
+
+        if project_detail_view == "📦 包装":
+            with st.container(border=True):
+                st.markdown("**📦 包装与入库**")
+                st.caption("包装进度、入库和领用统一收在包装标签，不再和专项、成本混在一起。")
+            st.markdown("**📦 包装进度**")
+            render_pm_packing_integrated(sel_proj)
+            st.divider()
+            st.markdown("**🧾 入库台账**")
+            render_pm_inventory_integrated(sel_proj)
+
+        if project_detail_view == "💰 成本":
+            with st.container(border=True):
+                st.markdown("**💰 成本台账**")
+                st.caption("预计报价、实际明细和差异分析统一在成本标签处理。")
+            render_pm_cost_integrated(sel_proj)
     # ==========================================
     # 模块 3：我的待办
 # ==========================================
