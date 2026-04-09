@@ -8497,10 +8497,35 @@ def render_project_history_editor_block(project_name, selected_component, curren
                     render_image(img_b64, width="stretch")
 
 
-def build_home_project_warning_rows(project_names, pm_view):
+@lru_cache(maxsize=64)
+def _build_home_project_warning_rows_cached(project_names_key, pm_view, db_sig):
     rows = []
     today = datetime.date.today()
-    for proj in (project_names or []):
+    for proj in (project_names_key or []):
+        explanation = build_project_current_explanation(proj, pm_view=pm_view)
+        latest_dt = clamp_timeline_date(parse_date_safe(explanation.get("日期", "")))
+        gap_days = max((today - latest_dt).days, 0) if isinstance(latest_dt, datetime.date) else None
+        rows.append({
+            "项目": proj,
+            "负责人": str(db.get(proj, {}).get("负责人", "")).strip() or "-",
+            "当前阶段": str(db.get(proj, {}).get("Milestone", "")).strip() or "-",
+            "最近更新": str(latest_dt) if isinstance(latest_dt, datetime.date) else "-",
+            "断更天数": gap_days if gap_days is not None else 99999,
+            "动态": build_dashboard_dynamic_display(proj, explanation=explanation, pm_view=pm_view) or str(explanation.get("内容", "")).strip() or "-",
+        })
+    return rows
+
+
+def build_home_project_warning_rows(project_names, pm_view):
+    proj_key = tuple(str(x).strip() for x in (project_names or []) if str(x).strip())
+    db_sig = str(len(str(db)))
+    cached_builder = globals().get("_build_home_project_warning_rows_cached")
+    if callable(cached_builder):
+        return [dict(row) for row in cached_builder(proj_key, str(pm_view or "").strip(), db_sig)]
+
+    rows = []
+    today = datetime.date.today()
+    for proj in proj_key:
         explanation = build_project_current_explanation(proj, pm_view=pm_view)
         latest_dt = clamp_timeline_date(parse_date_safe(explanation.get("日期", "")))
         gap_days = max((today - latest_dt).days, 0) if isinstance(latest_dt, datetime.date) else None
