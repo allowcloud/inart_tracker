@@ -8526,9 +8526,32 @@ def _build_home_project_warning_rows_cached(project_names_key, pm_view, db_sig):
     return rows
 
 
+def build_home_warning_db_signature():
+    cfg_for_sig = db.get("系统配置", {}) if isinstance(db.get("系统配置", {}), dict) else {}
+    sig_payload = {
+        "projects": {
+            k: {fk: fv for fk, fv in v.items() if fk not in ("配件清单长图",)}
+            for k, v in db.items()
+            if k != "系统配置" and isinstance(v, dict)
+        },
+        "cfg": {
+            "PM_TODO_LIST": cfg_for_sig.get("PM_TODO_LIST", []),
+            "标准事件流": cfg_for_sig.get("标准事件流", []),
+            "项目别名": cfg_for_sig.get("项目别名", {}),
+        },
+    }
+    return hashlib.md5(json.dumps(sig_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
 def build_home_project_warning_rows(project_names, pm_view):
     proj_key = tuple(str(x).strip() for x in (project_names or []) if str(x).strip())
-    db_sig = str(len(str(db)))
+    sig_builder = globals().get("build_home_warning_db_signature")
+    if callable(sig_builder):
+        db_sig = sig_builder()
+    else:
+        _hashlib = globals().get("hashlib") or __import__("hashlib")
+        _json = globals().get("json") or __import__("json")
+        db_sig = _hashlib.md5(_json.dumps(db, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest()
     cached_builder = globals().get("_build_home_project_warning_rows_cached")
     if callable(cached_builder):
         return [dict(row) for row in cached_builder(proj_key, str(pm_view or "").strip(), db_sig)]
@@ -8551,7 +8574,6 @@ def build_home_project_warning_rows(project_names, pm_view):
 
 
 def render_fastlog_workspace(visible_projects, current_pm, mode_key="fastlog_mode_global"):
-    st.caption("这里分成两种用法：手机上先用【手机快速记录】，晚上回电脑再用【晚间批量复盘】做完整校对。")
     fastlog_mode = st.radio(
         "记录方式",
         ["📱 手机快速记录", "📝 晚间批量复盘"],
@@ -8562,19 +8584,247 @@ def render_fastlog_workspace(visible_projects, current_pm, mode_key="fastlog_mod
         render_mobile_fastlog_panel(visible_projects, current_pm)
         return
 
-    _fastlog_first_expand = not st.session_state.get("fastlog_expanded_once", False)
-    with st.expander("每晚复盘（多项目）", expanded=_fastlog_first_expand):
-        render_pm_batch_fastlog_integrated(visible_projects)
-    if _fastlog_first_expand:
-        st.session_state["fastlog_expanded_once"] = True
-    st.caption("晚间批量复盘保留原来的多项目拆解/校对路径，更适合回电脑集中整理。")
+    render_pm_batch_fastlog_integrated(visible_projects)
+
+
+def render_project_current_explanation_panel(sel_proj, proj_explain):
+    explain_bits = [
+        f"来源：{str(proj_explain.get('来源', '')).strip() or '-'}",
+        f"日期：{str(proj_explain.get('日期', '')).strip() or '-'}",
+        f"部件：{str(proj_explain.get('部件', '')).strip() or '全局进度'}",
+        f"阶段：{str(proj_explain.get('阶段', '')).strip() or '-'}",
+    ]
+    st.caption(" ｜ ".join(explain_bits))
+    st.markdown(str(proj_explain.get("内容", "")).strip() or "无数据")
+    extra_bits = []
+    if str(proj_explain.get("动作", "")).strip():
+        extra_bits.append(f"动作：{str(proj_explain.get('动作', '')).strip()}")
+    explain_people = get_standard_event_display_people(proj_explain, sel_proj)
+    if explain_people:
+        extra_bits.append(f"关联人员：{explain_people}")
+    todo_refs = [x for x in (proj_explain.get("关联待办", []) or []) if str(x).strip()]
+    if todo_refs:
+        extra_bits.append(f"关联待办：{len(todo_refs)} 条")
+    if extra_bits:
+        st.caption(" ｜ ".join(extra_bits))
+    reminder_text = str(proj_explain.get("提醒内容", "")).strip()
+    if reminder_text:
+        reminder_label = format_todo_reminder_label(
+            reminder_text,
+            str(proj_explain.get("提醒日期", "")).strip(),
+            str(proj_explain.get("提醒动作", "")).strip(),
+        )
+        if reminder_label:
+            st.caption(f"待办动态：{reminder_label}")
+    explain_event_id = str(proj_explain.get("_事件ID", "")).strip()
+    if not explain_event_id:
+        return
+
+    explain_event = next(
+        (
+            evt for evt in db.get("系统配置", {}).get("标准事件流", [])
+            if str((evt or {}).get("_id", "")).strip() == explain_event_id
+        ),
+        {},
+    )
+    fix_comp_opts = list(dict.fromkeys(["全局进度"] + STD_COMPONENTS + list(db.get(sel_proj, {}).get("部件列表", {}).keys())))
+    fix_stage_opts = ["-"] + STAGES_UNIFIED
+    fix_comp = st.selectbox(
+        "修正部件",
+        fix_comp_opts,
+        index=fix_comp_opts.index(str(proj_explain.get("部件", "")).strip()) if str(proj_explain.get("部件", "")).strip() in fix_comp_opts else 0,
+        key=f"pm_explain_fix_comp_{norm_text(sel_proj)}",
+    )
+    fix_stage = st.selectbox(
+        "修正阶段",
+        fix_stage_opts,
+        index=fix_stage_opts.index(str(proj_explain.get("阶段", "")).strip()) if str(proj_explain.get("阶段", "")).strip() in fix_stage_opts else 0,
+        key=f"pm_explain_fix_stage_{norm_text(sel_proj)}",
+    )
+    fix_note = st.text_input(
+        "修正说明（可选）",
+        key=f"pm_explain_fix_note_{norm_text(sel_proj)}",
+        placeholder="例：这条其实是工程，不是设计",
+    )
+    learn_comp_phrase = st.text_input(
+        "顺手学习部件关键词（可选）",
+        key=f"pm_explain_fix_kw_{norm_text(sel_proj)}",
+        placeholder="例：眼镜配置 -> 头雕(表情)",
+    )
+    if st.button("保存当前解释修正", key=f"pm_explain_fix_btn_{norm_text(sel_proj)}", type="primary"):
+        changed_any = False
+        if explain_event:
+            if str(explain_event.get("部件", "")).strip() != fix_comp:
+                explain_event["部件"] = fix_comp
+                changed_any = True
+            desired_stage = "" if fix_stage == "-" else fix_stage
+            if str(explain_event.get("阶段", "")).strip() != desired_stage:
+                explain_event["阶段"] = desired_stage
+                changed_any = True
+            if fix_note.strip():
+                explain_event.setdefault("附加信息", {})["前台修正说明"] = fix_note.strip()
+                changed_any = True
+        if learn_comp_phrase.strip():
+            db.setdefault("系统配置", {}).setdefault("AI_COMP_KW", {})[learn_comp_phrase.strip()] = fix_comp
+            changed_any = True
+        if changed_any:
+            save_project_scope("系统配置")
+            st.success("当前解释已修正。")
+            st.rerun()
+        else:
+            st.info("没有检测到需要保存的修正。")
+
+
+def render_project_basic_info_editor(sel_proj):
+    cur_pm = db[sel_proj].get("负责人", "Mo")
+    cur_ms = db[sel_proj].get("Milestone", "")
+    cur_target = db[sel_proj].get("Target", "TBD")
+    cur_ship = db[sel_proj].get("发货区间", "")
+    owner_choices = [x for x in globals().get("pm_list", ["Mo", "越", "袁"]) if x != "所有人"] or ["Mo", "越", "袁"]
+    col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+    with col_m1:
+        new_pm = st.selectbox("负责人", owner_choices, index=owner_choices.index(cur_pm) if cur_pm in owner_choices else 0, key=f"proj_basic_pm_{norm_text(sel_proj)}")
+    with col_m2:
+        new_ms = st.selectbox("项目阶段", STD_MILESTONES, index=STD_MILESTONES.index(cur_ms) if cur_ms in STD_MILESTONES else 0, key=f"proj_basic_ms_{norm_text(sel_proj)}")
+    with col_m3:
+        new_target = st.text_input("预计开定", value=cur_target, key=f"proj_basic_target_{norm_text(sel_proj)}")
+    with col_m4:
+        new_ship = st.text_input("预计发货", value=cur_ship, key=f"proj_basic_ship_{norm_text(sel_proj)}", placeholder="例：2026 Q2")
+
+    if st.button("💾 保存基础信息", type="primary", key=f"btn_global_{norm_text(sel_proj)}"):
+        old_pm = str(db[sel_proj].get("负责人", "")).strip()
+        old_ms = str(db[sel_proj].get("Milestone", "")).strip()
+        old_target_raw = str(db[sel_proj].get("Target", "")).strip()
+        old_ship_raw = str(db[sel_proj].get("发货区间", "")).strip()
+
+        def _normalize_target_text(v):
+            s = str(v or "").strip()
+            if s.upper() == "TBD" or s in ["-", "—", "无", "暂无"]:
+                return ""
+            return s
+
+        def _normalize_ship_text(v):
+            s = str(v or "").strip()
+            if s.upper() == "TBD" or s in ["-", "—", "无", "暂无"]:
+                return ""
+            return s
+
+        new_pm_norm = str(new_pm).strip()
+        new_ms_norm = str(new_ms).strip()
+        new_target_norm = _normalize_target_text(new_target)
+        new_ship_norm = _normalize_ship_text(new_ship)
+        old_target_norm = _normalize_target_text(old_target_raw)
+        old_ship_norm = _normalize_ship_text(old_ship_raw)
+
+        change_items = []
+        if old_pm != new_pm_norm:
+            change_items.append(("负责人", old_pm or "未分配", new_pm_norm or "未分配"))
+        if old_ms != new_ms_norm:
+            change_items.append(("阶段", old_ms or "-", new_ms_norm or "-"))
+        if old_target_norm != new_target_norm:
+            change_items.append(("开定", old_target_norm or "TBD", new_target_norm or "TBD"))
+        if old_ship_norm != new_ship_norm:
+            change_items.append(("发货", old_ship_norm or "-", new_ship_norm or "-"))
+
+        if not change_items:
+            st.info("未检测到基础信息变化。")
+            return
+
+        db[sel_proj]["负责人"] = new_pm_norm
+        db[sel_proj]["Milestone"] = new_ms_norm
+        db[sel_proj]["Target"] = new_target_norm or "TBD"
+        db[sel_proj]["发货区间"] = new_ship_norm
+
+        td = str(datetime.date.today())
+        comps_list = list(db[sel_proj].get("部件列表", {}).keys())
+        t_c = "全局进度" if "全局进度" in comps_list else (comps_list[0] if comps_list else "全局进度")
+        event_text = " | ".join([f"{k}:{ov}→{nv}" for k, ov, nv in change_items])
+        append_component_log_entry(sel_proj, t_c, {
+            "日期": td,
+            "流转": "系统更新",
+            "工序": ensure_project_component(sel_proj, t_c).get("主流程", STAGES_UNIFIED[0]),
+            "事件": f"[属性更新] {event_text}"
+        })
+        save_project_scope(sel_proj)
+        st.success("基础信息已更新。")
+        st.rerun()
+
+
+def switch_project_detail_view(sel_proj, target_view):
+    key = f"project_detail_view_{norm_text(sel_proj)}"
+    safe_setter = globals().get("try_set_session_state_value")
+    if callable(safe_setter):
+        safe_setter(key, target_view)
+    else:
+        st.session_state[key] = target_view
+    st.rerun()
+
+
+def render_project_special_groups(sel_proj, current_pm):
+    with st.container(border=True):
+        st.markdown("**🧪 进度与打样**")
+        render_print_tracking_board(current_pm, [sel_proj], ui_prefix=f"print_track_project_{norm_text(sel_proj)[:24]}")
+        st.divider()
+        st.markdown("**👔 服装流程**")
+        render_garment_special_board(sel_proj, ui_prefix=f"pm_garment_{norm_text(sel_proj)[:24]}")
+        st.divider()
+        st.markdown("**🧩 小比例签板**")
+        render_small_scale_signoff_board(sel_proj, ui_prefix=f"pm_small_{norm_text(sel_proj)[:24]}")
+
+    with st.container(border=True):
+        st.markdown("**🗂️ 文档与审核**")
+        memo_txt_pm = st.text_area("项目备忘录", value=db[sel_proj].get("备忘录", ""), height=90, key=f"pm_memo_{sel_proj}")
+        if st.button("保存项目备忘录", key=f"pm_save_memo_{sel_proj}"):
+            db[sel_proj]["备忘录"] = memo_txt_pm
+            save_project_scope(sel_proj)
+            st.success("备忘录已保存。")
+            st.rerun()
+        st.divider()
+        review_rows = collect_project_review_rows(sel_proj)
+        if review_rows:
+            st.markdown("**提审进度透视矩阵**")
+            render_project_review_progress_matrix(sel_proj)
+            st.markdown("**提审明细**")
+            df_rv = pd.DataFrame(review_rows).sort_values(by=["日期", "部件"], ascending=[False, True])
+            st.dataframe(df_rv, width='stretch', hide_index=True)
+        else:
+            st.caption("当前项目暂无版权提审记录。")
+
+    with st.container(border=True):
+        st.markdown("**📄 配置与交付**")
+        curr_link = db[sel_proj].get("配件清单链接", "")
+        new_link = st.text_input("在线文档链接", value=curr_link, key=f"pm_cfg_link_{sel_proj}")
+        if new_link != curr_link:
+            db[sel_proj]["配件清单链接"] = new_link
+            save_project_scope(sel_proj)
+            st.rerun()
+        saved_drafts = db[sel_proj].get("配件清单长图", [])
+        if saved_drafts:
+            st.markdown("**图文底稿画廊**")
+            draft_cols = st.columns(min(len(saved_drafts), 2) or 1)
+            for idx, b64_str in enumerate(saved_drafts):
+                with draft_cols[idx % 2]:
+                    render_image(b64_str, width='stretch')
+                    if st.button("🗑️ 移除此底稿", key=f"del_draft_special_{sel_proj}_{idx}"):
+                        saved_drafts.pop(idx)
+                        db[sel_proj]["配件清单长图"] = saved_drafts
+                        save_project_scope(sel_proj)
+                        st.rerun()
+        else:
+            st.caption("当前没有图文底稿。")
+
+        st.divider()
+        jump_cols = st.columns(2)
+        with jump_cols[0]:
+            if st.button("📦 去包装标签", key=f"special_to_packing_{norm_text(sel_proj)}", use_container_width=True):
+                switch_project_detail_view(sel_proj, "📦 包装")
+        with jump_cols[1]:
+            if st.button("💰 去成本标签", key=f"special_to_cost_{norm_text(sel_proj)}", use_container_width=True):
+                switch_project_detail_view(sel_proj, "💰 成本")
 
 
 def render_home_view(valid_projs, current_pm):
     st.title("🏠 今日视图")
-    st.caption("先看今天要做什么，再进入项目空间；速记也收在这里，把日常高频动作集中在首屏。")
-    with st.container(border=True):
-        st.caption("推荐路径：先看今日待办和重点预警，再点项目进入项目空间；想随手记时，直接切到本页里的【速记】工作区。")
 
     home_workspace_options = ["📌 今日总览", "📝 速记"]
     pending_home_focus = str(st.session_state.pop("_pending_home_focus", "")).strip()
@@ -8589,7 +8839,6 @@ def render_home_view(valid_projs, current_pm):
         key="home_workspace_mode",
     )
     if home_workspace_mode == "📝 速记":
-        st.caption("速记不再单独占一个左侧入口；在这里随手记，回项目空间或数据维护再做细调。")
         render_fastlog_workspace(valid_projs, current_pm, mode_key="home_fastlog_mode")
         return
 
@@ -8633,7 +8882,6 @@ def render_home_view(valid_projs, current_pm):
 
     with left_col:
         st.markdown("**今日待办**")
-        st.caption("这里只放今天最值得先处理的提醒；更多编辑操作去【我的待办】。")
         focus_todos = sorted(pending, key=lambda td: todo_sort_key(td, today))[:8]
         if focus_todos:
             for idx, td in enumerate(focus_todos, start=1):
@@ -8655,7 +8903,6 @@ def render_home_view(valid_projs, current_pm):
 
         st.divider()
         st.markdown("**我的项目**")
-        st.caption("按最近更新和断更情况快速挑项目，不用先钻到长页面里找。")
         project_rows = sorted(
             warning_rows,
             key=lambda row: (
@@ -8683,7 +8930,6 @@ def render_home_view(valid_projs, current_pm):
 
     with right_col:
         st.markdown("**重点预警**")
-        st.caption("把逾期、临期和断更项目集中到一起，代替旧页面里分散的提醒。")
         warning_cards = []
         for td in overdue[:5]:
             warning_cards.append({
@@ -8720,7 +8966,6 @@ def render_home_view(valid_projs, current_pm):
 
         st.divider()
         st.markdown("**本周重点（轻量版）**")
-        st.caption("先把最容易卡住推进的事放在这；详细排期和甘特继续看全局大盘与甘特图。")
         plan_rows, soon_cnt, delay_cnt = build_plan_board_rows(valid_projs)
         if plan_rows:
             focus_rows = [
@@ -11969,8 +12214,6 @@ if menu == MENU_HOME:
 
 elif menu == MENU_DASHBOARD:
     st.title(f"📊 全局大盘与甘特图 ({current_pm} 的视角)")
-
-    st.caption("大盘和甘特图仍保留在同一页；这轮只调整导航，不会把甘特拆掉。CSV 导入入口已迁移至【系统设置】。")
     gantt_cat_orders = MACRO_STAGES.copy()
     combined_color_map = {
         "预研": "#CBD5E1", "立项": "#F2C14E", "建模": "#34C6D3", "打印": "#0EA5A4", "涂装": "#F59E0B", "设计": "#8B5CF6",
@@ -12080,8 +12323,7 @@ elif menu == MENU_DASHBOARD:
 
     st.divider()
     st.subheader("📈 全局进展甘特图")
-    st.markdown("💡 默认显示当前月份前后约半年区间；支持手动调整日期范围，并统计建模/打印/设计/工程平均耗时（可选去极值）。")
-    st.caption("颜色提示：甘特主条只显示正式推进阶段；预研改成“预”标记，暂停是深灰并带“停”字小方块。")
+    st.caption("默认显示当前月份前后约半年区间；主条只显示正式推进阶段，预研改成“预”标记，暂停会显示为深灰“停”标记。")
     if gantt_data:
         df_g_all = pd.DataFrame(gantt_data).sort_values(by=["项目", "Start"])
         df_g_all["Start_dt"] = pd.to_datetime(df_g_all["Start"], errors="coerce")
@@ -12897,12 +13139,9 @@ elif menu == MENU_DASHBOARD:
             return payload if return_payload else payload["status"]
 
         st.markdown("##### 🧩 大盘明细可编辑表")
-        st.caption("直接在表格中修改基础字段和【最新全盘动态】；默认追加为新记录，勾选【改写历史】后改写当前最新动态。")
-        st.caption("规则：日期优先。未来日期自动同步到待办；过去日期按该日期写入历史。无日期时再按语气词判断。")
+        st.caption("直接修改基础字段和【最新全盘动态】；日期优先，未来日期转待办，过去日期写回历史，勾选【改写历史】时覆盖当前最新动态。")
         with st.expander("📝 大盘动态识别说明", expanded=False):
-            st.caption("一句里有多个动作时，请用 `；` 分开。系统会按每一小句分别识别待办、部件和阶段；追加保存时，项目历史也会按这些分句/部件分别落记录。")
-            st.caption("不需要额外写 `--` 标记；像 `植发 / 马海毛 / 毛到货` 会优先理解成头雕相关动作，`彩盒 / 地台贴 / 烫色 / 打样` 会优先理解成包装复样动作。")
-            st.caption("示例：`4/20马海毛到货开始植发；地台贴需修改、彩盒需修改烫色，已转交立宇待打样`")
+            st.caption("多动作请用 `；` 分开。系统会按每句分别识别待办、部件和阶段，并同步拆到项目历史；如 `4/20马海毛到货开始植发；地台贴需修改、彩盒需修改烫色，已转交立宇待打样`。")
 
         def _preview_project_names(name_list, limit=6):
             names = [str(x).strip() for x in (name_list or []) if str(x).strip()]
@@ -12999,7 +13238,7 @@ elif menu == MENU_DASHBOARD:
             dashboard_column_config["负责人"] = st.column_config.SelectboxColumn("负责人", options=owner_options, width="small")
 
         with st.form("dashboard_main_edit_form", clear_on_submit=False):
-            st.caption("表格编辑已切到批量提交模式：先集中改，再点一次保存，避免改一格就整页重跑。")
+            st.caption("先集中修改，再一次保存。")
             edited_dashboard_df = st.data_editor(
                 editable_df,
                 width="stretch",
@@ -13335,15 +13574,10 @@ elif menu == MENU_DASHBOARD:
 # ==========================================
 elif menu == MENU_PROJECTS:
     st.title("📁 项目空间")
-    st.caption("先选一个项目，再决定现在是日常推进、回看历史 / 排查，还是处理专项模块。")
     todo_all_cfg = db.get("系统配置", {}).get("PM_TODO_LIST", []) if isinstance(db.get("系统配置", {}), dict) else []
     todo_list = [td for td in todo_all_cfg if todo_visible_for_view(td, current_pm)]
     with st.container():
-        st.caption("这里专注某一个项目。先选项目，再切到对应详情标签直接处理。")
-
         c_proj_top1, c_proj_top2 = st.columns([4.2, 1.2])
-        with c_proj_top1:
-            st.caption("高频操作已经收成项目详情标签；日常推进看【概览/进展】，低频专项再切到后面的标签。")
         with c_proj_top2:
             if st.button("➕ 手动建档新项目"):
                 st.session_state.new_proj_mode = not st.session_state.get('new_proj_mode', False)
@@ -13427,17 +13661,15 @@ elif menu == MENU_PROJECTS:
                 f"未完成待办：{len(sel_proj_pending_todos)}",
             ]
             st.caption(" ｜ ".join(project_head_bits))
-            project_memo = str(sel_proj_data.get("备忘录", "")).strip()
-            if project_memo:
-                st.caption("项目备忘录")
-                st.info(project_memo)
-            else:
-                st.caption("项目备忘录：暂无。可在下方专项标签继续维护。")
-            recent_dynamic = str(proj_explain.get("内容", "")).strip()
-            if recent_dynamic:
-                st.caption("最近动态")
-                st.markdown(recent_dynamic)
-            st.caption("下方的所有内容，都只作用于这个当前选定项目。")
+            ctx1, ctx2 = st.columns([1.2, 1.8])
+            with ctx1:
+                project_memo = str(sel_proj_data.get("备忘录", "")).strip()
+                if project_memo:
+                    st.info(project_memo)
+            with ctx2:
+                recent_dynamic = str(proj_explain.get("内容", "")).strip()
+                if recent_dynamic:
+                    st.markdown(recent_dynamic)
 
         project_detail_view = st.radio(
             "项目详情标签",
@@ -13445,23 +13677,12 @@ elif menu == MENU_PROJECTS:
             horizontal=True,
             key=f"project_detail_view_{norm_text(sel_proj)}",
         )
-        detail_view_notes = {
-            "📌 概览": "先看矩阵和项目当前状态，确认这个项目今天整体推进到哪一步。",
-            "📝 进展": "这里放一句话更新、文件流转、项目历史和排查入口，是日常录入主路径。",
-            "📅 排期": "集中维护计划排期、阶段日期和周会备注，不和日常更新混在一起。",
-            "🧩 专项": "版权、配置清单、服装、小比例和打印追踪等低频模块统一收在这里。",
-            "📦 包装": "包装进度、入库和领用统一从这里维护，不再分散到别处。",
-            "💰 成本": "报价估算、实际明细和差异分析统一留在成本标签。",
-        }
-        st.caption(detail_view_notes.get(project_detail_view, ""))
 
         if project_detail_view == "📌 概览":
             with st.container(border=True):
                 st.markdown("**📈 项目状态总览**")
-            st.caption("这是日常主入口之一：先看项目现在整体走到哪一步，再决定要不要补进展或进后面的专项标签。")
             st.markdown("**🔬 项目进度透视矩阵 (并行连消追踪)**")
-            st.caption("颜色说明：🟩 已完成 ｜ 🟦 进行中/生产中 ｜ ⬛ 暂停前已流转 ｜ 🟨 Delay ｜ ⬜ 未流转")
-            st.caption("默认模块（头雕/素体/手型/配件/地台）在没有单独推进前，会跟随全局进度点亮；单独改了模块进度后，再按模块自身显示。")
+            st.markdown("`🟩 完成` `🟦 进行中` `⬛ 暂停前已流转` `🟨 Delay` `⬜ 未流转`")
             comps = db[sel_proj].get('部件列表', {})
             if not comps:
                 st.warning("暂无录入部件明细。请在更新区先补一条项目记录。")
@@ -13633,11 +13854,15 @@ elif menu == MENU_PROJECTS:
                         "doubleClick": False,
                     },
                 )
+            with st.container(border=True):
+                st.markdown("**🧾 基础信息**")
+                render_project_basic_info_editor(sel_proj)
+            with st.expander("🧠 系统当前解释（需要时查看）", expanded=False):
+                render_project_current_explanation_panel(sel_proj, proj_explain)
 
         if project_detail_view == "📝 进展":
             with st.container(border=True):
                 st.markdown("**🛠️ 排查与治理快捷入口**")
-                st.caption("识别不对、想查历史、想看统一事件时，从这里直接跳去【数据维护】对应项目。")
                 qa1, qa2, qa3 = st.columns(3)
                 with qa1:
                     if st.button("🕰️ 去数据维护看项目历史", key=f"proj_jump_hist_{norm_text(sel_proj)}", use_container_width=True):
@@ -13651,193 +13876,13 @@ elif menu == MENU_PROJECTS:
 
         if project_detail_view == "📝 进展":
             with st.container(border=True):
-                st.markdown("**🧠 系统当前解释（识别排查用）**")
-            st.caption("如果你只是日常推进，这块可以先不看；只有当你想知道系统当前是按哪条记录在解释时，再展开排查。")
-            explain_bits = [
-                f"来源：{str(proj_explain.get('来源', '')).strip() or '-'}",
-                f"日期：{str(proj_explain.get('日期', '')).strip() or '-'}",
-                f"部件：{str(proj_explain.get('部件', '')).strip() or '全局进度'}",
-                f"阶段：{str(proj_explain.get('阶段', '')).strip() or '-'}",
-            ]
-            st.caption(" ｜ ".join(explain_bits))
-            st.markdown(str(proj_explain.get("内容", "")).strip() or "无数据")
-            extra_bits = []
-            if str(proj_explain.get("动作", "")).strip():
-                extra_bits.append(f"动作：{str(proj_explain.get('动作', '')).strip()}")
-            explain_people = get_standard_event_display_people(proj_explain, sel_proj)
-            if explain_people:
-                extra_bits.append(f"关联人员：{explain_people}")
-            todo_refs = [x for x in (proj_explain.get("关联待办", []) or []) if str(x).strip()]
-            if todo_refs:
-                extra_bits.append(f"关联待办：{len(todo_refs)} 条")
-            if extra_bits:
-                st.caption(" ｜ ".join(extra_bits))
-            reminder_text = str(proj_explain.get("提醒内容", "")).strip()
-            if reminder_text:
-                reminder_label = format_todo_reminder_label(
-                    reminder_text,
-                    str(proj_explain.get("提醒日期", "")).strip(),
-                    str(proj_explain.get("提醒动作", "")).strip(),
-                )
-                if reminder_label:
-                    st.caption(f"待办动态：{reminder_label}")
-            explain_event_id = str(proj_explain.get("_事件ID", "")).strip()
-            if explain_event_id:
-                with st.expander("识别不对？直接修正这条当前解释", expanded=False):
-                    explain_event = next(
-                        (
-                            evt for evt in db.get("系统配置", {}).get("标准事件流", [])
-                            if str((evt or {}).get("_id", "")).strip() == explain_event_id
-                        ),
-                        {},
-                    )
-                    fix_comp_opts = list(dict.fromkeys(["全局进度"] + STD_COMPONENTS + list(db.get(sel_proj, {}).get("部件列表", {}).keys())))
-                    fix_stage_opts = ["-"] + STAGES_UNIFIED
-                    fix_comp = st.selectbox(
-                        "修正部件",
-                        fix_comp_opts,
-                        index=fix_comp_opts.index(str(proj_explain.get("部件", "")).strip()) if str(proj_explain.get("部件", "")).strip() in fix_comp_opts else 0,
-                        key=f"pm_explain_fix_comp_{norm_text(sel_proj)}",
-                    )
-                    fix_stage = st.selectbox(
-                        "修正阶段",
-                        fix_stage_opts,
-                        index=fix_stage_opts.index(str(proj_explain.get("阶段", "")).strip()) if str(proj_explain.get("阶段", "")).strip() in fix_stage_opts else 0,
-                        key=f"pm_explain_fix_stage_{norm_text(sel_proj)}",
-                    )
-                    fix_note = st.text_input(
-                        "修正说明（可选）",
-                        key=f"pm_explain_fix_note_{norm_text(sel_proj)}",
-                        placeholder="例：这条其实是工程，不是设计",
-                    )
-                    learn_comp_phrase = st.text_input(
-                        "顺手学习部件关键词（可选）",
-                        key=f"pm_explain_fix_kw_{norm_text(sel_proj)}",
-                        placeholder="例：眼镜配置 -> 头雕(表情)",
-                    )
-                    if st.button("保存当前解释修正", key=f"pm_explain_fix_btn_{norm_text(sel_proj)}", type="primary"):
-                        changed_any = False
-                        if explain_event:
-                            if str(explain_event.get("部件", "")).strip() != fix_comp:
-                                explain_event["部件"] = fix_comp
-                                changed_any = True
-                            desired_stage = "" if fix_stage == "-" else fix_stage
-                            if str(explain_event.get("阶段", "")).strip() != desired_stage:
-                                explain_event["阶段"] = desired_stage
-                                changed_any = True
-                            if fix_note.strip():
-                                explain_event.setdefault("附加信息", {})["前台修正说明"] = fix_note.strip()
-                                changed_any = True
-                        if learn_comp_phrase.strip():
-                            db.setdefault("系统配置", {}).setdefault("AI_COMP_KW", {})[learn_comp_phrase.strip()] = fix_comp
-                            changed_any = True
-                        if changed_any:
-                            save_project_scope("系统配置")
-                            st.success("当前解释已修正。")
-                            st.rerun()
-                        else:
-                            st.info("没有检测到需要保存的修正。")
-            else:
-                st.caption("当前解释若来自原始项目日志，可去【数据维护】改原日志；标准事件类解释可直接在这里修正。")
-
-        if project_detail_view == "📝 进展":
-            with st.container(border=True):
                 st.markdown("**⚡ 项目更新（当前项目主入口）**")
-            st.markdown(
-                """
-                <div class='pm-subsection-card'>
-                    <div class='pm-subsection-title'>当前项目先在这里推进</div>
-                    <div class='pm-subsection-note'>一句话推进放前面，文件/图片/待办联动放后面；不再套 tabs，只保留当前项目这一条主路径。</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
             with st.container(border=True):
-                st.markdown("**⚡ 一句话更新**")
-                st.caption("适合改项目基础信息、补历史、补一条速记，属于当前项目的轻量更新。")
-                st.info("想补过去某一天的信息，直接在下面【补历史 / 速记补录】里选日期即可；不用去【数据维护】新增。")
                 st.markdown("**🕰️ 补历史 / 速记补录（可指定日期）**")
                 render_pm_fastlog_integrated(sel_proj, show_header=False)
-                cur_pm     = db[sel_proj].get('负责人', 'Mo')
-                cur_ms     = db[sel_proj].get('Milestone', '')
-                cur_target = db[sel_proj].get('Target', 'TBD')
-                cur_ship   = db[sel_proj].get('发货区间', '')
-
-                st.markdown("**2. 全局大盘与发货目标设定**")
-                col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-                with col_m1:
-                    new_pm = st.selectbox("👤 负责人分配", ["Mo", "越", "袁"],
-                                          index=["Mo", "越", "袁"].index(cur_pm) if cur_pm in ["Mo", "越", "袁"] else 0)
-                with col_m2:
-                    new_ms = st.selectbox("项目当前阶段", STD_MILESTONES,
-                                          index=STD_MILESTONES.index(cur_ms) if cur_ms in STD_MILESTONES else 0)
-                with col_m3:
-                    new_target = st.text_input("📅 预计开定时间", value=cur_target)
-                with col_m4:
-                    new_ship = st.text_input("📦 预计发货区间 (例: 2026 Q2)", value=cur_ship)
-
-                if st.button("💾 更新大盘基础信息", type="primary", key="btn_global"):
-                    old_pm = str(db[sel_proj].get("负责人", "")).strip()
-                    old_ms = str(db[sel_proj].get("Milestone", "")).strip()
-                    old_target_raw = str(db[sel_proj].get("Target", "")).strip()
-                    old_ship_raw = str(db[sel_proj].get("发货区间", "")).strip()
-
-                    def _normalize_target_text(v):
-                        s = str(v or "").strip()
-                        if s.upper() == "TBD" or s in ["-", "—", "无", "暂无"]:
-                            return ""
-                        return s
-
-                    def _normalize_ship_text(v):
-                        s = str(v or "").strip()
-                        if s.upper() == "TBD" or s in ["-", "—", "无", "暂无"]:
-                            return ""
-                        return s
-
-                    new_pm_norm = str(new_pm).strip()
-                    new_ms_norm = str(new_ms).strip()
-                    new_target_norm = _normalize_target_text(new_target)
-                    new_ship_norm = _normalize_ship_text(new_ship)
-                    old_target_norm = _normalize_target_text(old_target_raw)
-                    old_ship_norm = _normalize_ship_text(old_ship_raw)
-
-                    change_items = []
-                    if old_pm != new_pm_norm:
-                        change_items.append(("负责人", old_pm or "未分配", new_pm_norm or "未分配"))
-                    if old_ms != new_ms_norm:
-                        change_items.append(("阶段", old_ms or "-", new_ms_norm or "-"))
-                    if old_target_norm != new_target_norm:
-                        change_items.append(("开定", old_target_norm or "TBD", new_target_norm or "TBD"))
-                    if old_ship_norm != new_ship_norm:
-                        change_items.append(("发货", old_ship_norm or "-", new_ship_norm or "-"))
-
-                    if not change_items:
-                        st.info("未检测到基础信息变化，未写入更新日志。")
-                    else:
-                        db[sel_proj]["负责人"] = new_pm_norm
-                        db[sel_proj]["Milestone"] = new_ms_norm
-                        db[sel_proj]["Target"] = new_target_norm or "TBD"
-                        db[sel_proj]["发货区间"] = new_ship_norm
-
-                        td = str(datetime.date.today())
-                        comps_list = list(db[sel_proj].get("部件列表", {}).keys())
-                        t_c = "全局进度" if "全局进度" in comps_list else (comps_list[0] if comps_list else "全局进度")
-                        event_text = " | ".join([f"{k}:{ov}→{nv}" for k, ov, nv in change_items])
-                        append_component_log_entry(sel_proj, t_c, {
-                            "日期": td,
-                            "流转": "系统更新",
-                            "工序": ensure_project_component(sel_proj, t_c).get("主流程", STAGES_UNIFIED[0]),
-                            "事件": f"[属性更新] {event_text}"
-                        })
-                        save_project_scope(sel_proj)
-                        st.success("大盘基础信息已更新。")
-                        st.rerun()
-
-            st.caption("排期、专项、包装、成本都已经拆到各自的详情标签里，当前这块只保留日常推进主路径。")
 
             with st.container(border=True):
                 st.markdown("**📂 文件流转与交接**")
-                st.caption("这里的内容全部属于当前项目：待办带入、文件交接、挂图留痕都会落到这个项目下面。")
                 project_pending_todos = [
                     x for x in todo_list
                     if (not x.get("完成")) and todo_matches_project(x, sel_proj)
@@ -14076,7 +14121,6 @@ elif menu == MENU_PROJECTS:
 
             with st.container(border=True):
                 st.markdown("**➕ 新建文件流转记录**")
-                st.caption("这里主要记录建模 / 设计 / 工程之间的文件交接。版权提审不是默认主路径，只有这条记录确实同时属于提审时再补。")
 
                 stage_default_name = infer_default_stage_from_project_milestone(db.get(sel_proj, {}))
                 comp_choice_key = f"wb_comp_{fk}"
@@ -14510,7 +14554,6 @@ elif menu == MENU_PROJECTS:
         if project_detail_view == "📝 进展":
             with st.container(border=True):
                 st.markdown("**🕰️ 项目历史（当前项目）**")
-            st.caption("这里放当前项目已有历史。适合回看、改旧记录、翻历史参考图；如果要新增过去某一天的信息，仍然回上面的【补历史 / 速记补录】。")
             history_view_state = build_project_history_view_state(sel_proj)
             history_comp_options = history_view_state["comps_in_proj"]
             history_comp_key = f"project_space_history_comp_{norm_text(sel_proj)}"
@@ -14521,7 +14564,6 @@ elif menu == MENU_PROJECTS:
                 history_comp_options,
                 key=history_comp_key,
             )
-            st.caption("这里只放当前项目的历史编辑与图片回看；如果要看统一事件、待办演进或做跨项目修正，再去【数据维护】。")
             render_project_history_editor_block(
                 sel_proj,
                 project_space_history_comp,
@@ -14532,61 +14574,14 @@ elif menu == MENU_PROJECTS:
         if project_detail_view == "📅 排期":
             with st.container(border=True):
                 st.markdown("**📅 排期管理**")
-                st.caption("计划排期、阶段日期和周会备注统一放在这里，不再混进日常更新区。")
             render_project_plan_schedule_editor(sel_proj, key_prefix=f"pm_plan_tab_{norm_text(sel_proj)[:24]}")
 
         if project_detail_view == "🧩 专项":
-            with st.container(border=True):
-                st.markdown("**🧩 专项模块**")
-                st.caption("版权审核、打印追踪、配置清单、服装流程和小比例签板都统一收在当前项目详情里。")
-            with st.expander("🗒️ 项目备忘录", expanded=False):
-                memo_txt_pm = st.text_area("记录跨部门叮嘱等杂项", value=db[sel_proj].get("备忘录", ""), height=90, key=f"pm_memo_{sel_proj}")
-                if st.button("保存项目备忘录", key=f"pm_save_memo_{sel_proj}"):
-                    db[sel_proj]["备忘录"] = memo_txt_pm
-                    save_project_scope(sel_proj)
-                    st.success("备忘录已保存。")
-                    st.rerun()
-            with st.expander("🖨️ 打印追踪（当前项目）", expanded=False):
-                st.caption("打印追踪已并回项目详情；这里默认只看当前项目。")
-                render_print_tracking_board(current_pm, [sel_proj], ui_prefix=f"print_track_project_{norm_text(sel_proj)[:24]}")
-            with st.expander("🧾 版权审核信息", expanded=False):
-                review_rows = collect_project_review_rows(sel_proj)
-                if review_rows:
-                    st.markdown("**提审进度透视矩阵**")
-                    render_project_review_progress_matrix(sel_proj)
-                    st.markdown("**提审明细**")
-                    df_rv = pd.DataFrame(review_rows).sort_values(by=["日期", "部件"], ascending=[False, True])
-                    st.dataframe(df_rv, width='stretch', hide_index=True)
-                else:
-                    st.caption("当前项目暂无版权提审记录。")
-            with st.expander("📄 产品配置清单 (图文长图底稿)", expanded=False):
-                curr_link = db[sel_proj].get("配件清单链接", "")
-                new_link = st.text_input("🔗 在线文档链接", value=curr_link, key=f"pm_cfg_link_{sel_proj}")
-                if new_link != curr_link:
-                    db[sel_proj]["配件清单链接"] = new_link
-                    save_project_scope(sel_proj)
-                    st.rerun()
-                saved_drafts = db[sel_proj].get("配件清单长图", [])
-                if saved_drafts:
-                    st.markdown("**🖼️ 当前图文底稿画廊**")
-                    draft_cols = st.columns(min(len(saved_drafts), 2) or 1)
-                    for idx, b64_str in enumerate(saved_drafts):
-                        with draft_cols[idx % 2]:
-                            render_image(b64_str, width='stretch')
-                            if st.button("🗑️ 移除此底稿", key=f"del_draft_special_{sel_proj}_{idx}"):
-                                saved_drafts.pop(idx)
-                                db[sel_proj]["配件清单长图"] = saved_drafts
-                                save_project_scope(sel_proj)
-                                st.rerun()
-            with st.expander("👔 服装流程", expanded=False):
-                render_garment_special_board(sel_proj, ui_prefix=f"pm_garment_{norm_text(sel_proj)[:24]}")
-            with st.expander("🧩 小比例签板", expanded=False):
-                render_small_scale_signoff_board(sel_proj, ui_prefix=f"pm_small_{norm_text(sel_proj)[:24]}")
+            render_project_special_groups(sel_proj, current_pm)
 
         if project_detail_view == "📦 包装":
             with st.container(border=True):
                 st.markdown("**📦 包装与入库**")
-                st.caption("包装进度、入库和领用统一收在包装标签，不再和专项、成本混在一起。")
             st.markdown("**📦 包装进度**")
             render_pm_packing_integrated(sel_proj)
             st.divider()
@@ -14596,7 +14591,6 @@ elif menu == MENU_PROJECTS:
         if project_detail_view == "💰 成本":
             with st.container(border=True):
                 st.markdown("**💰 成本台账**")
-                st.caption("预计报价、实际明细和差异分析统一在成本标签处理。")
             render_pm_cost_integrated(sel_proj)
     # ==========================================
     # 模块 3：我的待办
@@ -15208,9 +15202,7 @@ elif menu == MENU_COST:
 # ==========================================
 elif menu == MENU_MAINTENANCE:
     st.title("🛠️ 数据维护")
-    st.caption("这里集中放历史溯源、全局修正和识别排查；项目治理相关能力会逐步继续往这里收口。")
-    st.caption("这里主要用于回看和修改已有记录；如果要新增过去某一天的信息，请回【项目空间】里的【补历史 / 速记补录】。")
-    st.caption("下方文字表和图片画廊来自同一批项目日志：上面改文字结构，下面只负责翻图，不是两套历史。")
+    st.caption("这里专注回看、修正和排查已有记录；新增过去日期的信息仍回【项目空间】里的【补历史 / 速记补录】。")
     valid_p = [p for p in db.keys() if p != "系统配置"]
     if not valid_p: st.stop()
     history_attention_map = build_project_attention_map(valid_p)
@@ -15233,12 +15225,6 @@ elif menu == MENU_MAINTENANCE:
     maintenance_show_history = maintenance_mode == "📝 项目历史"
     maintenance_show_linkage = maintenance_mode == "🔗 串联排查"
     maintenance_show_cross = maintenance_mode == "🗓️ 跨项目修正"
-    if maintenance_mode == "📝 项目历史":
-        st.caption("先看当前项目历史日志和图片画廊；适合回看、补校和改原记录。")
-    elif maintenance_mode == "🔗 串联排查":
-        st.caption("先看待办历史、统一事件和识别待确认；适合排查系统为什么这样理解。")
-    else:
-        st.caption("先看跨项目按日修正；适合同一天批量修改多项目历史。")
     low_conf_events = [x for x in collect_low_confidence_standard_events(limit=80) if str(x.get("项目", "")).strip() == str(sel_proj).strip()]
     if maintenance_show_linkage and low_conf_events:
         with st.expander(f"🧭 当前项目的识别待确认 ({len(low_conf_events)} 条)", expanded=(maintenance_mode == "🔗 串联排查")):
@@ -15720,7 +15706,6 @@ elif menu == MENU_MAINTENANCE:
 # ==========================================
 elif menu == MENU_SETTINGS:
     st.title("⚙️ 系统设置")
-    st.caption("这里保留全局配置、词典、导入和低频工具；打印追踪也已从主导航收进这里。")
     pending_settings_mode = str(st.session_state.pop("_pending_settings_mode", "")).strip()
     settings_workspace_options = ["⚙️ 全局配置", "🖨️ 打印追踪工具"]
     if pending_settings_mode in settings_workspace_options:
@@ -15734,356 +15719,374 @@ elif menu == MENU_SETTINGS:
         key="settings_workspace_mode",
     )
     if settings_workspace_mode == "🖨️ 打印追踪工具":
-        st.caption("打印追踪已从主导航移入这里，避免低频工具和高频入口并排；你原来的功能都还在。")
         render_print_tracking_board(current_pm, valid_projs, ui_prefix="print_track_settings")
         st.stop()
-    render_rd_csv_import_panel(expanded=False)
+
+    settings_config_mode = st.radio(
+        "设置分类",
+        ["⚙️ 日常配置", "🧹 数据治理", "🧪 工具"],
+        horizontal=True,
+        key="settings_config_mode",
+    )
+    settings_show_daily = settings_config_mode == "⚙️ 日常配置"
+    settings_show_governance = settings_config_mode == "🧹 数据治理"
+    settings_show_tools = settings_config_mode == "🧪 工具"
+    if settings_show_governance:
+        render_rd_csv_import_panel(expanded=False)
     st.divider()
 
-    with st.expander("🧭 项目管理（重命名 / 合并同类 / 别名学习）", expanded=False):
-        all_proj_names = [p for p in db.keys() if p != "系统配置"]
-        if not all_proj_names:
-            st.info("暂无项目可管理。")
+    if settings_show_daily:
+        st.caption("当前显示：词典、成员、排期。")
+    elif settings_show_governance:
+        st.caption("当前显示：导入、项目治理、数据库整理。")
+    else:
+        st.caption("当前显示：识别调试和待确认队列。")
 
-        else:
-            st.markdown("**A. 重命名项目**")
-            c_r1, c_r2, c_r3 = st.columns([1.2, 1.2, 1])
-            with c_r1:
-                src_proj = st.selectbox("选择项目", all_proj_names, key="rename_src")
-            with c_r2:
-                new_proj_name = st.text_input("新名称", value=src_proj, key="rename_dst")
-            with c_r3:
-                st.write("")
-                if st.button("✏️ 确认重命名", type="primary", key="btn_rename"):
-                    if not new_proj_name.strip():
-                        st.error("新名称不能为空。")
-                    elif new_proj_name == src_proj:
-                        st.warning("名称未变化，无需重命名。")
-                    elif normalize_project_name_for_write(new_proj_name, valid_projs=[p for p in all_proj_names if p != src_proj]) in db:
-                        st.error("目标名称已存在，请先使用“合并同类项目”。")
-                    else:
-                        final_name, renamed = rename_project_to_target(src_proj, new_proj_name)
-                        if renamed:
-                            persist_project_admin_changes([final_name], recompute_projects=True)
-                            st.success(f"✅ 已重命名：{src_proj} → {final_name}")
-                            st.rerun()
-                        else:
-                            st.warning("重命名未执行，请检查目标名称是否有效。")
+    if settings_show_governance:
+        with st.expander("🧭 项目管理（重命名 / 合并同类 / 别名学习）", expanded=False):
+            all_proj_names = [p for p in db.keys() if p != "系统配置"]
+            if not all_proj_names:
+                st.info("暂无项目可管理。")
 
-            st.markdown("---")
-            st.markdown("**B. 合并同类项目 + 自动学习别名**")
-            c_m1, c_m2, c_m3 = st.columns([1, 1, 1.2])
-            with c_m1:
-                merge_src = st.selectbox("并入来源项目", all_proj_names, key="merge_src")
-            with c_m2:
-                merge_dst = st.selectbox("目标项目", all_proj_names, key="merge_dst")
-            with c_m3:
-                alias_input = st.text_input("附加别名（逗号分隔）", placeholder="如: 1/6超女, 1/6 supergirl, 1/6超级女孩")
-
-            if st.button("🔀 执行合并并学习别名", type="primary", key="btn_merge"):
-                if merge_src == merge_dst:
-                    st.error("来源项目与目标项目不能相同。")
-                else:
-                    src_data = db.get(merge_src, {})
-                    dst_data = db.get(merge_dst, {})
-                    st.session_state.db["系统配置"].setdefault("最近合并回滚", {})
-                    rollback_payload = {
-                        "id": str(uuid.uuid4()),
-                        "时间": str(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
-                        "merge_src": merge_src,
-                        "merge_dst": merge_dst,
-                        "src_data": json.loads(json.dumps(src_data, ensure_ascii=False)),
-                        "dst_data_before": json.loads(json.dumps(dst_data, ensure_ascii=False)),
-                        "alias_map_before": json.loads(json.dumps(st.session_state.db["系统配置"].get("项目别名", {}), ensure_ascii=False))
-                    }
-                    st.session_state.db["系统配置"]["最近合并回滚"] = rollback_payload
-                    st.session_state.db["系统配置"].setdefault("合并回滚历史", []).append(rollback_payload)
-                    learned_aliases = {merge_src, merge_dst}
-                    if alias_input.strip():
-                        learned_aliases.update(x.strip() for x in re.split(r'[,，]', alias_input) if x.strip())
-                    if merge_project_into_target(merge_src, merge_dst, learned_aliases=list(learned_aliases)):
-                        merge_target = normalize_project_name_for_write(
-                            merge_dst,
-                            valid_projs=[p for p in db.keys() if p != "系统配置"],
-                        )
-                        persist_project_admin_changes([merge_target], recompute_projects=True)
-                        st.success(f"✅ 合并完成：{merge_src} → {normalize_project_name_for_write(merge_dst)}，并已学习 {len(learned_aliases)} 个别名。")
-                        st.rerun()
-                    else:
-                        st.warning("合并未执行，请检查来源/目标项目是否有效。")
-
-            st.markdown("---")
-            st.markdown("**C. 异常比例项目清理（如 6威龙 → 1/6威龙）**")
-            malformed_pairs = []
-            suspicious_names = []
-            for p_name in all_proj_names:
-                inferred_target = infer_malformed_ratio_project_target(p_name)
-                if inferred_target and inferred_target != p_name:
-                    malformed_pairs.append((p_name, inferred_target))
-                if (
-                    str(p_name).strip().isdigit()
-                    or len(str(p_name).strip()) <= 2
-                    or re.fullmatch(r"[0-9,\-_/ ]+", str(p_name).strip())
-                ):
-                    suspicious_names.append(str(p_name).strip())
-
-            if malformed_pairs:
-                malformed_labels = [f"{src} → {dst}" for src, dst in malformed_pairs]
-                malformed_df = pd.DataFrame([
-                    {
-                        "异常项目": src,
-                        "建议并入": dst,
-                        "来源长度": len(str(src)),
-                        "建议人工确认": "是" if (len(str(src).strip()) <= 2 or str(src).strip().isdigit()) else "",
-                    }
-                    for src, dst in malformed_pairs
-                ]).sort_values(by=["建议人工确认", "异常项目"], ascending=[False, True])
-                st.dataframe(malformed_df, width="stretch", hide_index=True)
-                st.caption("提示：像 `1`、纯数字、过短项目名，建议人工确认后再清理；`6威龙 -> 1/6威龙` 这类通常可以直接合并。")
-                picked_malformed = st.multiselect(
-                    "检测到的异常比例项目",
-                    malformed_labels,
-                    default=malformed_labels,
-                    key="malformed_ratio_cleanup_pick",
-                )
-                if st.button("🧹 执行异常比例项目清理", type="primary", key="btn_cleanup_ratio"):
-                    cleaned = []
-                    cleaned_targets = []
-                    skipped = []
-                    for label in picked_malformed:
-                        src, dst = label.split(" → ", 1)
-                        if merge_project_into_target(src, dst, learned_aliases=[src]):
-                            cleaned.append(label)
-                            if dst not in cleaned_targets:
-                                cleaned_targets.append(dst)
-                        else:
-                            skipped.append(label)
-                    if cleaned:
-                        persist_project_admin_changes(cleaned_targets, recompute_projects=True)
-                        msg = f"已清理 {len(cleaned)} 个异常项目：{'；'.join(cleaned[:6])}"
-                        if skipped:
-                            msg += f"；另有 {len(skipped)} 个未处理，请检查目标项是否有效。"
-                        st.success(msg)
-                        st.rerun()
-                    elif skipped:
-                        st.warning(f"本次没有清理成功。未处理项：{'；'.join(skipped[:6])}")
-                    else:
-                        st.info("没有可执行的异常项目清理。")
             else:
-                st.caption("当前未检测到可自动清理的异常比例项目。")
-            if suspicious_names:
-                st.warning("检测到需要人工判断的可疑项目名：" + "；".join(sorted(list(dict.fromkeys(suspicious_names)))[:12]))
-                suspicious_pick = st.selectbox(
-                    "删除可疑孤儿项目（如 1）",
-                    [""] + sorted(list(dict.fromkeys(suspicious_names))),
-                    key="suspicious_project_delete_pick",
-                )
-                if st.button("🗑 删除该可疑项目", key="btn_delete_suspicious_proj"):
-                    pick = str(suspicious_pick).strip()
-                    if not pick:
-                        st.warning("请先选择要删除的可疑项目。")
-                    elif pick not in db or pick == "系统配置":
-                        st.warning("该项目不存在或不可删除。")
-                    else:
-                        delete_project_and_refs(pick)
-                        persist_project_admin_changes([], recompute_projects=False)
-                        st.success(f"已删除可疑项目：{pick}")
-                        st.rerun()
-
-            manual_delete_options = sorted([p for p in all_proj_names if p and p != "系统配置"])
-            with st.expander("🗑 手动选择要删除的项目", expanded=False):
-                st.caption("自动清理猜不中时，直接由你勾选。会同步清理 To-do 关联项目和标准事件流里的引用。")
-                manual_delete_pick = st.multiselect(
-                    "选择要删除的项目",
-                    manual_delete_options,
-                    key="manual_project_delete_pick",
-                    placeholder="可搜索，例如 6威龙、6早川秋",
-                )
-                if st.button("🧨 删除选中的项目", key="btn_delete_manual_projects"):
-                    picked = [str(x).strip() for x in manual_delete_pick if str(x).strip()]
-                    if not picked:
-                        st.warning("请先选择要删除的项目。")
-                    else:
-                        removed = []
-                        for pick in picked:
-                            if delete_project_and_refs(pick):
-                                removed.append(pick)
-                        if removed:
-                            persist_project_admin_changes([], recompute_projects=False)
-                            st.success(f"已删除 {len(removed)} 个项目：{'；'.join(removed[:8])}")
-                            st.rerun()
+                st.markdown("**A. 重命名项目**")
+                c_r1, c_r2, c_r3 = st.columns([1.2, 1.2, 1])
+                with c_r1:
+                    src_proj = st.selectbox("选择项目", all_proj_names, key="rename_src")
+                with c_r2:
+                    new_proj_name = st.text_input("新名称", value=src_proj, key="rename_dst")
+                with c_r3:
+                    st.write("")
+                    if st.button("✏️ 确认重命名", type="primary", key="btn_rename"):
+                        if not new_proj_name.strip():
+                            st.error("新名称不能为空。")
+                        elif new_proj_name == src_proj:
+                            st.warning("名称未变化，无需重命名。")
+                        elif normalize_project_name_for_write(new_proj_name, valid_projs=[p for p in all_proj_names if p != src_proj]) in db:
+                            st.error("目标名称已存在，请先使用“合并同类项目”。")
                         else:
-                            st.info("没有可删除的项目。")
+                            final_name, renamed = rename_project_to_target(src_proj, new_proj_name)
+                            if renamed:
+                                persist_project_admin_changes([final_name], recompute_projects=True)
+                                st.success(f"✅ 已重命名：{src_proj} → {final_name}")
+                                st.rerun()
+                            else:
+                                st.warning("重命名未执行，请检查目标名称是否有效。")
 
-            noise_pairs = detect_project_name_noise_pairs(all_proj_names)
-            with st.expander("🧹 项目名噪音候选（尾缀 / 括号别名 / 空格符号）", expanded=False):
-                st.caption("这里只列明显像同一项目的命名噪音候选。像“Pending”尾缀、括号英文别名会优先被捞出来；真正不同项目不会自动合并。")
-                if noise_pairs:
-                    noise_df = pd.DataFrame(noise_pairs).sort_values(by=["建议并入", "异常项目"], ascending=[True, True])
-                    st.dataframe(noise_df, width="stretch", hide_index=True)
-                    noise_labels = [f"{row['异常项目']} → {row['建议并入']}｜{row['原因']}" for row in noise_pairs]
-                    picked_noise = st.multiselect(
-                        "选择要合并的命名噪音项目",
-                        noise_labels,
-                        default=noise_labels,
-                        key="project_name_noise_pick",
-                    )
-                    if st.button("✨ 清理这些命名噪音", key="btn_cleanup_project_noise", type="primary"):
-                        cleaned = []
-                        cleaned_targets = []
-                        for label in picked_noise:
-                            src, rest = label.split(" → ", 1)
-                            dst, _reason = rest.split("｜", 1)
-                            if merge_project_into_target(src.strip(), dst.strip(), learned_aliases=[src.strip()]):
-                                cleaned.append(f"{src.strip()} → {dst.strip()}")
-                                if dst.strip() not in cleaned_targets:
-                                    cleaned_targets.append(dst.strip())
-                        if cleaned:
-                            persist_project_admin_changes(cleaned_targets, recompute_projects=True)
-                            st.success(f"已清理 {len(cleaned)} 个命名噪音项目：{'；'.join(cleaned[:8])}")
-                            st.rerun()
-                        else:
-                            st.info("当前没有可执行的命名噪音清理。")
-                else:
-                    st.caption("当前没有检测到明显的项目名噪音候选。")
-
-            sim_pairs = detect_high_similarity_project_pairs(all_proj_names)
-            with st.expander("🧪 高相似度项目名待确认", expanded=False):
-                st.caption("这里收的是可能录错、也可能真的是不同项目的名字。不会默认全选，由你人工决定是否合并。")
-                if sim_pairs:
-                    sim_df = pd.DataFrame(sim_pairs).sort_values(by=["相似度", "建议并入", "异常项目"], ascending=[False, True, True])
-                    st.dataframe(sim_df, width="stretch", hide_index=True)
-                    sim_labels = [f"{row['异常项目']} → {row['建议并入']}｜{row['相似度']}" for row in sim_pairs]
-                    picked_sim = st.multiselect(
-                        "选择确认要合并的高相似度项目",
-                        sim_labels,
-                        key="project_name_similarity_pick",
-                        placeholder="例如：1/12KDA、1/12TDK、Neo 大小写差异",
-                    )
-                    if st.button("🧩 合并这些高相似度项目", key="btn_merge_similarity_projects"):
-                        cleaned = []
-                        cleaned_targets = []
-                        for label in picked_sim:
-                            src, rest = label.split(" → ", 1)
-                            dst, _score = rest.split("｜", 1)
-                            if merge_project_into_target(src.strip(), dst.strip(), learned_aliases=[src.strip()]):
-                                cleaned.append(f"{src.strip()} → {dst.strip()}")
-                                if dst.strip() not in cleaned_targets:
-                                    cleaned_targets.append(dst.strip())
-                        if cleaned:
-                            persist_project_admin_changes(cleaned_targets, recompute_projects=True)
-                            st.success(f"已合并 {len(cleaned)} 个高相似度项目：{'；'.join(cleaned[:8])}")
-                            st.rerun()
-                        else:
-                            st.info("没有执行任何高相似度项目合并。")
-                else:
-                    st.caption("当前没有检测到需要人工确认的高相似度项目。")
-
-            alias_map = sanitize_project_alias_map(st.session_state.db["系统配置"].get("项目别名", {}))
-            st.session_state.db["系统配置"]["项目别名"] = alias_map
-            if alias_map:
-                alias_df = pd.DataFrame([
-                    {"别名(归一化)": k, "映射项目": v} for k, v in sorted(alias_map.items(), key=lambda x: x[0])
-                ])
-                st.markdown("**当前别名词典**")
-                st.dataframe(alias_df, width='stretch')
-                c_a1, c_a2 = st.columns([1.2, 1])
-                with c_a1:
-                    del_alias = st.selectbox("删除某个别名映射", [""] + sorted(alias_map.keys()), key="del_alias_key")
-                    if st.button("🧯 删除该别名", key="btn_del_alias") and del_alias:
-                        st.session_state.db["系统配置"].setdefault("项目别名", {}).pop(del_alias, None)
-                        persist_project_admin_changes([], recompute_projects=False)
-                        st.success(f"已删除别名：{del_alias}")
-                        st.rerun()
-                with c_a2:
-                    if st.button("🧹 清空全部别名映射", key="btn_clear_alias"):
-                        st.session_state.db["系统配置"]["项目别名"] = {}
-                        persist_project_admin_changes([], recompute_projects=False)
-                        st.success("已清空全部别名映射。")
-                        st.rerun()
-
-            rollback = st.session_state.db["系统配置"].get("最近合并回滚", {})
-            if rollback and rollback.get("merge_src"):
                 st.markdown("---")
-                st.markdown(f"**后悔药（最近一次合并）**：{rollback.get('merge_src')} → {rollback.get('merge_dst')}")
-                if st.button("↩️ 撤销最近一次合并", key="btn_undo_merge"):
-                    src_name = rollback.get("merge_src")
-                    dst_name = rollback.get("merge_dst")
-                    if dst_name in db:
-                        db[dst_name] = rollback.get("dst_data_before", db.get(dst_name, {}))
-                    db[src_name] = rollback.get("src_data", {})
-                    st.session_state.db["系统配置"]["项目别名"] = rollback.get(
-                        "alias_map_before", st.session_state.db["系统配置"].get("项目别名", {})
-                    )
-                    st.session_state.db["系统配置"].setdefault("最近合并回滚", {})
-                    st.session_state.db["系统配置"]["最近合并回滚"] = {}
-                    persist_project_admin_changes([src_name, dst_name], recompute_projects=True)
-                    st.success("✅ 已撤销最近一次合并。")
-                    st.rerun()
+                st.markdown("**B. 合并同类项目 + 自动学习别名**")
+                c_m1, c_m2, c_m3 = st.columns([1, 1, 1.2])
+                with c_m1:
+                    merge_src = st.selectbox("并入来源项目", all_proj_names, key="merge_src")
+                with c_m2:
+                    merge_dst = st.selectbox("目标项目", all_proj_names, key="merge_dst")
+                with c_m3:
+                    alias_input = st.text_input("附加别名（逗号分隔）", placeholder="如: 1/6超女, 1/6 supergirl, 1/6超级女孩")
 
-            hist = st.session_state.db["系统配置"].setdefault("合并回滚历史", [])
-            if hist:
-                st.markdown("---")
-                st.markdown("**合并回滚历史（可多选删除，单条恢复）**")
-                hist_df = pd.DataFrame([
-                    {
-                        "ID": h.get("id", ""),
-                        "时间": h.get("时间", ""),
-                        "来源": h.get("merge_src", ""),
-                        "目标": h.get("merge_dst", "")
-                    }
-                    for h in hist
-                ]).sort_values(by=["时间"], ascending=False)
-                st.dataframe(hist_df, width='stretch')
-                id_list = hist_df["ID"].tolist()
-                sel_restore = st.selectbox("选择要恢复的历史记录（单选）", ["(不选择)"] + id_list, key="merge_hist_restore")
-                c_h1, c_h2 = st.columns(2)
-                with c_h1:
-                    if st.button("↩️ 按历史记录恢复", key="btn_restore_hist") and sel_restore != "(不选择)":
-                        tar = next((x for x in hist if x.get("id") == sel_restore), None)
-                        if tar:
-                            src_name = tar.get("merge_src")
-                            dst_name = tar.get("merge_dst")
-                            if dst_name in db:
-                                db[dst_name] = tar.get("dst_data_before", db.get(dst_name, {}))
-                            db[src_name] = tar.get("src_data", {})
-                            st.session_state.db["系统配置"]["项目别名"] = tar.get(
-                                "alias_map_before", st.session_state.db["系统配置"].get("项目别名", {})
+                if st.button("🔀 执行合并并学习别名", type="primary", key="btn_merge"):
+                    if merge_src == merge_dst:
+                        st.error("来源项目与目标项目不能相同。")
+                    else:
+                        src_data = db.get(merge_src, {})
+                        dst_data = db.get(merge_dst, {})
+                        st.session_state.db["系统配置"].setdefault("最近合并回滚", {})
+                        rollback_payload = {
+                            "id": str(uuid.uuid4()),
+                            "时间": str(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                            "merge_src": merge_src,
+                            "merge_dst": merge_dst,
+                            "src_data": json.loads(json.dumps(src_data, ensure_ascii=False)),
+                            "dst_data_before": json.loads(json.dumps(dst_data, ensure_ascii=False)),
+                            "alias_map_before": json.loads(json.dumps(st.session_state.db["系统配置"].get("项目别名", {}), ensure_ascii=False))
+                        }
+                        st.session_state.db["系统配置"]["最近合并回滚"] = rollback_payload
+                        st.session_state.db["系统配置"].setdefault("合并回滚历史", []).append(rollback_payload)
+                        learned_aliases = {merge_src, merge_dst}
+                        if alias_input.strip():
+                            learned_aliases.update(x.strip() for x in re.split(r'[,，]', alias_input) if x.strip())
+                        if merge_project_into_target(merge_src, merge_dst, learned_aliases=list(learned_aliases)):
+                            merge_target = normalize_project_name_for_write(
+                                merge_dst,
+                                valid_projs=[p for p in db.keys() if p != "系统配置"],
                             )
-                            persist_project_admin_changes([src_name, dst_name], recompute_projects=True)
-                            st.success("✅ 已按历史记录恢复。")
+                            persist_project_admin_changes([merge_target], recompute_projects=True)
+                            st.success(f"✅ 合并完成：{merge_src} → {normalize_project_name_for_write(merge_dst)}，并已学习 {len(learned_aliases)} 个别名。")
                             st.rerun()
-                with c_h2:
-                    del_ids = st.multiselect("多选删除历史记录", id_list, key="merge_hist_delete", placeholder="请选择要删除的记录")
-                    if st.button("🗑️ 删除选中历史", key="btn_del_hist") and del_ids:
-                        st.session_state.db["系统配置"]["合并回滚历史"] = [x for x in hist if x.get("id") not in set(del_ids)]
-                        persist_project_admin_changes([], recompute_projects=False)
-                        st.success(f"已删除 {len(del_ids)} 条历史记录。")
+                        else:
+                            st.warning("合并未执行，请检查来源/目标项目是否有效。")
+
+                st.markdown("---")
+                st.markdown("**C. 异常比例项目清理（如 6威龙 → 1/6威龙）**")
+                malformed_pairs = []
+                suspicious_names = []
+                for p_name in all_proj_names:
+                    inferred_target = infer_malformed_ratio_project_target(p_name)
+                    if inferred_target and inferred_target != p_name:
+                        malformed_pairs.append((p_name, inferred_target))
+                    if (
+                        str(p_name).strip().isdigit()
+                        or len(str(p_name).strip()) <= 2
+                        or re.fullmatch(r"[0-9,\-_/ ]+", str(p_name).strip())
+                    ):
+                        suspicious_names.append(str(p_name).strip())
+
+                if malformed_pairs:
+                    malformed_labels = [f"{src} → {dst}" for src, dst in malformed_pairs]
+                    malformed_df = pd.DataFrame([
+                        {
+                            "异常项目": src,
+                            "建议并入": dst,
+                            "来源长度": len(str(src)),
+                            "建议人工确认": "是" if (len(str(src).strip()) <= 2 or str(src).strip().isdigit()) else "",
+                        }
+                        for src, dst in malformed_pairs
+                    ]).sort_values(by=["建议人工确认", "异常项目"], ascending=[False, True])
+                    st.dataframe(malformed_df, width="stretch", hide_index=True)
+                    st.caption("提示：像 `1`、纯数字、过短项目名，建议人工确认后再清理；`6威龙 -> 1/6威龙` 这类通常可以直接合并。")
+                    picked_malformed = st.multiselect(
+                        "检测到的异常比例项目",
+                        malformed_labels,
+                        default=malformed_labels,
+                        key="malformed_ratio_cleanup_pick",
+                    )
+                    if st.button("🧹 执行异常比例项目清理", type="primary", key="btn_cleanup_ratio"):
+                        cleaned = []
+                        cleaned_targets = []
+                        skipped = []
+                        for label in picked_malformed:
+                            src, dst = label.split(" → ", 1)
+                            if merge_project_into_target(src, dst, learned_aliases=[src]):
+                                cleaned.append(label)
+                                if dst not in cleaned_targets:
+                                    cleaned_targets.append(dst)
+                            else:
+                                skipped.append(label)
+                        if cleaned:
+                            persist_project_admin_changes(cleaned_targets, recompute_projects=True)
+                            msg = f"已清理 {len(cleaned)} 个异常项目：{'；'.join(cleaned[:6])}"
+                            if skipped:
+                                msg += f"；另有 {len(skipped)} 个未处理，请检查目标项是否有效。"
+                            st.success(msg)
+                            st.rerun()
+                        elif skipped:
+                            st.warning(f"本次没有清理成功。未处理项：{'；'.join(skipped[:6])}")
+                        else:
+                            st.info("没有可执行的异常项目清理。")
+                else:
+                    st.caption("当前未检测到可自动清理的异常比例项目。")
+                if suspicious_names:
+                    st.warning("检测到需要人工判断的可疑项目名：" + "；".join(sorted(list(dict.fromkeys(suspicious_names)))[:12]))
+                    suspicious_pick = st.selectbox(
+                        "删除可疑孤儿项目（如 1）",
+                        [""] + sorted(list(dict.fromkeys(suspicious_names))),
+                        key="suspicious_project_delete_pick",
+                    )
+                    if st.button("🗑 删除该可疑项目", key="btn_delete_suspicious_proj"):
+                        pick = str(suspicious_pick).strip()
+                        if not pick:
+                            st.warning("请先选择要删除的可疑项目。")
+                        elif pick not in db or pick == "系统配置":
+                            st.warning("该项目不存在或不可删除。")
+                        else:
+                            delete_project_and_refs(pick)
+                            persist_project_admin_changes([], recompute_projects=False)
+                            st.success(f"已删除可疑项目：{pick}")
+                            st.rerun()
+
+                manual_delete_options = sorted([p for p in all_proj_names if p and p != "系统配置"])
+                with st.expander("🗑 手动选择要删除的项目", expanded=False):
+                    st.caption("自动清理猜不中时，直接由你勾选。会同步清理 To-do 关联项目和标准事件流里的引用。")
+                    manual_delete_pick = st.multiselect(
+                        "选择要删除的项目",
+                        manual_delete_options,
+                        key="manual_project_delete_pick",
+                        placeholder="可搜索，例如 6威龙、6早川秋",
+                    )
+                    if st.button("🧨 删除选中的项目", key="btn_delete_manual_projects"):
+                        picked = [str(x).strip() for x in manual_delete_pick if str(x).strip()]
+                        if not picked:
+                            st.warning("请先选择要删除的项目。")
+                        else:
+                            removed = []
+                            for pick in picked:
+                                if delete_project_and_refs(pick):
+                                    removed.append(pick)
+                            if removed:
+                                persist_project_admin_changes([], recompute_projects=False)
+                                st.success(f"已删除 {len(removed)} 个项目：{'；'.join(removed[:8])}")
+                                st.rerun()
+                            else:
+                                st.info("没有可删除的项目。")
+
+                noise_pairs = detect_project_name_noise_pairs(all_proj_names)
+                with st.expander("🧹 项目名噪音候选（尾缀 / 括号别名 / 空格符号）", expanded=False):
+                    st.caption("这里只列明显像同一项目的命名噪音候选。像“Pending”尾缀、括号英文别名会优先被捞出来；真正不同项目不会自动合并。")
+                    if noise_pairs:
+                        noise_df = pd.DataFrame(noise_pairs).sort_values(by=["建议并入", "异常项目"], ascending=[True, True])
+                        st.dataframe(noise_df, width="stretch", hide_index=True)
+                        noise_labels = [f"{row['异常项目']} → {row['建议并入']}｜{row['原因']}" for row in noise_pairs]
+                        picked_noise = st.multiselect(
+                            "选择要合并的命名噪音项目",
+                            noise_labels,
+                            default=noise_labels,
+                            key="project_name_noise_pick",
+                        )
+                        if st.button("✨ 清理这些命名噪音", key="btn_cleanup_project_noise", type="primary"):
+                            cleaned = []
+                            cleaned_targets = []
+                            for label in picked_noise:
+                                src, rest = label.split(" → ", 1)
+                                dst, _reason = rest.split("｜", 1)
+                                if merge_project_into_target(src.strip(), dst.strip(), learned_aliases=[src.strip()]):
+                                    cleaned.append(f"{src.strip()} → {dst.strip()}")
+                                    if dst.strip() not in cleaned_targets:
+                                        cleaned_targets.append(dst.strip())
+                            if cleaned:
+                                persist_project_admin_changes(cleaned_targets, recompute_projects=True)
+                                st.success(f"已清理 {len(cleaned)} 个命名噪音项目：{'；'.join(cleaned[:8])}")
+                                st.rerun()
+                            else:
+                                st.info("当前没有可执行的命名噪音清理。")
+                    else:
+                        st.caption("当前没有检测到明显的项目名噪音候选。")
+
+                sim_pairs = detect_high_similarity_project_pairs(all_proj_names)
+                with st.expander("🧪 高相似度项目名待确认", expanded=False):
+                    st.caption("这里收的是可能录错、也可能真的是不同项目的名字。不会默认全选，由你人工决定是否合并。")
+                    if sim_pairs:
+                        sim_df = pd.DataFrame(sim_pairs).sort_values(by=["相似度", "建议并入", "异常项目"], ascending=[False, True, True])
+                        st.dataframe(sim_df, width="stretch", hide_index=True)
+                        sim_labels = [f"{row['异常项目']} → {row['建议并入']}｜{row['相似度']}" for row in sim_pairs]
+                        picked_sim = st.multiselect(
+                            "选择确认要合并的高相似度项目",
+                            sim_labels,
+                            key="project_name_similarity_pick",
+                            placeholder="例如：1/12KDA、1/12TDK、Neo 大小写差异",
+                        )
+                        if st.button("🧩 合并这些高相似度项目", key="btn_merge_similarity_projects"):
+                            cleaned = []
+                            cleaned_targets = []
+                            for label in picked_sim:
+                                src, rest = label.split(" → ", 1)
+                                dst, _score = rest.split("｜", 1)
+                                if merge_project_into_target(src.strip(), dst.strip(), learned_aliases=[src.strip()]):
+                                    cleaned.append(f"{src.strip()} → {dst.strip()}")
+                                    if dst.strip() not in cleaned_targets:
+                                        cleaned_targets.append(dst.strip())
+                            if cleaned:
+                                persist_project_admin_changes(cleaned_targets, recompute_projects=True)
+                                st.success(f"已合并 {len(cleaned)} 个高相似度项目：{'；'.join(cleaned[:8])}")
+                                st.rerun()
+                            else:
+                                st.info("没有执行任何高相似度项目合并。")
+                    else:
+                        st.caption("当前没有检测到需要人工确认的高相似度项目。")
+
+                alias_map = sanitize_project_alias_map(st.session_state.db["系统配置"].get("项目别名", {}))
+                st.session_state.db["系统配置"]["项目别名"] = alias_map
+                if alias_map:
+                    alias_df = pd.DataFrame([
+                        {"别名(归一化)": k, "映射项目": v} for k, v in sorted(alias_map.items(), key=lambda x: x[0])
+                    ])
+                    st.markdown("**当前别名词典**")
+                    st.dataframe(alias_df, width='stretch')
+                    c_a1, c_a2 = st.columns([1.2, 1])
+                    with c_a1:
+                        del_alias = st.selectbox("删除某个别名映射", [""] + sorted(alias_map.keys()), key="del_alias_key")
+                        if st.button("🧯 删除该别名", key="btn_del_alias") and del_alias:
+                            st.session_state.db["系统配置"].setdefault("项目别名", {}).pop(del_alias, None)
+                            persist_project_admin_changes([], recompute_projects=False)
+                            st.success(f"已删除别名：{del_alias}")
+                            st.rerun()
+                    with c_a2:
+                        if st.button("🧹 清空全部别名映射", key="btn_clear_alias"):
+                            st.session_state.db["系统配置"]["项目别名"] = {}
+                            persist_project_admin_changes([], recompute_projects=False)
+                            st.success("已清空全部别名映射。")
+                            st.rerun()
+
+                rollback = st.session_state.db["系统配置"].get("最近合并回滚", {})
+                if rollback and rollback.get("merge_src"):
+                    st.markdown("---")
+                    st.markdown(f"**后悔药（最近一次合并）**：{rollback.get('merge_src')} → {rollback.get('merge_dst')}")
+                    if st.button("↩️ 撤销最近一次合并", key="btn_undo_merge"):
+                        src_name = rollback.get("merge_src")
+                        dst_name = rollback.get("merge_dst")
+                        if dst_name in db:
+                            db[dst_name] = rollback.get("dst_data_before", db.get(dst_name, {}))
+                        db[src_name] = rollback.get("src_data", {})
+                        st.session_state.db["系统配置"]["项目别名"] = rollback.get(
+                            "alias_map_before", st.session_state.db["系统配置"].get("项目别名", {})
+                        )
+                        st.session_state.db["系统配置"].setdefault("最近合并回滚", {})
+                        st.session_state.db["系统配置"]["最近合并回滚"] = {}
+                        persist_project_admin_changes([src_name, dst_name], recompute_projects=True)
+                        st.success("✅ 已撤销最近一次合并。")
                         st.rerun()
 
-    with st.expander("📚 识别词典中心（规则 / 联动 / 自学习词库）", expanded=False):
-        st.caption("这里集中维护系统识别规则。项目别名仍放在上面的【项目管理】里；这里主要维护部件、阶段、日期语气、打印信号等通用词典。")
-        current_rec = get_recognition_dict()
-        current_comp_kw = get_component_keyword_map()
-        current_stage_kw = get_stage_keyword_map()
-        current_split_kw = get_component_split_keyword_map()
-        current_people_alias = st.session_state.db.setdefault("系统配置", {}).get("人员别名", {})
+                hist = st.session_state.db["系统配置"].setdefault("合并回滚历史", [])
+                if hist:
+                    st.markdown("---")
+                    st.markdown("**合并回滚历史（可多选删除，单条恢复）**")
+                    hist_df = pd.DataFrame([
+                        {
+                            "ID": h.get("id", ""),
+                            "时间": h.get("时间", ""),
+                            "来源": h.get("merge_src", ""),
+                            "目标": h.get("merge_dst", "")
+                        }
+                        for h in hist
+                    ]).sort_values(by=["时间"], ascending=False)
+                    st.dataframe(hist_df, width='stretch')
+                    id_list = hist_df["ID"].tolist()
+                    sel_restore = st.selectbox("选择要恢复的历史记录（单选）", ["(不选择)"] + id_list, key="merge_hist_restore")
+                    c_h1, c_h2 = st.columns(2)
+                    with c_h1:
+                        if st.button("↩️ 按历史记录恢复", key="btn_restore_hist") and sel_restore != "(不选择)":
+                            tar = next((x for x in hist if x.get("id") == sel_restore), None)
+                            if tar:
+                                src_name = tar.get("merge_src")
+                                dst_name = tar.get("merge_dst")
+                                if dst_name in db:
+                                    db[dst_name] = tar.get("dst_data_before", db.get(dst_name, {}))
+                                db[src_name] = tar.get("src_data", {})
+                                st.session_state.db["系统配置"]["项目别名"] = tar.get(
+                                    "alias_map_before", st.session_state.db["系统配置"].get("项目别名", {})
+                                )
+                                persist_project_admin_changes([src_name, dst_name], recompute_projects=True)
+                                st.success("✅ 已按历史记录恢复。")
+                                st.rerun()
+                    with c_h2:
+                        del_ids = st.multiselect("多选删除历史记录", id_list, key="merge_hist_delete", placeholder="请选择要删除的记录")
+                        if st.button("🗑️ 删除选中历史", key="btn_del_hist") and del_ids:
+                            st.session_state.db["系统配置"]["合并回滚历史"] = [x for x in hist if x.get("id") not in set(del_ids)]
+                            persist_project_admin_changes([], recompute_projects=False)
+                            st.success(f"已删除 {len(del_ids)} 条历史记录。")
+                            st.rerun()
 
-        col_d1, col_d2 = st.columns(2)
-        with col_d1:
-            comp_kw_text = st.text_area(
-                "部件关键词（每行 `关键词=部件`）",
-                value=_format_keyword_map_text(current_comp_kw),
-                height=220,
-                key="dict_comp_kw_text",
-            )
-        with col_d2:
-            stage_kw_text = st.text_area(
-                "阶段关键词（每行 `关键词=阶段`）",
-                value=_format_keyword_map_text(current_stage_kw),
-                height=220,
-                key="dict_stage_kw_text",
-            )
+    if settings_show_daily:
+        with st.expander("📚 识别词典中心（规则 / 联动 / 自学习词库）", expanded=False):
+            current_rec = get_recognition_dict()
+            current_comp_kw = get_component_keyword_map()
+            current_stage_kw = get_stage_keyword_map()
+            current_split_kw = get_component_split_keyword_map()
+            current_people_alias = st.session_state.db.setdefault("系统配置", {}).get("人员别名", {})
+
+            col_d1, col_d2 = st.columns(2)
+            with col_d1:
+                comp_kw_text = st.text_area(
+                    "部件关键词（每行 `关键词=部件`）",
+                    value=_format_keyword_map_text(current_comp_kw),
+                    height=220,
+                    key="dict_comp_kw_text",
+                )
+            with col_d2:
+                stage_kw_text = st.text_area(
+                    "阶段关键词（每行 `关键词=阶段`）",
+                    value=_format_keyword_map_text(current_stage_kw),
+                    height=220,
+                    key="dict_stage_kw_text",
+                )
 
         col_d3, col_d4 = st.columns(2)
         with col_d3:
@@ -16152,172 +16155,173 @@ elif menu == MENU_SETTINGS:
                 key="dict_print_neg_text",
             )
 
-        if st.button("💾 保存识别词典中心", type="primary", key="btn_save_dict_center"):
-            cfg = st.session_state.db.setdefault("系统配置", {})
-            cfg["AI_COMP_KW"] = _parse_keyword_map_text(comp_kw_text)
-            cfg["AI_STAGE_KW"] = _parse_keyword_map_text(stage_kw_text)
-            cfg["AI_SPLIT_COMP_KW"] = _parse_keyword_map_text(split_kw_text)
-            cfg["人员别名"] = _parse_keyword_map_text(people_alias_text)
-            cfg["识别词典"] = {
-                "未来意图词": _parse_keyword_list_text(future_kw_text),
-                "过去意图词": _parse_keyword_list_text(past_kw_text),
-                "恢复推进词": _parse_keyword_list_text(resume_kw_text),
-                "暂停信号词": _parse_keyword_list_text(pause_kw_text),
-                "打印正向词": _parse_keyword_list_text(print_pos_text),
-                "打印排除词": _parse_keyword_list_text(print_neg_text),
-                "日期噪音词": _parse_keyword_list_text(date_noise_text),
-            }
-            sync_save_db("系统配置")
-            st.success("识别词典中心已保存。后续 To-do / 大盘 / AI 速记 / 打印追踪 会共用这些规则。")
-            st.rerun()
+            if st.button("💾 保存识别词典中心", type="primary", key="btn_save_dict_center"):
+                cfg = st.session_state.db.setdefault("系统配置", {})
+                cfg["AI_COMP_KW"] = _parse_keyword_map_text(comp_kw_text)
+                cfg["AI_STAGE_KW"] = _parse_keyword_map_text(stage_kw_text)
+                cfg["AI_SPLIT_COMP_KW"] = _parse_keyword_map_text(split_kw_text)
+                cfg["人员别名"] = _parse_keyword_map_text(people_alias_text)
+                cfg["识别词典"] = {
+                    "未来意图词": _parse_keyword_list_text(future_kw_text),
+                    "过去意图词": _parse_keyword_list_text(past_kw_text),
+                    "恢复推进词": _parse_keyword_list_text(resume_kw_text),
+                    "暂停信号词": _parse_keyword_list_text(pause_kw_text),
+                    "打印正向词": _parse_keyword_list_text(print_pos_text),
+                    "打印排除词": _parse_keyword_list_text(print_neg_text),
+                    "日期噪音词": _parse_keyword_list_text(date_noise_text),
+                }
+                sync_save_db("系统配置")
+                st.success("识别词典中心已保存。后续 To-do / 大盘 / AI 速记 / 打印追踪 会共用这些规则。")
+                st.rerun()
 
-    with st.expander("🧪 识别调试台（看系统怎么理解一段文本）", expanded=False):
-        debug_text = st.text_area(
-            "输入要排查的原文",
-            height=120,
-            key="recognition_debug_text",
-            placeholder="例：设计将文件转交给工程：尼奥下发工程；预计3/20左右植发初版可出",
-        )
-        debug_proj_hint = st.selectbox(
-            "项目提示（可选）",
-            ["(不指定项目)"] + [p for p in db.keys() if p != "系统配置"],
-            key="recognition_debug_proj_hint",
-        )
-        if debug_text.strip():
-            debug_proj_list = infer_todo_projects_from_text(
-                {
-                    "任务": debug_text.strip(),
-                    "CPDDL": debug_text.strip(),
-                    "关联项目": "" if debug_proj_hint == "(不指定项目)" else debug_proj_hint,
-                    "关联项目列表": [] if debug_proj_hint == "(不指定项目)" else [debug_proj_hint],
-                },
-                [p for p in db.keys() if p != "系统配置"],
+    if settings_show_tools:
+        with st.expander("🧪 识别调试台（看系统怎么理解一段文本）", expanded=False):
+            debug_text = st.text_area(
+                "输入要排查的原文",
+                height=120,
+                key="recognition_debug_text",
+                placeholder="例：设计将文件转交给工程：尼奥下发工程；预计3/20左右植发初版可出",
             )
-            comp_hits = []
-            for kw, comp in get_component_keyword_map().items():
-                if str(kw).strip() and str(kw) in debug_text and comp not in comp_hits:
-                    comp_hits.append(comp)
-            stage_hits = []
-            for kw, stage in get_stage_keyword_map().items():
-                if str(kw).strip() and str(kw) in debug_text and stage not in stage_hits:
-                    stage_hits.append(stage)
-            people_hint = format_todo_people_hint({"任务": debug_text.strip(), "CPDDL": "", "关联人员": ""})
-            handoff_hit = "是" if any(sig in norm_text(debug_text) for sig in ["设计将文件转交给工程", "设计交接工程", "转交给工程", "下发工程", "发给工程", "交给工程"]) else "否"
-
-            dcol1, dcol2 = st.columns(2)
-            with dcol1:
-                st.markdown("**项目猜测**")
-                st.write(" / ".join(debug_proj_list) if debug_proj_list else "(未命中)")
-                st.markdown("**部件猜测**")
-                st.write(" / ".join(comp_hits[:6]) if comp_hits else "全局进度 / 未命中")
-                st.markdown("**阶段猜测**")
-                st.write(" / ".join(stage_hits[:6]) if stage_hits else "(维持原阶段)")
-            with dcol2:
-                st.markdown("**审核语义**")
-                st.write(f"版权审核语境：{'是' if has_copyright_review_context(debug_text) else '否'}")
-                st.write(f"提审类型：{infer_review_type_from_text(debug_text)}")
-                st.write(f"提审结果：{infer_review_result_from_text(debug_text)}")
-                st.markdown("**人员识别**")
-                st.write(people_hint)
-                st.markdown("**交接信号**")
-                st.write(f"设计->工程：{handoff_hit}")
-
-    with st.expander("🧭 识别待确认队列（不删功能，只帮你先捞出高风险条目）", expanded=False):
-        low_conf_events = collect_low_confidence_standard_events(limit=80)
-        if not low_conf_events:
-            st.caption("当前没有低置信度统一事件，说明近期识别结果相对稳定。")
-        else:
-            st.caption("这些条目不会阻止系统运行；这里只是把容易识别错的记录提前列出来，方便你顺手修正和学习。")
-            review_rows = []
-            for evt in low_conf_events:
-                conf = evt.get("_confidence", {})
-                review_rows.append({
-                    "日期": str(evt.get("日期", "")).strip(),
-                    "项目": str(evt.get("项目", "")).strip(),
-                    "来源": str(evt.get("来源", "")).strip(),
-                    "部件": str(evt.get("部件", "")).strip() or "全局进度",
-                    "阶段": str(evt.get("阶段", "")).strip() or "-",
-                    "内容": str(evt.get("内容", "")).strip(),
-                    "置信度": conf.get("score", 0),
-                    "风险原因": "；".join(conf.get("reasons", [])[:3]) or "-",
-                })
-            st.dataframe(pd.DataFrame(review_rows), width="stretch", hide_index=True)
-
-            event_pick_map = {}
-            event_pick_options = []
-            for evt in low_conf_events[:50]:
-                evt_id = str(evt.get("_id", "")).strip()
-                label = " | ".join([
-                    str(evt.get("日期", "")).strip() or "-",
-                    str(evt.get("项目", "")).strip() or "-",
-                    str(evt.get("部件", "")).strip() or "全局进度",
-                    (str(evt.get("内容", "")).strip() or "-")[:28],
-                ])
-                if label in event_pick_map:
-                    label = f"{label} [{evt_id[:4]}]"
-                event_pick_map[label] = evt
-                event_pick_options.append(label)
-
-            picked_label = st.selectbox("选择一条待确认记录", event_pick_options, key="low_conf_pick")
-            picked_evt = event_pick_map.get(picked_label, {})
-
-            c_l1, c_l2, c_l3 = st.columns([1.2, 1.2, 1.2])
-            valid_proj_options = [p for p in db.keys() if p != "系统配置"]
-            with c_l1:
-                fix_proj = st.selectbox(
-                    "修正项目",
-                    valid_proj_options,
-                    index=valid_proj_options.index(str(picked_evt.get("项目", "")).strip()) if str(picked_evt.get("项目", "")).strip() in valid_proj_options else 0,
-                    key="low_conf_fix_proj",
-                )
-            with c_l2:
-                comp_options = list(dict.fromkeys(["全局进度"] + STD_COMPONENTS + list(db.get(fix_proj, {}).get("部件列表", {}).keys())))
-                cur_comp = str(picked_evt.get("部件", "")).strip() or "全局进度"
-                fix_comp = st.selectbox(
-                    "修正部件",
-                    comp_options,
-                    index=comp_options.index(cur_comp) if cur_comp in comp_options else 0,
-                    key="low_conf_fix_comp",
-                )
-            with c_l3:
-                learn_type = st.selectbox(
-                    "顺手学习到哪里",
-                    ["不学习，只修这条", "部件关键词", "部件分叉词", "人员别名"],
-                    key="low_conf_learn_type",
-                )
-
-            learn_phrase = st.text_input(
-                "学习短语（可选）",
-                key="low_conf_learn_phrase",
-                placeholder="例：头发 / 猫老师 / 包装刀线",
+            debug_proj_hint = st.selectbox(
+                "项目提示（可选）",
+                ["(不指定项目)"] + [p for p in db.keys() if p != "系统配置"],
+                key="recognition_debug_proj_hint",
             )
-            canonical_people = st.text_input(
-                "人员别名标准值（仅当学习到人员别名时填写）",
-                key="low_conf_people_canonical",
-                placeholder="例：设计-Venchar",
-            )
+            if debug_text.strip():
+                debug_proj_list = infer_todo_projects_from_text(
+                    {
+                        "任务": debug_text.strip(),
+                        "CPDDL": debug_text.strip(),
+                        "关联项目": "" if debug_proj_hint == "(不指定项目)" else debug_proj_hint,
+                        "关联项目列表": [] if debug_proj_hint == "(不指定项目)" else [debug_proj_hint],
+                    },
+                    [p for p in db.keys() if p != "系统配置"],
+                )
+                comp_hits = []
+                for kw, comp in get_component_keyword_map().items():
+                    if str(kw).strip() and str(kw) in debug_text and comp not in comp_hits:
+                        comp_hits.append(comp)
+                stage_hits = []
+                for kw, stage in get_stage_keyword_map().items():
+                    if str(kw).strip() and str(kw) in debug_text and stage not in stage_hits:
+                        stage_hits.append(stage)
+                people_hint = format_todo_people_hint({"任务": debug_text.strip(), "CPDDL": "", "关联人员": ""})
+                handoff_hit = "是" if any(sig in norm_text(debug_text) for sig in ["设计将文件转交给工程", "设计交接工程", "转交给工程", "下发工程", "发给工程", "交给工程"]) else "否"
 
-            if st.button("💾 应用修正（保留原功能，只补识别）", type="primary", key="btn_low_conf_apply"):
-                if picked_evt:
-                    if str(picked_evt.get("项目", "")).strip() != fix_proj:
-                        picked_evt["项目"] = fix_proj
-                    if str(picked_evt.get("部件", "")).strip() != fix_comp:
-                        picked_evt["部件"] = fix_comp
+                dcol1, dcol2 = st.columns(2)
+                with dcol1:
+                    st.markdown("**项目猜测**")
+                    st.write(" / ".join(debug_proj_list) if debug_proj_list else "(未命中)")
+                    st.markdown("**部件猜测**")
+                    st.write(" / ".join(comp_hits[:6]) if comp_hits else "全局进度 / 未命中")
+                    st.markdown("**阶段猜测**")
+                    st.write(" / ".join(stage_hits[:6]) if stage_hits else "(维持原阶段)")
+                with dcol2:
+                    st.markdown("**审核语义**")
+                    st.write(f"版权审核语境：{'是' if has_copyright_review_context(debug_text) else '否'}")
+                    st.write(f"提审类型：{infer_review_type_from_text(debug_text)}")
+                    st.write(f"提审结果：{infer_review_result_from_text(debug_text)}")
+                    st.markdown("**人员识别**")
+                    st.write(people_hint)
+                    st.markdown("**交接信号**")
+                    st.write(f"设计->工程：{handoff_hit}")
 
-                    phrase = str(learn_phrase).strip()
-                    cfg = st.session_state.db.setdefault("系统配置", {})
-                    if phrase:
-                        if learn_type == "部件关键词":
-                            cfg.setdefault("AI_COMP_KW", {})[phrase] = fix_comp
-                        elif learn_type == "部件分叉词":
-                            cfg.setdefault("AI_SPLIT_COMP_KW", {})[phrase] = fix_comp
-                        elif learn_type == "人员别名":
-                            canonical = str(canonical_people).strip()
-                            if canonical:
-                                cfg.setdefault("人员别名", {})[phrase] = canonical
-                    sync_save_db("系统配置")
-                    st.success("待确认记录已修正，并按你的选择写入词典。")
-                    st.rerun()
+        with st.expander("🧭 识别待确认队列（不删功能，只帮你先捞出高风险条目）", expanded=False):
+            low_conf_events = collect_low_confidence_standard_events(limit=80)
+            if not low_conf_events:
+                st.caption("当前没有低置信度统一事件，说明近期识别结果相对稳定。")
+            else:
+                st.caption("这些条目不会阻止系统运行；这里只是把容易识别错的记录提前列出来，方便你顺手修正和学习。")
+                review_rows = []
+                for evt in low_conf_events:
+                    conf = evt.get("_confidence", {})
+                    review_rows.append({
+                        "日期": str(evt.get("日期", "")).strip(),
+                        "项目": str(evt.get("项目", "")).strip(),
+                        "来源": str(evt.get("来源", "")).strip(),
+                        "部件": str(evt.get("部件", "")).strip() or "全局进度",
+                        "阶段": str(evt.get("阶段", "")).strip() or "-",
+                        "内容": str(evt.get("内容", "")).strip(),
+                        "置信度": conf.get("score", 0),
+                        "风险原因": "；".join(conf.get("reasons", [])[:3]) or "-",
+                    })
+                st.dataframe(pd.DataFrame(review_rows), width="stretch", hide_index=True)
+
+                event_pick_map = {}
+                event_pick_options = []
+                for evt in low_conf_events[:50]:
+                    evt_id = str(evt.get("_id", "")).strip()
+                    label = " | ".join([
+                        str(evt.get("日期", "")).strip() or "-",
+                        str(evt.get("项目", "")).strip() or "-",
+                        str(evt.get("部件", "")).strip() or "全局进度",
+                        (str(evt.get("内容", "")).strip() or "-")[:28],
+                    ])
+                    if label in event_pick_map:
+                        label = f"{label} [{evt_id[:4]}]"
+                    event_pick_map[label] = evt
+                    event_pick_options.append(label)
+
+                picked_label = st.selectbox("选择一条待确认记录", event_pick_options, key="low_conf_pick")
+                picked_evt = event_pick_map.get(picked_label, {})
+
+                c_l1, c_l2, c_l3 = st.columns([1.2, 1.2, 1.2])
+                valid_proj_options = [p for p in db.keys() if p != "系统配置"]
+                with c_l1:
+                    fix_proj = st.selectbox(
+                        "修正项目",
+                        valid_proj_options,
+                        index=valid_proj_options.index(str(picked_evt.get("项目", "")).strip()) if str(picked_evt.get("项目", "")).strip() in valid_proj_options else 0,
+                        key="low_conf_fix_proj",
+                    )
+                with c_l2:
+                    comp_options = list(dict.fromkeys(["全局进度"] + STD_COMPONENTS + list(db.get(fix_proj, {}).get("部件列表", {}).keys())))
+                    cur_comp = str(picked_evt.get("部件", "")).strip() or "全局进度"
+                    fix_comp = st.selectbox(
+                        "修正部件",
+                        comp_options,
+                        index=comp_options.index(cur_comp) if cur_comp in comp_options else 0,
+                        key="low_conf_fix_comp",
+                    )
+                with c_l3:
+                    learn_type = st.selectbox(
+                        "顺手学习到哪里",
+                        ["不学习，只修这条", "部件关键词", "部件分叉词", "人员别名"],
+                        key="low_conf_learn_type",
+                    )
+
+                learn_phrase = st.text_input(
+                    "学习短语（可选）",
+                    key="low_conf_learn_phrase",
+                    placeholder="例：头发 / 猫老师 / 包装刀线",
+                )
+                canonical_people = st.text_input(
+                    "人员别名标准值（仅当学习到人员别名时填写）",
+                    key="low_conf_people_canonical",
+                    placeholder="例：设计-Venchar",
+                )
+
+                if st.button("💾 应用修正（保留原功能，只补识别）", type="primary", key="btn_low_conf_apply"):
+                    if picked_evt:
+                        if str(picked_evt.get("项目", "")).strip() != fix_proj:
+                            picked_evt["项目"] = fix_proj
+                        if str(picked_evt.get("部件", "")).strip() != fix_comp:
+                            picked_evt["部件"] = fix_comp
+
+                        phrase = str(learn_phrase).strip()
+                        cfg = st.session_state.db.setdefault("系统配置", {})
+                        if phrase:
+                            if learn_type == "部件关键词":
+                                cfg.setdefault("AI_COMP_KW", {})[phrase] = fix_comp
+                            elif learn_type == "部件分叉词":
+                                cfg.setdefault("AI_SPLIT_COMP_KW", {})[phrase] = fix_comp
+                            elif learn_type == "人员别名":
+                                canonical = str(canonical_people).strip()
+                                if canonical:
+                                    cfg.setdefault("人员别名", {})[phrase] = canonical
+                        sync_save_db("系统配置")
+                        st.success("待确认记录已修正，并按你的选择写入词典。")
+                        st.rerun()
 
     with st.expander("\u56e2\u961f\u6210\u5458\u7ef4\u62a4\uff08\u65b0\u589e / \u66ff\u6362 / \u5220\u9664 + \u540e\u6094\u836f\uff09", expanded=False):
         st.caption("\u7edf\u4e00\u5165\u53e3\uff1a\u652f\u6301\u65b0\u589e\u6210\u5458\u6c60\u3001\u6309\u6761\u4ef6\u66ff\u6362/\u5220\u9664\uff0c\u5e76\u53ef\u64a4\u9500\u4e0a\u4e00\u6b65\u8bef\u64cd\u4f5c\u3002")
@@ -16796,123 +16800,125 @@ elif menu == MENU_SETTINGS:
                     st.rerun()
                 else:
                     st.info("\u672c\u6b21\u64cd\u4f5c\u672a\u4ea7\u751f\u5b9e\u9645\u53d8\u66f4\u3002")
-    with st.expander("排期基线维护", expanded=False):
-        st.info("立项固定为 1 天；其余阶段可按团队节奏维护默认天数。")
-        cols = st.columns(len(SYS_CFG["排期基线"]))
-        new_days = {}
-        for i, (k, v) in enumerate(SYS_CFG["排期基线"].items()):
-            fixed_launch = (str(k) == "立项")
-            show_val = 1 if fixed_launch else int(v)
-            new_days[k] = cols[i].number_input(
-                k,
-                value=show_val,
-                step=1,
-                key=f"bd_{k}",
-                disabled=fixed_launch,
-                help=("立项固定为 1 天" if fixed_launch else None),
-            )
-        new_days["立项"] = 1
-        if st.button("保存排期基线"):
-            st.session_state.db["系统配置"]["排期基线"] = new_days
-            sync_save_db()
-            st.success("排期基线已更新。")
-    with st.expander("🧹 数据库瘦身 & Base64 图片迁移工具", expanded=False):
-        target_label = "GridFS 持久附件" if get_storage_attachment_mode() == "gridfs" else "本地文件引用"
-        st.warning(f"⚠️ 如果 JSON 文件很大，说明旧版 Base64 图片还留在数据库里。点击下方按钮可一键迁移到【{target_label}】。")
-        json_str     = json.dumps(st.session_state.db, ensure_ascii=False)
-        json_size_mb = len(json_str.encode("utf-8")) / 1024 / 1024
-        b64_count = 0; file_count = 0
-        for p_name, p_data in st.session_state.db.items():
-            if p_name == "系统配置" or not isinstance(p_data, dict): continue
-            for c_data in p_data.get("部件列表", {}).values():
-                for log in c_data.get("日志流", []):
-                    imgs = log.get("图片", [])
-                    if isinstance(imgs, str):
-                        imgs = [imgs] if imgs else []
-                    for img in imgs:
-                        if isinstance(img, str):
-                            if is_attachment_ref(img): file_count += 1
-                            elif len(img) > 100:      b64_count  += 1
-            drafts = p_data.get("配件清单长图", [])
-            if isinstance(drafts, str):
-                drafts = [drafts] if drafts else []
-            for img in drafts:
-                if isinstance(img, str):
-                    if is_attachment_ref(img): file_count += 1
-                    elif len(img) > 100:      b64_count  += 1
-        col_s1, col_s2, col_s3 = st.columns(3)
-        col_s1.metric("📦 JSON 当前体积", f"{json_size_mb:.1f} MB")
-        col_s2.metric("🖼️ 待迁移 Base64 图片", f"{b64_count} 张")
-        col_s3.metric("✅ 已迁移附件引用", f"{file_count} 张")
-
-        if b64_count > 0:
-            if st.button(f"🚀 一键迁移：将所有 Base64 图片转存为{target_label}", type="primary"):
-                migrated = 0; errors = 0
-                progress = st.progress(0, text="迁移中...")
-                all_refs = []
-                for p_name, p_data in st.session_state.db.items():
-                    if p_name == "系统配置" or not isinstance(p_data, dict): continue
-                    for c_data in p_data.get("部件列表", {}).values():
-                        for log in c_data.get("日志流", []):
-                            imgs = log.get("图片", [])
-                            if isinstance(imgs, str):
-                                continue
-                            for idx, img in enumerate(imgs):
-                                if isinstance(img, str) and not is_attachment_ref(img) and len(img) > 100:
-                                    all_refs.append((imgs, idx))
-                    drafts = p_data.get("配件清单长图", [])
-                    if isinstance(drafts, list):
-                        for idx, img in enumerate(drafts):
-                            if isinstance(img, str) and not is_attachment_ref(img) and len(img) > 100:
-                                all_refs.append((drafts, idx))
-                total = len(all_refs)
-                for i, (container, idx) in enumerate(all_refs):
-                    try:
-                        b64_str = container[idx]
-                        img_bytes = base64.b64decode(b64_str)
-                        new_ref = save_image_ref_data(img_bytes, filename=f"migrated_{uuid.uuid4().hex}.jpg", prefix="migrated")
-                        if new_ref:
-                            container[idx] = new_ref
-                            migrated += 1
-                        else:
-                            errors += 1
-                    except Exception:
-                        errors += 1
-                    progress.progress((i + 1) / max(total, 1), text=f"迁移中... {i+1}/{max(total, 1)}")
+    if settings_show_daily:
+        with st.expander("排期基线维护", expanded=False):
+            st.info("立项固定为 1 天；其余阶段可按团队节奏维护默认天数。")
+            cols = st.columns(len(SYS_CFG["排期基线"]))
+            new_days = {}
+            for i, (k, v) in enumerate(SYS_CFG["排期基线"].items()):
+                fixed_launch = (str(k) == "立项")
+                show_val = 1 if fixed_launch else int(v)
+                new_days[k] = cols[i].number_input(
+                    k,
+                    value=show_val,
+                    step=1,
+                    key=f"bd_{k}",
+                    disabled=fixed_launch,
+                    help=("立项固定为 1 天" if fixed_launch else None),
+                )
+            new_days["立项"] = 1
+            if st.button("保存排期基线"):
+                st.session_state.db["系统配置"]["排期基线"] = new_days
                 sync_save_db()
-                new_json_str  = json.dumps(st.session_state.db, ensure_ascii=False)
-                new_size_mb   = len(new_json_str.encode("utf-8")) / 1024 / 1024
-                saved_mb      = json_size_mb - new_size_mb
-                st.success(f"🎉 迁移完成！成功 {migrated} 张，失败 {errors} 张。JSON 从 {json_size_mb:.1f}MB → {new_size_mb:.1f}MB，节省 {saved_mb:.1f}MB！")
-                st.rerun()
-        else:
-            st.success("✅ 数据库已是最优状态，无需迁移！")
-            st.success("✅ 当前数据已是最优状态。")
-            st.success("✅ 可继续使用下方图片二次压缩工具。")
+                st.success("排期基线已更新。")
+    if settings_show_governance:
+        with st.expander("🧹 数据库瘦身 & Base64 图片迁移工具", expanded=False):
+            target_label = "GridFS 持久附件" if get_storage_attachment_mode() == "gridfs" else "本地文件引用"
+            st.warning(f"⚠️ 如果 JSON 文件很大，说明旧版 Base64 图片还留在数据库里。点击下方按钮可一键迁移到【{target_label}】。")
+            json_str     = json.dumps(st.session_state.db, ensure_ascii=False)
+            json_size_mb = len(json_str.encode("utf-8")) / 1024 / 1024
+            b64_count = 0; file_count = 0
+            for p_name, p_data in st.session_state.db.items():
+                if p_name == "系统配置" or not isinstance(p_data, dict): continue
+                for c_data in p_data.get("部件列表", {}).values():
+                    for log in c_data.get("日志流", []):
+                        imgs = log.get("图片", [])
+                        if isinstance(imgs, str):
+                            imgs = [imgs] if imgs else []
+                        for img in imgs:
+                            if isinstance(img, str):
+                                if is_attachment_ref(img): file_count += 1
+                                elif len(img) > 100:      b64_count  += 1
+                drafts = p_data.get("配件清单长图", [])
+                if isinstance(drafts, str):
+                    drafts = [drafts] if drafts else []
+                for img in drafts:
+                    if isinstance(img, str):
+                        if is_attachment_ref(img): file_count += 1
+                        elif len(img) > 100:      b64_count  += 1
+            col_s1, col_s2, col_s3 = st.columns(3)
+            col_s1.metric("📦 JSON 当前体积", f"{json_size_mb:.1f} MB")
+            col_s2.metric("🖼️ 待迁移 Base64 图片", f"{b64_count} 张")
+            col_s3.metric("✅ 已迁移附件引用", f"{file_count} 张")
 
-        st.divider()
-        st.markdown("#### 🗜️ 图片重新压缩（进一步缩小 img_assets 目录）")
-        col_q1, col_q2 = st.columns(2)
-        with col_q1: recomp_quality = st.slider("压缩质量", 30, 85, 60)
-        with col_q2: recomp_size    = st.selectbox("最大尺寸", ["800x800", "600x600", "1000x1000"], index=0)
-        if st.button("🗜️ 对所有本地图片执行二次压缩"):
-            max_dim      = int(recomp_size.split("x")[0])
-            recomp_count = 0; recomp_errors = 0
-            if os.path.exists(IMG_DIR):
-                files = [f for f in os.listdir(IMG_DIR) if f.endswith(('.jpg', '.jpeg', '.png'))]
-                prog2 = st.progress(0, text="压缩中...")
-                for i, fname in enumerate(files):
-                    fpath = os.path.join(IMG_DIR, fname)
-                    try:
-                        img = Image.open(fpath)
-                        if img.mode in ("RGBA", "P"): img = img.convert("RGB")
-                        img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
-                        img.save(fpath, format="JPEG", quality=recomp_quality, optimize=True)
-                        recomp_count += 1
-                    except:
-                        recomp_errors += 1
-                    prog2.progress((i+1)/len(files), text=f"压缩中... {i+1}/{len(files)}")
-                st.success(f"✅ 二次压缩完成！处理 {recomp_count} 张，失败 {recomp_errors} 张。")
+            if b64_count > 0:
+                if st.button(f"🚀 一键迁移：将所有 Base64 图片转存为{target_label}", type="primary"):
+                    migrated = 0; errors = 0
+                    progress = st.progress(0, text="迁移中...")
+                    all_refs = []
+                    for p_name, p_data in st.session_state.db.items():
+                        if p_name == "系统配置" or not isinstance(p_data, dict): continue
+                        for c_data in p_data.get("部件列表", {}).values():
+                            for log in c_data.get("日志流", []):
+                                imgs = log.get("图片", [])
+                                if isinstance(imgs, str):
+                                    continue
+                                for idx, img in enumerate(imgs):
+                                    if isinstance(img, str) and not is_attachment_ref(img) and len(img) > 100:
+                                        all_refs.append((imgs, idx))
+                        drafts = p_data.get("配件清单长图", [])
+                        if isinstance(drafts, list):
+                            for idx, img in enumerate(drafts):
+                                if isinstance(img, str) and not is_attachment_ref(img) and len(img) > 100:
+                                    all_refs.append((drafts, idx))
+                    total = len(all_refs)
+                    for i, (container, idx) in enumerate(all_refs):
+                        try:
+                            b64_str = container[idx]
+                            img_bytes = base64.b64decode(b64_str)
+                            new_ref = save_image_ref_data(img_bytes, filename=f"migrated_{uuid.uuid4().hex}.jpg", prefix="migrated")
+                            if new_ref:
+                                container[idx] = new_ref
+                                migrated += 1
+                            else:
+                                errors += 1
+                        except Exception:
+                            errors += 1
+                        progress.progress((i + 1) / max(total, 1), text=f"迁移中... {i+1}/{max(total, 1)}")
+                    sync_save_db()
+                    new_json_str  = json.dumps(st.session_state.db, ensure_ascii=False)
+                    new_size_mb   = len(new_json_str.encode("utf-8")) / 1024 / 1024
+                    saved_mb      = json_size_mb - new_size_mb
+                    st.success(f"🎉 迁移完成！成功 {migrated} 张，失败 {errors} 张。JSON 从 {json_size_mb:.1f}MB → {new_size_mb:.1f}MB，节省 {saved_mb:.1f}MB！")
+                    st.rerun()
+            else:
+                st.success("✅ 数据库已是最优状态，无需迁移！")
+                st.success("✅ 当前数据已是最优状态。")
+                st.success("✅ 可继续使用下方图片二次压缩工具。")
+
+            st.divider()
+            st.markdown("#### 🗜️ 图片重新压缩（进一步缩小 img_assets 目录）")
+            col_q1, col_q2 = st.columns(2)
+            with col_q1: recomp_quality = st.slider("压缩质量", 30, 85, 60)
+            with col_q2: recomp_size    = st.selectbox("最大尺寸", ["800x800", "600x600", "1000x1000"], index=0)
+            if st.button("🗜️ 对所有本地图片执行二次压缩"):
+                max_dim      = int(recomp_size.split("x")[0])
+                recomp_count = 0; recomp_errors = 0
+                if os.path.exists(IMG_DIR):
+                    files = [f for f in os.listdir(IMG_DIR) if f.endswith(('.jpg', '.jpeg', '.png'))]
+                    prog2 = st.progress(0, text="压缩中...")
+                    for i, fname in enumerate(files):
+                        fpath = os.path.join(IMG_DIR, fname)
+                        try:
+                            img = Image.open(fpath)
+                            if img.mode in ("RGBA", "P"): img = img.convert("RGB")
+                            img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+                            img.save(fpath, format="JPEG", quality=recomp_quality, optimize=True)
+                            recomp_count += 1
+                        except:
+                            recomp_errors += 1
+                        prog2.progress((i+1)/len(files), text=f"压缩中... {i+1}/{len(files)}")
+                    st.success(f"✅ 二次压缩完成！处理 {recomp_count} 张，失败 {recomp_errors} 张。")
 
 # ==========================================
 # 模块 8：新手指南
