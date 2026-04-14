@@ -15742,326 +15742,327 @@ elif menu == MENU_SETTINGS:
     else:
         st.caption("当前显示：识别调试和待确认队列。")
 
-    with st.expander("🧭 项目管理（重命名 / 合并同类 / 别名学习）", expanded=False):
-        all_proj_names = [p for p in db.keys() if p != "系统配置"]
-        if not all_proj_names:
-            st.info("暂无项目可管理。")
+    if settings_show_governance:
+        with st.expander("🧭 项目管理（重命名 / 合并同类 / 别名学习）", expanded=False):
+            all_proj_names = [p for p in db.keys() if p != "系统配置"]
+            if not all_proj_names:
+                st.info("暂无项目可管理。")
 
-        else:
-            st.markdown("**A. 重命名项目**")
-            c_r1, c_r2, c_r3 = st.columns([1.2, 1.2, 1])
-            with c_r1:
-                src_proj = st.selectbox("选择项目", all_proj_names, key="rename_src")
-            with c_r2:
-                new_proj_name = st.text_input("新名称", value=src_proj, key="rename_dst")
-            with c_r3:
-                st.write("")
-                if st.button("✏️ 确认重命名", type="primary", key="btn_rename"):
-                    if not new_proj_name.strip():
-                        st.error("新名称不能为空。")
-                    elif new_proj_name == src_proj:
-                        st.warning("名称未变化，无需重命名。")
-                    elif normalize_project_name_for_write(new_proj_name, valid_projs=[p for p in all_proj_names if p != src_proj]) in db:
-                        st.error("目标名称已存在，请先使用“合并同类项目”。")
-                    else:
-                        final_name, renamed = rename_project_to_target(src_proj, new_proj_name)
-                        if renamed:
-                            persist_project_admin_changes([final_name], recompute_projects=True)
-                            st.success(f"✅ 已重命名：{src_proj} → {final_name}")
-                            st.rerun()
-                        else:
-                            st.warning("重命名未执行，请检查目标名称是否有效。")
-
-            st.markdown("---")
-            st.markdown("**B. 合并同类项目 + 自动学习别名**")
-            c_m1, c_m2, c_m3 = st.columns([1, 1, 1.2])
-            with c_m1:
-                merge_src = st.selectbox("并入来源项目", all_proj_names, key="merge_src")
-            with c_m2:
-                merge_dst = st.selectbox("目标项目", all_proj_names, key="merge_dst")
-            with c_m3:
-                alias_input = st.text_input("附加别名（逗号分隔）", placeholder="如: 1/6超女, 1/6 supergirl, 1/6超级女孩")
-
-            if st.button("🔀 执行合并并学习别名", type="primary", key="btn_merge"):
-                if merge_src == merge_dst:
-                    st.error("来源项目与目标项目不能相同。")
-                else:
-                    src_data = db.get(merge_src, {})
-                    dst_data = db.get(merge_dst, {})
-                    st.session_state.db["系统配置"].setdefault("最近合并回滚", {})
-                    rollback_payload = {
-                        "id": str(uuid.uuid4()),
-                        "时间": str(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
-                        "merge_src": merge_src,
-                        "merge_dst": merge_dst,
-                        "src_data": json.loads(json.dumps(src_data, ensure_ascii=False)),
-                        "dst_data_before": json.loads(json.dumps(dst_data, ensure_ascii=False)),
-                        "alias_map_before": json.loads(json.dumps(st.session_state.db["系统配置"].get("项目别名", {}), ensure_ascii=False))
-                    }
-                    st.session_state.db["系统配置"]["最近合并回滚"] = rollback_payload
-                    st.session_state.db["系统配置"].setdefault("合并回滚历史", []).append(rollback_payload)
-                    learned_aliases = {merge_src, merge_dst}
-                    if alias_input.strip():
-                        learned_aliases.update(x.strip() for x in re.split(r'[,，]', alias_input) if x.strip())
-                    if merge_project_into_target(merge_src, merge_dst, learned_aliases=list(learned_aliases)):
-                        merge_target = normalize_project_name_for_write(
-                            merge_dst,
-                            valid_projs=[p for p in db.keys() if p != "系统配置"],
-                        )
-                        persist_project_admin_changes([merge_target], recompute_projects=True)
-                        st.success(f"✅ 合并完成：{merge_src} → {normalize_project_name_for_write(merge_dst)}，并已学习 {len(learned_aliases)} 个别名。")
-                        st.rerun()
-                    else:
-                        st.warning("合并未执行，请检查来源/目标项目是否有效。")
-
-            st.markdown("---")
-            st.markdown("**C. 异常比例项目清理（如 6威龙 → 1/6威龙）**")
-            malformed_pairs = []
-            suspicious_names = []
-            for p_name in all_proj_names:
-                inferred_target = infer_malformed_ratio_project_target(p_name)
-                if inferred_target and inferred_target != p_name:
-                    malformed_pairs.append((p_name, inferred_target))
-                if (
-                    str(p_name).strip().isdigit()
-                    or len(str(p_name).strip()) <= 2
-                    or re.fullmatch(r"[0-9,\-_/ ]+", str(p_name).strip())
-                ):
-                    suspicious_names.append(str(p_name).strip())
-
-            if malformed_pairs:
-                malformed_labels = [f"{src} → {dst}" for src, dst in malformed_pairs]
-                malformed_df = pd.DataFrame([
-                    {
-                        "异常项目": src,
-                        "建议并入": dst,
-                        "来源长度": len(str(src)),
-                        "建议人工确认": "是" if (len(str(src).strip()) <= 2 or str(src).strip().isdigit()) else "",
-                    }
-                    for src, dst in malformed_pairs
-                ]).sort_values(by=["建议人工确认", "异常项目"], ascending=[False, True])
-                st.dataframe(malformed_df, width="stretch", hide_index=True)
-                st.caption("提示：像 `1`、纯数字、过短项目名，建议人工确认后再清理；`6威龙 -> 1/6威龙` 这类通常可以直接合并。")
-                picked_malformed = st.multiselect(
-                    "检测到的异常比例项目",
-                    malformed_labels,
-                    default=malformed_labels,
-                    key="malformed_ratio_cleanup_pick",
-                )
-                if st.button("🧹 执行异常比例项目清理", type="primary", key="btn_cleanup_ratio"):
-                    cleaned = []
-                    cleaned_targets = []
-                    skipped = []
-                    for label in picked_malformed:
-                        src, dst = label.split(" → ", 1)
-                        if merge_project_into_target(src, dst, learned_aliases=[src]):
-                            cleaned.append(label)
-                            if dst not in cleaned_targets:
-                                cleaned_targets.append(dst)
-                        else:
-                            skipped.append(label)
-                    if cleaned:
-                        persist_project_admin_changes(cleaned_targets, recompute_projects=True)
-                        msg = f"已清理 {len(cleaned)} 个异常项目：{'；'.join(cleaned[:6])}"
-                        if skipped:
-                            msg += f"；另有 {len(skipped)} 个未处理，请检查目标项是否有效。"
-                        st.success(msg)
-                        st.rerun()
-                    elif skipped:
-                        st.warning(f"本次没有清理成功。未处理项：{'；'.join(skipped[:6])}")
-                    else:
-                        st.info("没有可执行的异常项目清理。")
             else:
-                st.caption("当前未检测到可自动清理的异常比例项目。")
-            if suspicious_names:
-                st.warning("检测到需要人工判断的可疑项目名：" + "；".join(sorted(list(dict.fromkeys(suspicious_names)))[:12]))
-                suspicious_pick = st.selectbox(
-                    "删除可疑孤儿项目（如 1）",
-                    [""] + sorted(list(dict.fromkeys(suspicious_names))),
-                    key="suspicious_project_delete_pick",
-                )
-                if st.button("🗑 删除该可疑项目", key="btn_delete_suspicious_proj"):
-                    pick = str(suspicious_pick).strip()
-                    if not pick:
-                        st.warning("请先选择要删除的可疑项目。")
-                    elif pick not in db or pick == "系统配置":
-                        st.warning("该项目不存在或不可删除。")
-                    else:
-                        delete_project_and_refs(pick)
-                        persist_project_admin_changes([], recompute_projects=False)
-                        st.success(f"已删除可疑项目：{pick}")
-                        st.rerun()
-
-            manual_delete_options = sorted([p for p in all_proj_names if p and p != "系统配置"])
-            with st.expander("🗑 手动选择要删除的项目", expanded=False):
-                st.caption("自动清理猜不中时，直接由你勾选。会同步清理 To-do 关联项目和标准事件流里的引用。")
-                manual_delete_pick = st.multiselect(
-                    "选择要删除的项目",
-                    manual_delete_options,
-                    key="manual_project_delete_pick",
-                    placeholder="可搜索，例如 6威龙、6早川秋",
-                )
-                if st.button("🧨 删除选中的项目", key="btn_delete_manual_projects"):
-                    picked = [str(x).strip() for x in manual_delete_pick if str(x).strip()]
-                    if not picked:
-                        st.warning("请先选择要删除的项目。")
-                    else:
-                        removed = []
-                        for pick in picked:
-                            if delete_project_and_refs(pick):
-                                removed.append(pick)
-                        if removed:
-                            persist_project_admin_changes([], recompute_projects=False)
-                            st.success(f"已删除 {len(removed)} 个项目：{'；'.join(removed[:8])}")
-                            st.rerun()
+                st.markdown("**A. 重命名项目**")
+                c_r1, c_r2, c_r3 = st.columns([1.2, 1.2, 1])
+                with c_r1:
+                    src_proj = st.selectbox("选择项目", all_proj_names, key="rename_src")
+                with c_r2:
+                    new_proj_name = st.text_input("新名称", value=src_proj, key="rename_dst")
+                with c_r3:
+                    st.write("")
+                    if st.button("✏️ 确认重命名", type="primary", key="btn_rename"):
+                        if not new_proj_name.strip():
+                            st.error("新名称不能为空。")
+                        elif new_proj_name == src_proj:
+                            st.warning("名称未变化，无需重命名。")
+                        elif normalize_project_name_for_write(new_proj_name, valid_projs=[p for p in all_proj_names if p != src_proj]) in db:
+                            st.error("目标名称已存在，请先使用“合并同类项目”。")
                         else:
-                            st.info("没有可删除的项目。")
+                            final_name, renamed = rename_project_to_target(src_proj, new_proj_name)
+                            if renamed:
+                                persist_project_admin_changes([final_name], recompute_projects=True)
+                                st.success(f"✅ 已重命名：{src_proj} → {final_name}")
+                                st.rerun()
+                            else:
+                                st.warning("重命名未执行，请检查目标名称是否有效。")
 
-            noise_pairs = detect_project_name_noise_pairs(all_proj_names)
-            with st.expander("🧹 项目名噪音候选（尾缀 / 括号别名 / 空格符号）", expanded=False):
-                st.caption("这里只列明显像同一项目的命名噪音候选。像“Pending”尾缀、括号英文别名会优先被捞出来；真正不同项目不会自动合并。")
-                if noise_pairs:
-                    noise_df = pd.DataFrame(noise_pairs).sort_values(by=["建议并入", "异常项目"], ascending=[True, True])
-                    st.dataframe(noise_df, width="stretch", hide_index=True)
-                    noise_labels = [f"{row['异常项目']} → {row['建议并入']}｜{row['原因']}" for row in noise_pairs]
-                    picked_noise = st.multiselect(
-                        "选择要合并的命名噪音项目",
-                        noise_labels,
-                        default=noise_labels,
-                        key="project_name_noise_pick",
-                    )
-                    if st.button("✨ 清理这些命名噪音", key="btn_cleanup_project_noise", type="primary"):
-                        cleaned = []
-                        cleaned_targets = []
-                        for label in picked_noise:
-                            src, rest = label.split(" → ", 1)
-                            dst, _reason = rest.split("｜", 1)
-                            if merge_project_into_target(src.strip(), dst.strip(), learned_aliases=[src.strip()]):
-                                cleaned.append(f"{src.strip()} → {dst.strip()}")
-                                if dst.strip() not in cleaned_targets:
-                                    cleaned_targets.append(dst.strip())
-                        if cleaned:
-                            persist_project_admin_changes(cleaned_targets, recompute_projects=True)
-                            st.success(f"已清理 {len(cleaned)} 个命名噪音项目：{'；'.join(cleaned[:8])}")
-                            st.rerun()
-                        else:
-                            st.info("当前没有可执行的命名噪音清理。")
-                else:
-                    st.caption("当前没有检测到明显的项目名噪音候选。")
-
-            sim_pairs = detect_high_similarity_project_pairs(all_proj_names)
-            with st.expander("🧪 高相似度项目名待确认", expanded=False):
-                st.caption("这里收的是可能录错、也可能真的是不同项目的名字。不会默认全选，由你人工决定是否合并。")
-                if sim_pairs:
-                    sim_df = pd.DataFrame(sim_pairs).sort_values(by=["相似度", "建议并入", "异常项目"], ascending=[False, True, True])
-                    st.dataframe(sim_df, width="stretch", hide_index=True)
-                    sim_labels = [f"{row['异常项目']} → {row['建议并入']}｜{row['相似度']}" for row in sim_pairs]
-                    picked_sim = st.multiselect(
-                        "选择确认要合并的高相似度项目",
-                        sim_labels,
-                        key="project_name_similarity_pick",
-                        placeholder="例如：1/12KDA、1/12TDK、Neo 大小写差异",
-                    )
-                    if st.button("🧩 合并这些高相似度项目", key="btn_merge_similarity_projects"):
-                        cleaned = []
-                        cleaned_targets = []
-                        for label in picked_sim:
-                            src, rest = label.split(" → ", 1)
-                            dst, _score = rest.split("｜", 1)
-                            if merge_project_into_target(src.strip(), dst.strip(), learned_aliases=[src.strip()]):
-                                cleaned.append(f"{src.strip()} → {dst.strip()}")
-                                if dst.strip() not in cleaned_targets:
-                                    cleaned_targets.append(dst.strip())
-                        if cleaned:
-                            persist_project_admin_changes(cleaned_targets, recompute_projects=True)
-                            st.success(f"已合并 {len(cleaned)} 个高相似度项目：{'；'.join(cleaned[:8])}")
-                            st.rerun()
-                        else:
-                            st.info("没有执行任何高相似度项目合并。")
-                else:
-                    st.caption("当前没有检测到需要人工确认的高相似度项目。")
-
-            alias_map = sanitize_project_alias_map(st.session_state.db["系统配置"].get("项目别名", {}))
-            st.session_state.db["系统配置"]["项目别名"] = alias_map
-            if alias_map:
-                alias_df = pd.DataFrame([
-                    {"别名(归一化)": k, "映射项目": v} for k, v in sorted(alias_map.items(), key=lambda x: x[0])
-                ])
-                st.markdown("**当前别名词典**")
-                st.dataframe(alias_df, width='stretch')
-                c_a1, c_a2 = st.columns([1.2, 1])
-                with c_a1:
-                    del_alias = st.selectbox("删除某个别名映射", [""] + sorted(alias_map.keys()), key="del_alias_key")
-                    if st.button("🧯 删除该别名", key="btn_del_alias") and del_alias:
-                        st.session_state.db["系统配置"].setdefault("项目别名", {}).pop(del_alias, None)
-                        persist_project_admin_changes([], recompute_projects=False)
-                        st.success(f"已删除别名：{del_alias}")
-                        st.rerun()
-                with c_a2:
-                    if st.button("🧹 清空全部别名映射", key="btn_clear_alias"):
-                        st.session_state.db["系统配置"]["项目别名"] = {}
-                        persist_project_admin_changes([], recompute_projects=False)
-                        st.success("已清空全部别名映射。")
-                        st.rerun()
-
-            rollback = st.session_state.db["系统配置"].get("最近合并回滚", {})
-            if rollback and rollback.get("merge_src"):
                 st.markdown("---")
-                st.markdown(f"**后悔药（最近一次合并）**：{rollback.get('merge_src')} → {rollback.get('merge_dst')}")
-                if st.button("↩️ 撤销最近一次合并", key="btn_undo_merge"):
-                    src_name = rollback.get("merge_src")
-                    dst_name = rollback.get("merge_dst")
-                    if dst_name in db:
-                        db[dst_name] = rollback.get("dst_data_before", db.get(dst_name, {}))
-                    db[src_name] = rollback.get("src_data", {})
-                    st.session_state.db["系统配置"]["项目别名"] = rollback.get(
-                        "alias_map_before", st.session_state.db["系统配置"].get("项目别名", {})
-                    )
-                    st.session_state.db["系统配置"].setdefault("最近合并回滚", {})
-                    st.session_state.db["系统配置"]["最近合并回滚"] = {}
-                    persist_project_admin_changes([src_name, dst_name], recompute_projects=True)
-                    st.success("✅ 已撤销最近一次合并。")
-                    st.rerun()
+                st.markdown("**B. 合并同类项目 + 自动学习别名**")
+                c_m1, c_m2, c_m3 = st.columns([1, 1, 1.2])
+                with c_m1:
+                    merge_src = st.selectbox("并入来源项目", all_proj_names, key="merge_src")
+                with c_m2:
+                    merge_dst = st.selectbox("目标项目", all_proj_names, key="merge_dst")
+                with c_m3:
+                    alias_input = st.text_input("附加别名（逗号分隔）", placeholder="如: 1/6超女, 1/6 supergirl, 1/6超级女孩")
 
-            hist = st.session_state.db["系统配置"].setdefault("合并回滚历史", [])
-            if hist:
-                st.markdown("---")
-                st.markdown("**合并回滚历史（可多选删除，单条恢复）**")
-                hist_df = pd.DataFrame([
-                    {
-                        "ID": h.get("id", ""),
-                        "时间": h.get("时间", ""),
-                        "来源": h.get("merge_src", ""),
-                        "目标": h.get("merge_dst", "")
-                    }
-                    for h in hist
-                ]).sort_values(by=["时间"], ascending=False)
-                st.dataframe(hist_df, width='stretch')
-                id_list = hist_df["ID"].tolist()
-                sel_restore = st.selectbox("选择要恢复的历史记录（单选）", ["(不选择)"] + id_list, key="merge_hist_restore")
-                c_h1, c_h2 = st.columns(2)
-                with c_h1:
-                    if st.button("↩️ 按历史记录恢复", key="btn_restore_hist") and sel_restore != "(不选择)":
-                        tar = next((x for x in hist if x.get("id") == sel_restore), None)
-                        if tar:
-                            src_name = tar.get("merge_src")
-                            dst_name = tar.get("merge_dst")
-                            if dst_name in db:
-                                db[dst_name] = tar.get("dst_data_before", db.get(dst_name, {}))
-                            db[src_name] = tar.get("src_data", {})
-                            st.session_state.db["系统配置"]["项目别名"] = tar.get(
-                                "alias_map_before", st.session_state.db["系统配置"].get("项目别名", {})
+                if st.button("🔀 执行合并并学习别名", type="primary", key="btn_merge"):
+                    if merge_src == merge_dst:
+                        st.error("来源项目与目标项目不能相同。")
+                    else:
+                        src_data = db.get(merge_src, {})
+                        dst_data = db.get(merge_dst, {})
+                        st.session_state.db["系统配置"].setdefault("最近合并回滚", {})
+                        rollback_payload = {
+                            "id": str(uuid.uuid4()),
+                            "时间": str(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                            "merge_src": merge_src,
+                            "merge_dst": merge_dst,
+                            "src_data": json.loads(json.dumps(src_data, ensure_ascii=False)),
+                            "dst_data_before": json.loads(json.dumps(dst_data, ensure_ascii=False)),
+                            "alias_map_before": json.loads(json.dumps(st.session_state.db["系统配置"].get("项目别名", {}), ensure_ascii=False))
+                        }
+                        st.session_state.db["系统配置"]["最近合并回滚"] = rollback_payload
+                        st.session_state.db["系统配置"].setdefault("合并回滚历史", []).append(rollback_payload)
+                        learned_aliases = {merge_src, merge_dst}
+                        if alias_input.strip():
+                            learned_aliases.update(x.strip() for x in re.split(r'[,，]', alias_input) if x.strip())
+                        if merge_project_into_target(merge_src, merge_dst, learned_aliases=list(learned_aliases)):
+                            merge_target = normalize_project_name_for_write(
+                                merge_dst,
+                                valid_projs=[p for p in db.keys() if p != "系统配置"],
                             )
-                            persist_project_admin_changes([src_name, dst_name], recompute_projects=True)
-                            st.success("✅ 已按历史记录恢复。")
+                            persist_project_admin_changes([merge_target], recompute_projects=True)
+                            st.success(f"✅ 合并完成：{merge_src} → {normalize_project_name_for_write(merge_dst)}，并已学习 {len(learned_aliases)} 个别名。")
                             st.rerun()
-                with c_h2:
-                    del_ids = st.multiselect("多选删除历史记录", id_list, key="merge_hist_delete", placeholder="请选择要删除的记录")
-                    if st.button("🗑️ 删除选中历史", key="btn_del_hist") and del_ids:
-                        st.session_state.db["系统配置"]["合并回滚历史"] = [x for x in hist if x.get("id") not in set(del_ids)]
-                        persist_project_admin_changes([], recompute_projects=False)
-                        st.success(f"已删除 {len(del_ids)} 条历史记录。")
+                        else:
+                            st.warning("合并未执行，请检查来源/目标项目是否有效。")
+
+                st.markdown("---")
+                st.markdown("**C. 异常比例项目清理（如 6威龙 → 1/6威龙）**")
+                malformed_pairs = []
+                suspicious_names = []
+                for p_name in all_proj_names:
+                    inferred_target = infer_malformed_ratio_project_target(p_name)
+                    if inferred_target and inferred_target != p_name:
+                        malformed_pairs.append((p_name, inferred_target))
+                    if (
+                        str(p_name).strip().isdigit()
+                        or len(str(p_name).strip()) <= 2
+                        or re.fullmatch(r"[0-9,\-_/ ]+", str(p_name).strip())
+                    ):
+                        suspicious_names.append(str(p_name).strip())
+
+                if malformed_pairs:
+                    malformed_labels = [f"{src} → {dst}" for src, dst in malformed_pairs]
+                    malformed_df = pd.DataFrame([
+                        {
+                            "异常项目": src,
+                            "建议并入": dst,
+                            "来源长度": len(str(src)),
+                            "建议人工确认": "是" if (len(str(src).strip()) <= 2 or str(src).strip().isdigit()) else "",
+                        }
+                        for src, dst in malformed_pairs
+                    ]).sort_values(by=["建议人工确认", "异常项目"], ascending=[False, True])
+                    st.dataframe(malformed_df, width="stretch", hide_index=True)
+                    st.caption("提示：像 `1`、纯数字、过短项目名，建议人工确认后再清理；`6威龙 -> 1/6威龙` 这类通常可以直接合并。")
+                    picked_malformed = st.multiselect(
+                        "检测到的异常比例项目",
+                        malformed_labels,
+                        default=malformed_labels,
+                        key="malformed_ratio_cleanup_pick",
+                    )
+                    if st.button("🧹 执行异常比例项目清理", type="primary", key="btn_cleanup_ratio"):
+                        cleaned = []
+                        cleaned_targets = []
+                        skipped = []
+                        for label in picked_malformed:
+                            src, dst = label.split(" → ", 1)
+                            if merge_project_into_target(src, dst, learned_aliases=[src]):
+                                cleaned.append(label)
+                                if dst not in cleaned_targets:
+                                    cleaned_targets.append(dst)
+                            else:
+                                skipped.append(label)
+                        if cleaned:
+                            persist_project_admin_changes(cleaned_targets, recompute_projects=True)
+                            msg = f"已清理 {len(cleaned)} 个异常项目：{'；'.join(cleaned[:6])}"
+                            if skipped:
+                                msg += f"；另有 {len(skipped)} 个未处理，请检查目标项是否有效。"
+                            st.success(msg)
+                            st.rerun()
+                        elif skipped:
+                            st.warning(f"本次没有清理成功。未处理项：{'；'.join(skipped[:6])}")
+                        else:
+                            st.info("没有可执行的异常项目清理。")
+                else:
+                    st.caption("当前未检测到可自动清理的异常比例项目。")
+                if suspicious_names:
+                    st.warning("检测到需要人工判断的可疑项目名：" + "；".join(sorted(list(dict.fromkeys(suspicious_names)))[:12]))
+                    suspicious_pick = st.selectbox(
+                        "删除可疑孤儿项目（如 1）",
+                        [""] + sorted(list(dict.fromkeys(suspicious_names))),
+                        key="suspicious_project_delete_pick",
+                    )
+                    if st.button("🗑 删除该可疑项目", key="btn_delete_suspicious_proj"):
+                        pick = str(suspicious_pick).strip()
+                        if not pick:
+                            st.warning("请先选择要删除的可疑项目。")
+                        elif pick not in db or pick == "系统配置":
+                            st.warning("该项目不存在或不可删除。")
+                        else:
+                            delete_project_and_refs(pick)
+                            persist_project_admin_changes([], recompute_projects=False)
+                            st.success(f"已删除可疑项目：{pick}")
+                            st.rerun()
+
+                manual_delete_options = sorted([p for p in all_proj_names if p and p != "系统配置"])
+                with st.expander("🗑 手动选择要删除的项目", expanded=False):
+                    st.caption("自动清理猜不中时，直接由你勾选。会同步清理 To-do 关联项目和标准事件流里的引用。")
+                    manual_delete_pick = st.multiselect(
+                        "选择要删除的项目",
+                        manual_delete_options,
+                        key="manual_project_delete_pick",
+                        placeholder="可搜索，例如 6威龙、6早川秋",
+                    )
+                    if st.button("🧨 删除选中的项目", key="btn_delete_manual_projects"):
+                        picked = [str(x).strip() for x in manual_delete_pick if str(x).strip()]
+                        if not picked:
+                            st.warning("请先选择要删除的项目。")
+                        else:
+                            removed = []
+                            for pick in picked:
+                                if delete_project_and_refs(pick):
+                                    removed.append(pick)
+                            if removed:
+                                persist_project_admin_changes([], recompute_projects=False)
+                                st.success(f"已删除 {len(removed)} 个项目：{'；'.join(removed[:8])}")
+                                st.rerun()
+                            else:
+                                st.info("没有可删除的项目。")
+
+                noise_pairs = detect_project_name_noise_pairs(all_proj_names)
+                with st.expander("🧹 项目名噪音候选（尾缀 / 括号别名 / 空格符号）", expanded=False):
+                    st.caption("这里只列明显像同一项目的命名噪音候选。像“Pending”尾缀、括号英文别名会优先被捞出来；真正不同项目不会自动合并。")
+                    if noise_pairs:
+                        noise_df = pd.DataFrame(noise_pairs).sort_values(by=["建议并入", "异常项目"], ascending=[True, True])
+                        st.dataframe(noise_df, width="stretch", hide_index=True)
+                        noise_labels = [f"{row['异常项目']} → {row['建议并入']}｜{row['原因']}" for row in noise_pairs]
+                        picked_noise = st.multiselect(
+                            "选择要合并的命名噪音项目",
+                            noise_labels,
+                            default=noise_labels,
+                            key="project_name_noise_pick",
+                        )
+                        if st.button("✨ 清理这些命名噪音", key="btn_cleanup_project_noise", type="primary"):
+                            cleaned = []
+                            cleaned_targets = []
+                            for label in picked_noise:
+                                src, rest = label.split(" → ", 1)
+                                dst, _reason = rest.split("｜", 1)
+                                if merge_project_into_target(src.strip(), dst.strip(), learned_aliases=[src.strip()]):
+                                    cleaned.append(f"{src.strip()} → {dst.strip()}")
+                                    if dst.strip() not in cleaned_targets:
+                                        cleaned_targets.append(dst.strip())
+                            if cleaned:
+                                persist_project_admin_changes(cleaned_targets, recompute_projects=True)
+                                st.success(f"已清理 {len(cleaned)} 个命名噪音项目：{'；'.join(cleaned[:8])}")
+                                st.rerun()
+                            else:
+                                st.info("当前没有可执行的命名噪音清理。")
+                    else:
+                        st.caption("当前没有检测到明显的项目名噪音候选。")
+
+                sim_pairs = detect_high_similarity_project_pairs(all_proj_names)
+                with st.expander("🧪 高相似度项目名待确认", expanded=False):
+                    st.caption("这里收的是可能录错、也可能真的是不同项目的名字。不会默认全选，由你人工决定是否合并。")
+                    if sim_pairs:
+                        sim_df = pd.DataFrame(sim_pairs).sort_values(by=["相似度", "建议并入", "异常项目"], ascending=[False, True, True])
+                        st.dataframe(sim_df, width="stretch", hide_index=True)
+                        sim_labels = [f"{row['异常项目']} → {row['建议并入']}｜{row['相似度']}" for row in sim_pairs]
+                        picked_sim = st.multiselect(
+                            "选择确认要合并的高相似度项目",
+                            sim_labels,
+                            key="project_name_similarity_pick",
+                            placeholder="例如：1/12KDA、1/12TDK、Neo 大小写差异",
+                        )
+                        if st.button("🧩 合并这些高相似度项目", key="btn_merge_similarity_projects"):
+                            cleaned = []
+                            cleaned_targets = []
+                            for label in picked_sim:
+                                src, rest = label.split(" → ", 1)
+                                dst, _score = rest.split("｜", 1)
+                                if merge_project_into_target(src.strip(), dst.strip(), learned_aliases=[src.strip()]):
+                                    cleaned.append(f"{src.strip()} → {dst.strip()}")
+                                    if dst.strip() not in cleaned_targets:
+                                        cleaned_targets.append(dst.strip())
+                            if cleaned:
+                                persist_project_admin_changes(cleaned_targets, recompute_projects=True)
+                                st.success(f"已合并 {len(cleaned)} 个高相似度项目：{'；'.join(cleaned[:8])}")
+                                st.rerun()
+                            else:
+                                st.info("没有执行任何高相似度项目合并。")
+                    else:
+                        st.caption("当前没有检测到需要人工确认的高相似度项目。")
+
+                alias_map = sanitize_project_alias_map(st.session_state.db["系统配置"].get("项目别名", {}))
+                st.session_state.db["系统配置"]["项目别名"] = alias_map
+                if alias_map:
+                    alias_df = pd.DataFrame([
+                        {"别名(归一化)": k, "映射项目": v} for k, v in sorted(alias_map.items(), key=lambda x: x[0])
+                    ])
+                    st.markdown("**当前别名词典**")
+                    st.dataframe(alias_df, width='stretch')
+                    c_a1, c_a2 = st.columns([1.2, 1])
+                    with c_a1:
+                        del_alias = st.selectbox("删除某个别名映射", [""] + sorted(alias_map.keys()), key="del_alias_key")
+                        if st.button("🧯 删除该别名", key="btn_del_alias") and del_alias:
+                            st.session_state.db["系统配置"].setdefault("项目别名", {}).pop(del_alias, None)
+                            persist_project_admin_changes([], recompute_projects=False)
+                            st.success(f"已删除别名：{del_alias}")
+                            st.rerun()
+                    with c_a2:
+                        if st.button("🧹 清空全部别名映射", key="btn_clear_alias"):
+                            st.session_state.db["系统配置"]["项目别名"] = {}
+                            persist_project_admin_changes([], recompute_projects=False)
+                            st.success("已清空全部别名映射。")
+                            st.rerun()
+
+                rollback = st.session_state.db["系统配置"].get("最近合并回滚", {})
+                if rollback and rollback.get("merge_src"):
+                    st.markdown("---")
+                    st.markdown(f"**后悔药（最近一次合并）**：{rollback.get('merge_src')} → {rollback.get('merge_dst')}")
+                    if st.button("↩️ 撤销最近一次合并", key="btn_undo_merge"):
+                        src_name = rollback.get("merge_src")
+                        dst_name = rollback.get("merge_dst")
+                        if dst_name in db:
+                            db[dst_name] = rollback.get("dst_data_before", db.get(dst_name, {}))
+                        db[src_name] = rollback.get("src_data", {})
+                        st.session_state.db["系统配置"]["项目别名"] = rollback.get(
+                            "alias_map_before", st.session_state.db["系统配置"].get("项目别名", {})
+                        )
+                        st.session_state.db["系统配置"].setdefault("最近合并回滚", {})
+                        st.session_state.db["系统配置"]["最近合并回滚"] = {}
+                        persist_project_admin_changes([src_name, dst_name], recompute_projects=True)
+                        st.success("✅ 已撤销最近一次合并。")
                         st.rerun()
+
+                hist = st.session_state.db["系统配置"].setdefault("合并回滚历史", [])
+                if hist:
+                    st.markdown("---")
+                    st.markdown("**合并回滚历史（可多选删除，单条恢复）**")
+                    hist_df = pd.DataFrame([
+                        {
+                            "ID": h.get("id", ""),
+                            "时间": h.get("时间", ""),
+                            "来源": h.get("merge_src", ""),
+                            "目标": h.get("merge_dst", "")
+                        }
+                        for h in hist
+                    ]).sort_values(by=["时间"], ascending=False)
+                    st.dataframe(hist_df, width='stretch')
+                    id_list = hist_df["ID"].tolist()
+                    sel_restore = st.selectbox("选择要恢复的历史记录（单选）", ["(不选择)"] + id_list, key="merge_hist_restore")
+                    c_h1, c_h2 = st.columns(2)
+                    with c_h1:
+                        if st.button("↩️ 按历史记录恢复", key="btn_restore_hist") and sel_restore != "(不选择)":
+                            tar = next((x for x in hist if x.get("id") == sel_restore), None)
+                            if tar:
+                                src_name = tar.get("merge_src")
+                                dst_name = tar.get("merge_dst")
+                                if dst_name in db:
+                                    db[dst_name] = tar.get("dst_data_before", db.get(dst_name, {}))
+                                db[src_name] = tar.get("src_data", {})
+                                st.session_state.db["系统配置"]["项目别名"] = tar.get(
+                                    "alias_map_before", st.session_state.db["系统配置"].get("项目别名", {})
+                                )
+                                persist_project_admin_changes([src_name, dst_name], recompute_projects=True)
+                                st.success("✅ 已按历史记录恢复。")
+                                st.rerun()
+                    with c_h2:
+                        del_ids = st.multiselect("多选删除历史记录", id_list, key="merge_hist_delete", placeholder="请选择要删除的记录")
+                        if st.button("🗑️ 删除选中历史", key="btn_del_hist") and del_ids:
+                            st.session_state.db["系统配置"]["合并回滚历史"] = [x for x in hist if x.get("id") not in set(del_ids)]
+                            persist_project_admin_changes([], recompute_projects=False)
+                            st.success(f"已删除 {len(del_ids)} 条历史记录。")
+                            st.rerun()
 
     if settings_show_daily:
         with st.expander("📚 识别词典中心（规则 / 联动 / 自学习词库）", expanded=False):
