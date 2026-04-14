@@ -2554,6 +2554,33 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         self.assertNotIn("_pending_current_proj_context", fake_state)
         self.assertNotIn("_pending_pm_sel_proj", fake_state)
 
+    def test_apply_pending_main_navigation_legacy_fastlog_routes_to_home_workspace(self) -> None:
+        ns = load_app_functions("apply_pending_main_navigation")
+
+        class FakeSessionState(dict):
+            def __getattr__(self, name):
+                return self[name]
+
+            def __setattr__(self, name, value):
+                self[name] = value
+
+        fake_state = FakeSessionState(
+            _pending_main_nav_menu="📝 速记",
+        )
+        globals_map = ns.apply_pending_main_navigation.__globals__
+        globals_map["st"] = types.SimpleNamespace(session_state=fake_state)
+        globals_map["MENU_FASTLOG"] = "📝 速记"
+        globals_map["MENU_HOME"] = "🏠 今日视图"
+
+        ns.apply_pending_main_navigation(
+            ["🏠 今日视图", "📊 全局大盘与甘特图", "📁 项目空间", "✅ 我的待办", "⚙️ 系统设置", "🛠️ 数据维护"],
+            valid_projects=["1/6马尔福", "1/6超女"],
+        )
+
+        self.assertEqual(fake_state["main_nav_menu"], "🏠 今日视图")
+        self.assertEqual(fake_state["_pending_home_focus"], "📝 速记")
+        self.assertNotIn("_pending_main_nav_menu", fake_state)
+
     def test_sync_save_db_system_config_skips_global_recompute(self) -> None:
         ns = load_app_functions("sync_save_db")
 

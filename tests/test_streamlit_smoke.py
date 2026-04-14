@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import textwrap
 import unittest
-import os
 from pathlib import Path
 
 
@@ -25,33 +25,23 @@ class StreamlitSmokeTest(unittest.TestCase):
             if at.exception:
                 raise SystemExit("initial run exceptions: " + " | ".join(str(x.value) for x in at.exception))
 
-            nav_radio = None
-            for r in at.radio:
-                label = str(r.label or "")
-                options = [str(o) for o in r.options]
-                if "\u529f\u80fd\u5bfc\u822a" in label or any("\u9879\u76ee\u7a7a\u95f4" in o for o in options):
-                    nav_radio = r
-                    break
+            nav_radio = next((r for r in at.radio if str(getattr(r, "key", "")) == "main_nav_menu"), None)
             if nav_radio is None:
                 raise SystemExit("navigation radio not found")
+            if len(nav_radio.options) < 3:
+                raise SystemExit("navigation options incomplete")
 
-            project_option = next((o for o in nav_radio.options if "\u9879\u76ee\u7a7a\u95f4" in str(o)), None)
-            if project_option is None:
-                raise SystemExit("Project space option not found")
-
-            nav_radio.set_value(project_option)
+            nav_radio.set_value(nav_radio.options[2])
             at.run()
             if at.exception:
                 raise SystemExit("project space exceptions: " + " | ".join(str(x.value) for x in at.exception))
 
-            detail_radio = next((r for r in at.radio if "项目详情标签" in str(r.label or "")), None)
-            if detail_radio is not None:
-                progress_option = next((o for o in detail_radio.options if "进展" in str(o)), None)
-                if progress_option is not None:
-                    detail_radio.set_value(progress_option)
-                    at.run()
-                    if at.exception:
-                        raise SystemExit("project progress exceptions: " + " | ".join(str(x.value) for x in at.exception))
+            detail_radio = next((r for r in at.radio if str(getattr(r, "key", "")).startswith("project_detail_view_")), None)
+            if detail_radio is not None and len(detail_radio.options) >= 2:
+                detail_radio.set_value(detail_radio.options[1])
+                at.run()
+                if at.exception:
+                    raise SystemExit("project progress exceptions: " + " | ".join(str(x.value) for x in at.exception))
 
             print("PROJECT_SPACE_OK")
             """
@@ -86,40 +76,7 @@ class StreamlitSmokeTest(unittest.TestCase):
             if at.exception:
                 raise SystemExit("initial run exceptions: " + " | ".join(str(x.value) for x in at.exception))
 
-            current_view = "Mo"
-            for sel in at.selectbox:
-                if "视角切换" in str(sel.label or ""):
-                    current_view = str(sel.value or "Mo")
-                    break
-            if current_view == "所有人":
-                current_view = "Mo"
-
-            at.session_state["db"]["1/6 SMOKE"] = {{
-                "负责人": current_view,
-                "Milestone": "研发中",
-                "Target": "TBD",
-                "发货区间": "",
-                "部件列表": {{
-                    "全局进度": {{
-                        "主流程": "建模(含打印/签样)",
-                        "日志流": [
-                            {{
-                                "日期": "2026-04-09",
-                                "流转": "测试",
-                                "工序": "建模(含打印/签样)",
-                                "事件": "smoke project ready",
-                            }}
-                        ],
-                    }}
-                }},
-            }}
-
-            jump_btn = None
-            for btn in at.button:
-                label = str(btn.label or "")
-                if "全局大盘与甘特图" in label:
-                    jump_btn = btn
-                    break
+            jump_btn = next((b for b in at.button if str(getattr(b, "key", "")) == "home_jump_dashboard"), None)
             if jump_btn is None:
                 raise SystemExit("home dashboard quick action not found")
 
@@ -127,6 +84,12 @@ class StreamlitSmokeTest(unittest.TestCase):
             at.run()
             if at.exception:
                 raise SystemExit("home dashboard navigation exceptions: " + " | ".join(str(x.value) for x in at.exception))
+
+            nav_radio = next((r for r in at.radio if str(getattr(r, "key", "")) == "main_nav_menu"), None)
+            if nav_radio is None:
+                raise SystemExit("navigation radio missing after dashboard jump")
+            if str(nav_radio.value) != str(nav_radio.options[1]):
+                raise SystemExit("dashboard jump did not land on dashboard menu")
 
             print("HOME_DASHBOARD_JUMP_OK")
             """
@@ -161,21 +124,13 @@ class StreamlitSmokeTest(unittest.TestCase):
             if at.exception:
                 raise SystemExit("initial run exceptions: " + " | ".join(str(x.value) for x in at.exception))
 
-            nav_radio = None
-            for r in at.radio:
-                label = str(r.label or "")
-                options = [str(o) for o in r.options]
-                if "功能导航" in label or any("速记" in str(o) for o in options):
-                    nav_radio = r
-                    break
-            if nav_radio is None:
-                raise SystemExit("navigation radio not found")
+            home_workspace_radio = next((r for r in at.radio if str(getattr(r, "key", "")) == "home_workspace_mode"), None)
+            if home_workspace_radio is None:
+                raise SystemExit("home workspace radio not found")
+            if len(home_workspace_radio.options) < 2:
+                raise SystemExit("home workspace options incomplete")
 
-            fastlog_option = next((o for o in nav_radio.options if "速记" in str(o)), None)
-            if fastlog_option is None:
-                raise SystemExit("fastlog option not found")
-
-            nav_radio.set_value(fastlog_option)
+            home_workspace_radio.set_value(home_workspace_radio.options[1])
             at.run()
             if at.exception:
                 raise SystemExit("fastlog exceptions: " + " | ".join(str(x.value) for x in at.exception))
@@ -219,26 +174,18 @@ class StreamlitSmokeTest(unittest.TestCase):
             at.session_state["todo_pending_drafts"] = []
             at.session_state["todo_manager_norm_sig"] = ""
 
-            nav_radio = None
-            for r in at.radio:
-                label = str(r.label or "")
-                options = [str(o) for o in r.options]
-                if "功能导航" in label or any("我的待办" in o for o in options):
-                    nav_radio = r
-                    break
+            nav_radio = next((r for r in at.radio if str(getattr(r, "key", "")) == "main_nav_menu"), None)
             if nav_radio is None:
                 raise SystemExit("navigation radio not found")
+            if len(nav_radio.options) < 4:
+                raise SystemExit("navigation options incomplete")
 
-            task_option = next((o for o in nav_radio.options if "我的待办" in str(o)), None)
-            if task_option is None:
-                raise SystemExit("task option not found")
-
-            nav_radio.set_value(task_option)
+            nav_radio.set_value(nav_radio.options[3])
             at.run()
             if at.exception:
                 raise SystemExit("task page exceptions: " + " | ".join(str(x.value) for x in at.exception))
 
-            title_input = next((x for x in at.text_input if "任务" in str(x.label or "")), None)
+            title_input = next((x for x in at.text_input if str(getattr(x, "key", "")) == "todo_title_global"), None)
             if title_input is None:
                 raise SystemExit("todo title input not found")
             title_input.set_value("空列表首条草稿")
@@ -279,4 +226,3 @@ class StreamlitSmokeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
