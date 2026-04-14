@@ -8174,12 +8174,17 @@ def render_sidebar_todo_panel(pm_view):
 def apply_pending_main_navigation(menu_options, valid_projects=None):
     pending_menu = str(st.session_state.pop("_pending_main_nav_menu", "")).strip()
     legacy_print_menu = globals().get("MENU_PRINT", "🖨️ 打印追踪（过渡）")
+    legacy_fastlog_menu = globals().get("MENU_FASTLOG", "📝 速记")
+    home_menu = globals().get("MENU_HOME", "🏠 今日视图")
     settings_menu = globals().get("MENU_SETTINGS", "⚙️ 系统设置")
     print_settings_mode = "🖨️ 打印追踪工具"
     if pending_menu == legacy_print_menu:
         pending_menu = settings_menu
         st.session_state["_pending_settings_mode"] = print_settings_mode
         st.session_state["settings_workspace_mode"] = print_settings_mode
+    if pending_menu == legacy_fastlog_menu:
+        pending_menu = home_menu
+        st.session_state["_pending_home_focus"] = "📝 速记"
     if pending_menu and pending_menu in list(menu_options or []):
         st.session_state["main_nav_menu"] = pending_menu
 
@@ -8203,6 +8208,8 @@ def try_set_session_state_value(key, value):
 def switch_main_menu(target_menu, project_name=""):
     pending_menu = str(target_menu or "").strip()
     legacy_print_menu = globals().get("MENU_PRINT", "🖨️ 打印追踪（过渡）")
+    legacy_fastlog_menu = globals().get("MENU_FASTLOG", "📝 速记")
+    home_menu = globals().get("MENU_HOME", "🏠 今日视图")
     settings_menu = globals().get("MENU_SETTINGS", "⚙️ 系统设置")
     print_settings_mode = "🖨️ 打印追踪工具"
     safe_setter = globals().get("try_set_session_state_value")
@@ -8213,6 +8220,9 @@ def switch_main_menu(target_menu, project_name=""):
             safe_setter("settings_workspace_mode", print_settings_mode)
         else:
             st.session_state["settings_workspace_mode"] = print_settings_mode
+    if pending_menu == legacy_fastlog_menu:
+        pending_menu = home_menu
+        st.session_state["_pending_home_focus"] = "📝 速记"
     st.session_state["_pending_main_nav_menu"] = pending_menu
     if pending_menu:
         if callable(safe_setter):
@@ -8540,11 +8550,48 @@ def build_home_project_warning_rows(project_names, pm_view):
     return rows
 
 
+def render_fastlog_workspace(visible_projects, current_pm, mode_key="fastlog_mode_global"):
+    st.caption("这里分成两种用法：手机上先用【手机快速记录】，晚上回电脑再用【晚间批量复盘】做完整校对。")
+    fastlog_mode = st.radio(
+        "记录方式",
+        ["📱 手机快速记录", "📝 晚间批量复盘"],
+        horizontal=True,
+        key=mode_key,
+    )
+    if fastlog_mode == "📱 手机快速记录":
+        render_mobile_fastlog_panel(visible_projects, current_pm)
+        return
+
+    _fastlog_first_expand = not st.session_state.get("fastlog_expanded_once", False)
+    with st.expander("每晚复盘（多项目）", expanded=_fastlog_first_expand):
+        render_pm_batch_fastlog_integrated(visible_projects)
+    if _fastlog_first_expand:
+        st.session_state["fastlog_expanded_once"] = True
+    st.caption("晚间批量复盘保留原来的多项目拆解/校对路径，更适合回电脑集中整理。")
+
+
 def render_home_view(valid_projs, current_pm):
     st.title("🏠 今日视图")
-    st.caption("先看今天要做什么，再进入项目空间或速记；把日常高频动作收在首屏。")
+    st.caption("先看今天要做什么，再进入项目空间；速记也收在这里，把日常高频动作集中在首屏。")
     with st.container(border=True):
-        st.caption("推荐路径：先看今日待办和重点预警，再点项目进入项目空间；手机随手记走速记，集中改提醒走我的待办。")
+        st.caption("推荐路径：先看今日待办和重点预警，再点项目进入项目空间；想随手记时，直接切到本页里的【速记】工作区。")
+
+    home_workspace_options = ["📌 今日总览", "📝 速记"]
+    pending_home_focus = str(st.session_state.pop("_pending_home_focus", "")).strip()
+    if pending_home_focus in home_workspace_options:
+        st.session_state["home_workspace_mode"] = pending_home_focus
+    elif str(st.session_state.get("home_workspace_mode", "")).strip() not in home_workspace_options:
+        st.session_state["home_workspace_mode"] = "📌 今日总览"
+    home_workspace_mode = st.radio(
+        "今日视图工作区",
+        home_workspace_options,
+        horizontal=True,
+        key="home_workspace_mode",
+    )
+    if home_workspace_mode == "📝 速记":
+        st.caption("速记不再单独占一个左侧入口；在这里随手记，回项目空间或数据维护再做细调。")
+        render_fastlog_workspace(valid_projs, current_pm, mode_key="home_fastlog_mode")
+        return
 
     cfg = db.get("系统配置", {}) if isinstance(db, dict) else {}
     todo_all = cfg.get("PM_TODO_LIST", []) if isinstance(cfg.get("PM_TODO_LIST", []), list) else []
@@ -8575,7 +8622,7 @@ def render_home_view(valid_projs, current_pm):
         if st.button("✅ 去我的待办", key="home_jump_tasks", use_container_width=True):
             switch_main_menu(MENU_TASKS)
     with qa2:
-        if st.button("📝 去速记", key="home_jump_quicklog", use_container_width=True):
+        if st.button("📝 打开速记", key="home_jump_quicklog", use_container_width=True):
             switch_main_menu(MENU_FASTLOG)
     with qa3:
         if st.button("📊 去全局大盘与甘特图", key="home_jump_dashboard", use_container_width=True):
@@ -11740,20 +11787,22 @@ render_sidebar_todo_panel(current_pm)
 
 menu_options = [
     MENU_HOME,
-    MENU_PROJECTS,
     MENU_DASHBOARD,
+    MENU_PROJECTS,
     MENU_TASKS,
-    MENU_FASTLOG,
     MENU_SETTINGS,
     MENU_MAINTENANCE,
 ]
 apply_pending_main_navigation(menu_options, valid_projects=valid_projs)
 if st.session_state.get("main_nav_menu") == MENU_PRINT:
     st.session_state["main_nav_menu"] = MENU_SETTINGS
+if st.session_state.get("main_nav_menu") == MENU_FASTLOG:
+    st.session_state["main_nav_menu"] = MENU_HOME
+    st.session_state["home_workspace_mode"] = "📝 速记"
 if st.session_state.get("main_nav_menu") not in menu_options:
     st.session_state["main_nav_menu"] = MENU_HOME
 menu = st.sidebar.radio("📂 功能导航", menu_options, key="main_nav_menu")
-st.sidebar.caption("建议流程：先看今日视图，再进项目空间；全局大盘与甘特图仍保留独立入口，待办和速记独立，打印追踪已收进【系统设置】。")
+st.sidebar.caption("建议流程：先看今日视图，再看全局大盘与甘特图，随后进入项目空间处理细项；速记已经并入【今日视图】。")
 
 # 备份与恢复
 st.sidebar.divider()
@@ -14565,27 +14614,8 @@ elif menu == MENU_PRINT:
     switch_main_menu(MENU_SETTINGS)
     st.rerun()
 
-# ==========================================
-# 模块 5：AI 速记
-# ==========================================
 elif menu == MENU_FASTLOG:
-    st.title("📝 速记")
-    st.caption("这页现在分成两种用法：手机上先用【手机快速记录】，晚上回电脑再用【晚间批量复盘】做完整校对。")
-    fastlog_mode = st.radio(
-        "记录方式",
-        ["📱 手机快速记录", "📝 晚间批量复盘"],
-        horizontal=True,
-        key="fastlog_mode_global",
-    )
-    if fastlog_mode == "📱 手机快速记录":
-        render_mobile_fastlog_panel(valid_projs, current_pm)
-    else:
-        _fastlog_first_expand = not st.session_state.get("fastlog_expanded_once", False)
-        with st.expander("每晚复盘（多项目）", expanded=_fastlog_first_expand):
-            render_pm_batch_fastlog_integrated(valid_projs)
-        if _fastlog_first_expand:
-            st.session_state["fastlog_expanded_once"] = True
-        st.caption("晚间批量复盘保留原来的多项目拆解/校对路径，更适合回电脑集中整理。")
+    switch_main_menu(MENU_FASTLOG)
     st.stop()
 
     MANUAL_PICK = "⚠️冲突: 请手动选择"
