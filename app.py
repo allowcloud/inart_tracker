@@ -6160,10 +6160,213 @@ def build_todo_explanation_snapshot(project_name, todo_binding=None, live_todo=N
     }
 
 
+def build_project_current_explanation_signature(project_name, pm_view=None):
+    proj = str(project_name or "").strip()
+    if not proj:
+        return ""
+
+    cfg = db.get("系统配置", {}) if isinstance(db.get("系统配置", {}), dict) else {}
+    alias_map = cfg.get("项目别名", {}) if isinstance(cfg.get("项目别名", {}), dict) else {}
+    proj_payload = {}
+    if isinstance(db.get(proj), dict):
+        proj_payload = {
+            key: value
+            for key, value in db.get(proj, {}).items()
+            if key not in ("配件清单长图",)
+        }
+
+    std_events = [
+        evt
+        for evt in (cfg.get("标准事件流", []) or [])
+        if str((evt or {}).get("项目", "")).strip() == proj
+    ]
+
+    related_todos = []
+    for td in (cfg.get("PM_TODO_LIST", []) or []):
+        if not isinstance(td, dict):
+            continue
+        matched = False
+        matcher = globals().get("todo_matches_project")
+        if callable(matcher):
+            try:
+                matched = bool(matcher(td, proj))
+            except Exception:
+                matched = False
+        if not matched:
+            proj_list = [str(x).strip() for x in (td.get("关联项目列表", []) or []) if str(x).strip()]
+            matched = (str(td.get("关联项目", "")).strip() == proj) or (proj in proj_list)
+        if matched:
+            related_todos.append(td)
+
+    payload = {
+        "project": proj_payload,
+        "aliases": alias_map,
+        "events": std_events,
+        "todos": related_todos,
+        "pm_view": str(pm_view or "").strip(),
+    }
+    return hashlib.md5(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _build_project_current_explanation_body(project_name, pm_view=None):
+    proj = str(project_name or "").strip()
+    if (not proj) or proj not in db:
+        return {}
+
+    std_pair = get_latest_standard_event_pair(proj, pm_view=pm_view)
+    std_binding = std_pair.get("progress")
+    todo_binding = std_pair.get("todo")
+    log_binding = get_latest_project_log_binding(proj)
+    live_todo_binding = get_latest_live_todo_binding(proj, pm_view=pm_view)
+    live_todo = (live_todo_binding or {}).get("todo", {}) if live_todo_binding else {}
+    todo_reminder = build_project_todo_reminder(
+        todo_event=(todo_binding or {}).get("event", {}) if todo_binding else {},
+        live_todo_binding=live_todo_binding,
+        pm_view=pm_view,
+        project_name=proj,
+    )
+    todo_explanation = build_todo_explanation_snapshot(
+        proj,
+        todo_binding=(todo_binding or {}).get("event", {}) if todo_binding else {},
+        live_todo=live_todo,
+        todo_reminder=todo_reminder,
+    )
+
+    std_date = clamp_timeline_date(parse_date_safe(((std_binding or {}).get("event", {}) or {}).get("日期", ""))) if std_binding else None
+    log_date = clamp_timeline_date(parse_date_safe(((log_binding or {}).get("log", {}) or {}).get("日期", ""))) if log_binding else None
+    std_write_time = str(((std_binding or {}).get("event", {}) or {}).get("写入时间", "")).strip() if std_binding else ""
+    log_write_time = str(((log_binding or {}).get("log", {}) or {}).get("写入时间", "")).strip() if log_binding else ""
+
+    use_std = False
+    if std_binding and not log_binding:
+        use_std = True
+    elif std_binding and log_binding:
+        std_rank = (
+            std_date.toordinal() if isinstance(std_date, datetime.date) else -1,
+            std_write_time,
+            str(((std_binding or {}).get("event", {}) or {}).get("_id", "")).strip(),
+        )
+        log_rank = (
+            log_date.toordinal() if isinstance(log_date, datetime.date) else -1,
+            log_write_time,
+            str(((log_binding or {}).get("log", {}) or {}).get("_id", "")).strip(),
+        )
+        if std_rank >= log_rank:
+            use_std = True
+
+    if use_std:
+        evt = std_binding["event"]
+        content = str(evt.get("内容", "")).strip() or str(evt.get("原始文本", "")).strip() or "无数据"
+        raw = str(evt.get("原始文本", "")).strip() or content
+        current = {
+            "_事件ID": str(evt.get("_id", "")).strip(),
+            "项目": proj,
+            "日期": str(evt.get("日期", "")).strip(),
+            "来源": str(evt.get("来源", "")).strip() or "标准事件",
+            "动作": str(evt.get("动作", "")).strip(),
+            "部件": str(evt.get("部件", "")).strip() or "全局进度",
+            "阶段": str(evt.get("阶段", "")).strip() or "-",
+            "内容": content,
+            "原始文本": raw,
+            "关联人员": str(evt.get("关联人员", "")).strip(),
+            "关联待办": [str(x).strip() for x in (evt.get("关联待办", []) or []) if str(x).strip()],
+            "意图": str(evt.get("意图", "")).strip(),
+            "提醒内容": str(todo_reminder.get("text", "")).strip(),
+            "提醒日期": str(todo_reminder.get("date", "")).strip(),
+            "提醒动作": str(todo_reminder.get("action", "")).strip(),
+            "提醒部件": str(todo_reminder.get("component", "")).strip(),
+            "提醒阶段": str(todo_reminder.get("stage", "")).strip(),
+            "模式": "标准事件",
+        }
+        if should_promote_todo_explanation(current, todo_explanation):
+            return todo_explanation
+        return current
+
+    if log_binding and isinstance(log_binding.get("log"), dict):
+        lg = log_binding["log"]
+        evt = str(lg.get("事件", "")).strip() or "无数据"
+        clean = evt
+        if "补充:" in clean:
+            clean = clean.split("补充:")[-1]
+        if "】" in clean:
+            clean = clean.split("】")[-1]
+        clean = clean.split("[系统]")[0].strip() or evt
+        current = {
+            "_事件ID": "",
+            "项目": proj,
+            "日期": str(lg.get("日期", "")).strip(),
+            "来源": "项目日志",
+            "动作": str(lg.get("流转", "")).strip() or "日志记录",
+            "部件": str(log_binding.get("component", "")).strip() or "全局进度",
+            "阶段": str(lg.get("工序", "")).strip() or "-",
+            "内容": clean,
+            "原始文本": evt,
+            "关联人员": "",
+            "关联待办": [],
+            "意图": "",
+            "提醒内容": str(todo_reminder.get("text", "")).strip(),
+            "提醒日期": str(todo_reminder.get("date", "")).strip(),
+            "提醒动作": str(todo_reminder.get("action", "")).strip(),
+            "提醒部件": str(todo_reminder.get("component", "")).strip(),
+            "提醒阶段": str(todo_reminder.get("stage", "")).strip(),
+            "模式": "项目日志",
+        }
+        if should_promote_todo_explanation(current, todo_explanation):
+            return todo_explanation
+        return current
+
+    if todo_explanation:
+        return todo_explanation
+
+    return {
+        "_事件ID": "",
+        "项目": proj,
+        "日期": "",
+        "来源": "",
+        "动作": "",
+        "部件": "全局进度",
+        "阶段": "-",
+        "内容": "无数据",
+        "原始文本": "",
+        "关联人员": "",
+        "关联待办": [],
+        "意图": "",
+        "提醒内容": "",
+        "提醒日期": "",
+        "提醒动作": "",
+        "提醒部件": "",
+        "提醒阶段": "",
+        "模式": "空",
+    }
+
+
+@lru_cache(maxsize=256)
+def _build_project_current_explanation_cached(project_name, pm_view, signature):
+    return _build_project_current_explanation_body(project_name, pm_view=pm_view)
+
+
 def build_project_current_explanation(project_name, pm_view=None):
     proj = str(project_name or "").strip()
     if (not proj) or proj not in db:
         return {}
+
+    sig_builder = globals().get("build_project_current_explanation_signature")
+    cached_builder = globals().get("_build_project_current_explanation_cached")
+    if callable(sig_builder) and callable(cached_builder):
+        try:
+            sig = sig_builder(proj, pm_view=pm_view)
+            return dict(cached_builder(proj, str(pm_view or "").strip(), sig))
+        except Exception:
+            pass
+
+    body_builder = globals().get("_build_project_current_explanation_body")
+    if callable(body_builder):
+        try:
+            return dict(body_builder(proj, pm_view=pm_view))
+        except Exception:
+            pass
 
     std_pair = get_latest_standard_event_pair(proj, pm_view=pm_view)
     std_binding = std_pair.get("progress")
@@ -6613,8 +6816,40 @@ def analyze_standard_event_confidence(evt_obj):
 
 
 def collect_low_confidence_standard_events(limit=120):
+    sig_builder = globals().get("build_standard_event_stream_signature")
+    cached_builder = globals().get("_collect_low_confidence_standard_events_cached")
+    if callable(sig_builder) and callable(cached_builder):
+        try:
+            sig = sig_builder()
+            return [dict(row) for row in cached_builder(sig, int(limit or 120))]
+        except Exception:
+            pass
+
     events = db.get("系统配置", {}).get("标准事件流", [])
     picked = []
+    for evt in reversed(events):
+        conf = analyze_standard_event_confidence(evt)
+        if conf["score"] >= 70:
+            continue
+        row = dict(evt)
+        row["_confidence"] = conf
+        picked.append(row)
+        if len(picked) >= limit:
+            break
+    return picked
+
+
+def build_standard_event_stream_signature():
+    events = db.get("系统配置", {}).get("标准事件流", [])
+    return hashlib.md5(
+        json.dumps(events, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+@lru_cache(maxsize=16)
+def _collect_low_confidence_standard_events_cached(signature, limit):
+    picked = []
+    events = db.get("系统配置", {}).get("标准事件流", [])
     for evt in reversed(events):
         conf = analyze_standard_event_confidence(evt)
         if conf["score"] >= 70:
@@ -11121,6 +11356,55 @@ def _append_print_tracking_standard_event(row_obj, action_type="打印追踪更�
     )
 
 
+def build_print_tracking_scope_signature(pm_view, visible_projects, locations):
+    scope_projects = _normalize_visible_print_projects(visible_projects)
+    cfg = db.get("系统配置", {}) if isinstance(db.get("系统配置", {}), dict) else {}
+    scope_set = set(scope_projects)
+
+    todo_payload = []
+    for td in (cfg.get("PM_TODO_LIST", []) or []):
+        if not isinstance(td, dict):
+            continue
+        if pm_view and not todo_visible_for_view(td, pm_view):
+            continue
+        proj_list = [p for p in todo_project_list(td) if p in scope_set]
+        if not proj_list:
+            continue
+        todo_payload.append(td)
+
+    log_payload = {}
+    for proj in scope_projects:
+        proj_data = db.get(proj, {}) if isinstance(db.get(proj, {}), dict) else {}
+        comp_rows = {}
+        for comp_name, comp_data in (proj_data.get("部件列表", {}) or {}).items():
+            logs = [lg for lg in ((comp_data or {}).get("日志流", []) or []) if not is_hidden_system_log(lg)]
+            if logs:
+                comp_rows[str(comp_name).strip()] = logs
+        if comp_rows:
+            log_payload[proj] = comp_rows
+
+    payload = {
+        "pm_view": str(pm_view or "").strip(),
+        "projects": scope_projects,
+        "locations": [str(x).strip() for x in (locations or []) if str(x).strip()],
+        "todos": todo_payload,
+        "logs": log_payload,
+    }
+    return hashlib.md5(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+@lru_cache(maxsize=48)
+def _build_print_tracking_auto_rows_cached(pm_view, scope_projects_key, locations_key, scope_signature):
+    scope_projects = list(scope_projects_key or [])
+    locations = list(locations_key or [])
+    auto_rows = []
+    auto_rows.extend(_build_auto_print_rows_from_todo(pm_view, scope_projects, locations))
+    auto_rows.extend(_build_auto_print_rows_from_logs(scope_projects, locations, days=30))
+    return auto_rows
+
+
 def render_print_tracking_board(pm_view, visible_projects, ui_prefix="print_track"):
     st.title("\U0001f5a8\ufe0f \u6253\u5370\u8ffd\u8e2a")
     st.caption("\u81ea\u52a8\u6c47\u805a\u5f85\u529e/\u65e5\u5fd7\u4e2d\u7684\u6253\u5370\u4fe1\u606f\uff0c\u5e76\u7edf\u4e00\u8ffd\u8e2a\uff1a\u662f\u5426\u5b89\u6392\u6253\u5370\u3001\u7ed9\u8c01\u6253\u3001\u662f\u5426\u6536\u5230\u4ef6\u3002")
@@ -11131,9 +11415,27 @@ def render_print_tracking_board(pm_view, visible_projects, ui_prefix="print_trac
     scope_projects = _normalize_visible_print_projects(visible_projects)
     stored_rows, stored_rows_outside_scope, scoped_projects = _split_print_tracking_rows_by_scope(stored_rows_all, visible_projects)
 
-    auto_rows = []
-    auto_rows.extend(_build_auto_print_rows_from_todo(pm_view, scope_projects, locations))
-    auto_rows.extend(_build_auto_print_rows_from_logs(scope_projects, locations, days=30))
+    auto_rows = None
+    sig_builder = globals().get("build_print_tracking_scope_signature")
+    cached_builder = globals().get("_build_print_tracking_auto_rows_cached")
+    if callable(sig_builder) and callable(cached_builder):
+        try:
+            scope_signature = sig_builder(pm_view, scope_projects, locations)
+            auto_rows = [
+                dict(row)
+                for row in cached_builder(
+                    str(pm_view or "").strip(),
+                    tuple(scope_projects),
+                    tuple(locations),
+                    scope_signature,
+                )
+            ]
+        except Exception:
+            auto_rows = None
+    if auto_rows is None:
+        auto_rows = []
+        auto_rows.extend(_build_auto_print_rows_from_todo(pm_view, scope_projects, locations))
+        auto_rows.extend(_build_auto_print_rows_from_logs(scope_projects, locations, days=30))
     merged_rows = _merge_print_tracking_rows(stored_rows, auto_rows)
     project_locked_scope = len(scoped_projects) == 1
 
