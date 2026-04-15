@@ -838,7 +838,7 @@ DEFAULT_STAGE_KEYWORDS = {
     "拆件": "工程拆件", "交接工程": "工程拆件", "转交工程": "工程拆件", "官图": "官图",
     "开模": "开模", "模具": "开模", "试模": "开模",
     "大货": "大货",
-    "完成": "✅ 已完成(结束)", "结束": "✅ 已完成(结束)",
+    "结束": "✅ 已完成(结束)",
 }
 DEFAULT_COMPONENT_SPLIT_KEYWORDS = {
     "头雕": "头雕(表情)",
@@ -2500,8 +2500,55 @@ def _allows_design_phase(proj_label="", proj_data=None, comp_name="", event_text
     return _is_packaging_context(comp_name, event_text, detail_stage) or _is_small_scale_project(proj_label, proj_data)
 
 
+def has_project_finish_signal(detail_stage="", event_text=""):
+    stage_txt = str(detail_stage or "").strip()
+    evt_txt = str(event_text or "").strip()
+    combined = f"{stage_txt} {evt_txt}".strip()
+    combined_norm = norm_text(combined)
+    if not combined_norm:
+        return False
+
+    explicit_finish_tokens = [
+        "✅已完成(结束)",
+        "项目结束撒花",
+        "生产结束",
+        "项目结束",
+        "项目完结",
+        "整体完成",
+        "全部完成",
+        "正式完结",
+        "完结撒花",
+        "结项",
+    ]
+    if any(norm_text(token) in combined_norm for token in explicit_finish_tokens):
+        return True
+
+    if stage_txt == "✅ 已完成(结束)":
+        return True
+
+    weak_finish_tokens = ["完成", "结束", "done", "finished"]
+    weak_hit = any(token in str(combined).lower() if token in ["done", "finished"] else token in combined for token in weak_finish_tokens)
+    if not weak_hit:
+        return False
+
+    followup_tokens = [
+        "待", "确认", "反馈", "review", "复核", "修改", "调整", "测试", "试", "返回",
+        "寄出", "送去", "送给", "交接", "交给", "转交", "文件", "工程版", "一版", "二版", "三版",
+    ]
+    if any(token in str(combined).lower() if token in ["review"] else token in combined for token in followup_tokens):
+        return False
+
+    scoped_completion_tokens = [
+        "工程版完成", "文件完成", "拆件完成", "头雕完成", "素体完成", "配件完成", "包装完成",
+    ]
+    if any(token in combined for token in scoped_completion_tokens):
+        return False
+
+    return False
+
+
 MACRO_PHASE_RULES = [
-    {"phase": "结束", "stage_any": ["完成", "结束", "撒花"]},
+    {"phase": "结束", "when": "finish_signal"},
     {"phase": "暂停", "stage_any": ["暂停", "搁置"], "when": "pause_stage"},
     {"phase": "暂停", "when": "global_pause"},
     {"phase": "生产", "stage_any": ["大货", "量产"]},
@@ -2530,6 +2577,8 @@ def _macro_phase_rule_matches(rule, stage_text, event_text, lower_evt, comp_name
             "全局" in str(comp_name or "")
             and has_pause_signal(evt)
         )
+    if when == "finish_signal":
+        return has_project_finish_signal(s, evt)
     if when == "print_signal":
         return ("打印" in evt) or ("签样" in evt) or (s == "打印") or any(x in evt for x in ["效果下模", "确认效果下模", "待确认效果下模"])
     if when == "mold_signal":
