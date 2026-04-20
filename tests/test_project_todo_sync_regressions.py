@@ -2857,6 +2857,14 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         self.assertEqual(dot_dt, datetime.date(2026, 3, 26))
         self.assertEqual(dot_body, "ZB文件已下发待雨萱拆件")
 
+    def test_parse_compact_month_day_marker_rolls_future_year_boundary(self) -> None:
+        ns = load_app_functions("parse_compact_month_day_marker")
+
+        self.assertEqual(
+            ns.parse_compact_month_day_marker("0102", ref_date=datetime.date(2026, 12, 31)),
+            datetime.date(2027, 1, 2),
+        )
+
     def test_extract_dashboard_todo_segments_handles_user_batch_update_dates(self) -> None:
         ns = load_app_functions(
             "norm_text",
@@ -2895,6 +2903,73 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         self.assertEqual(rows[0]["due_dt"], datetime.date(2026, 4, 20))
         self.assertEqual(rows[0]["stage"], "设计")
         self.assertNotIn("0420更新", rows[0]["task"])
+
+    def test_extract_dashboard_todo_segments_keeps_body_due_after_update_prefix(self) -> None:
+        ns = load_app_functions(
+            "norm_text",
+            "parse_compact_month_day_marker",
+            "strip_update_date_prefix",
+            "extract_planned_compact_date_and_body",
+            "clean_auto_todo_task_text",
+            "extract_event_date_and_body",
+            "classify_text_intent",
+            "classify_temporal_event_route",
+            "extract_followup_todo_clause",
+            "refine_dashboard_todo_task_text",
+            "extract_todo_segment_hints",
+            "extract_dashboard_todo_segments",
+        )
+        globals_map = ns.extract_dashboard_todo_segments.__globals__
+        project_name = "1/6伏地魔"
+        globals_map["db"].update({project_name: {"部件列表": {"配件": {}, "全局进度": {}}}})
+        globals_map["get_recognition_keywords"] = lambda key: {
+            "未来意图词": ["待", "待办", "需要", "需", "安排", "预计", "可以", "补", "CP"],
+            "过去意图词": ["已", "已经", "完成", "收到", "已安排", "更新"],
+            "日期噪音词": ["预计", "计划", "可", "能", "更新"],
+        }.get(key, [])
+        globals_map["get_component_keyword_map"] = lambda: {"配件": "配件", "打样": "配件"}
+        globals_map["get_stage_keyword_map"] = lambda: {"打样": "工厂复样(含胶件/上色等)"}
+        globals_map["infer_todo_handoff_prefill"] = lambda td, proj_name: {}
+
+        rows = ns.extract_dashboard_todo_segments(
+            "0420更新：预计4/25打样",
+            project_name=project_name,
+            ref_date=datetime.date(2026, 4, 20),
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["due_dt"], datetime.date(2026, 4, 25))
+        self.assertFalse(rows[0]["allow_empty_due"])
+
+    def test_print_tracking_scope_signature_includes_current_day(self) -> None:
+        ns = load_app_functions("build_print_tracking_scope_signature")
+        globals_map = ns.build_print_tracking_scope_signature.__globals__
+        globals_map["db"] = {"系统配置": {}, "proj_a": {"部件列表": {}}}
+        globals_map["_normalize_visible_print_projects"] = lambda projects: list(projects or [])
+        globals_map["todo_visible_for_view"] = lambda td, pm_view: True
+        globals_map["todo_project_list"] = lambda td: list(td.get("关联项目列表", []) or [])
+        globals_map["is_hidden_system_log"] = lambda _log: False
+
+        class FakeDate(datetime.date):
+            @classmethod
+            def today(cls):
+                return cls(2026, 4, 20)
+
+        class FakeDateNext(datetime.date):
+            @classmethod
+            def today(cls):
+                return cls(2026, 4, 21)
+
+        old_date = globals_map["datetime"].date
+        try:
+            globals_map["datetime"].date = FakeDate
+            sig_today = ns.build_print_tracking_scope_signature("袁", ["proj_a"], ["内部"])
+            globals_map["datetime"].date = FakeDateNext
+            sig_next = ns.build_print_tracking_scope_signature("袁", ["proj_a"], ["内部"])
+        finally:
+            globals_map["datetime"].date = old_date
+
+        self.assertNotEqual(sig_today, sig_next)
 
     def test_extract_dashboard_todo_segments_treats_dot_prefix_as_history_marker_not_due(self) -> None:
         ns = load_app_functions(

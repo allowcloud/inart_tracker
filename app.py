@@ -2975,7 +2975,10 @@ def parse_compact_month_day_marker(text, ref_date=None):
         day = int(match.group(2))
         if month < 1 or month > 12 or day < 1 or day > 31:
             return None
-        return datetime.date(ref.year, month, day)
+        candidate = datetime.date(ref.year, month, day)
+        if candidate < ref - datetime.timedelta(days=30):
+            candidate = datetime.date(ref.year + 1, month, day)
+        return candidate
     except Exception:
         return None
 
@@ -3372,6 +3375,10 @@ def extract_dashboard_todo_segments(text, project_name="", ref_date=None):
         elif explicit_history_date_marker and any(tok in task_seed for tok in ["待", "需", "需要", "跟进", "跟催"]):
             route = "todo"
 
+        if explicit_history_date_marker and isinstance(due_dt, datetime.date) and (not planned_due_from_body):
+            date_token_text = str(body_without_date or "").strip()
+            if date_token_text and date_token_text != str(body_text or "").strip():
+                planned_due_from_body = True
         if explicit_history_date_marker and isinstance(due_dt, datetime.date) and (not planned_due_from_body):
             due_dt = None
         task = clean_auto_todo_task_text(task_seed)
@@ -6352,8 +6359,10 @@ def build_project_current_explanation_signature(project_name, pm_view=None):
         "todos": related_todos,
         "pm_view": str(pm_view or "").strip(),
     }
-    return hashlib.md5(
-        json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    _hashlib = globals().get("hashlib") or __import__("hashlib")
+    _json = globals().get("json") or __import__("json")
+    return _hashlib.md5(
+        _json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
     ).hexdigest()
 
 
@@ -11532,13 +11541,16 @@ def build_print_tracking_scope_signature(pm_view, visible_projects, locations):
 
     payload = {
         "pm_view": str(pm_view or "").strip(),
+        "today": str(datetime.date.today()),
         "projects": scope_projects,
         "locations": [str(x).strip() for x in (locations or []) if str(x).strip()],
         "todos": todo_payload,
         "logs": log_payload,
     }
-    return hashlib.md5(
-        json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    _hashlib = globals().get("hashlib") or __import__("hashlib")
+    _json = globals().get("json") or __import__("json")
+    return _hashlib.md5(
+        _json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
     ).hexdigest()
 
 
