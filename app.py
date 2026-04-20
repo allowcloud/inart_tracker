@@ -822,23 +822,24 @@ DEFAULT_COMPONENT_KEYWORDS = {
     "脖子": "头雕(表情)",
     "植发": "植发", "头发": "植发", "发": "植发", "马海毛": "头雕(表情)", "毛到货": "头雕(表情)",
     "素体": "素体", "胸皮": "素体", "透明胸皮": "素体", "穿衣素体": "素体",
+    "胸": "素体", "内构": "素体", "腿": "素体", "胳膊": "素体", "肉胳膊": "素体", "手臂": "素体",
     "手": "手型", "手型": "手型",
     "衣": "服装", "服": "服装", "服装": "服装", "鞋": "服装", "鞋子": "服装", "靴": "服装", "靴子": "服装",
     "包": "包装", "盒": "包装", "包装": "包装",
     "地台": "地台",
     "扣": "配件", "扣子": "配件", "桩位": "配件", "卡位": "配件", "法杖": "配件", "杯": "配件", "剑": "配件", "配件": "配件",
-    "墨镜": "配件", "饮料": "配件", "小狗": "配件", "枪械": "配件",
+    "墨镜": "配件", "眼镜": "配件", "饮料": "配件", "小狗": "配件", "枪械": "配件", "拳套": "配件",
 }
 DEFAULT_STAGE_KEYWORDS = {
     "定价": "立项", "评估": "立项", "开定": "立项",
     "打印": "建模(含打印/签样)", "模型": "建模(含打印/签样)", "缩放": "建模(含打印/签样)",
     "修": "建模(含打印/签样)", "建模": "建模(含打印/签样)", "打样": "建模(含打印/签样)",
     "涂": "涂装", "色": "涂装",
-    "设计": "设计", "原画": "设计",
-    "拆件": "工程拆件", "交接工程": "工程拆件", "转交工程": "工程拆件", "官图": "官图",
+    "设计": "设计", "原画": "设计", "补纹": "设计",
+    "拆件": "工程拆件", "交接工程": "工程拆件", "转交工程": "工程拆件", "给工程": "工程拆件", "过工程": "工程拆件", "转发工程": "工程拆件", "过FF": "工程拆件", "官图": "官图",
     "开模": "开模", "模具": "开模", "试模": "开模",
     "大货": "大货",
-    "完成": "✅ 已完成(结束)", "结束": "✅ 已完成(结束)",
+    "结束": "✅ 已完成(结束)",
 }
 DEFAULT_COMPONENT_SPLIT_KEYWORDS = {
     "头雕": "头雕(表情)",
@@ -2500,8 +2501,55 @@ def _allows_design_phase(proj_label="", proj_data=None, comp_name="", event_text
     return _is_packaging_context(comp_name, event_text, detail_stage) or _is_small_scale_project(proj_label, proj_data)
 
 
+def has_project_finish_signal(detail_stage="", event_text=""):
+    stage_txt = str(detail_stage or "").strip()
+    evt_txt = str(event_text or "").strip()
+    combined = f"{stage_txt} {evt_txt}".strip()
+    combined_norm = norm_text(combined)
+    if not combined_norm:
+        return False
+
+    explicit_finish_tokens = [
+        "✅已完成(结束)",
+        "项目结束撒花",
+        "生产结束",
+        "项目结束",
+        "项目完结",
+        "整体完成",
+        "全部完成",
+        "正式完结",
+        "完结撒花",
+        "结项",
+    ]
+    if any(norm_text(token) in combined_norm for token in explicit_finish_tokens):
+        return True
+
+    if stage_txt == "✅ 已完成(结束)":
+        return True
+
+    weak_finish_tokens = ["完成", "结束", "done", "finished"]
+    weak_hit = any(token in str(combined).lower() if token in ["done", "finished"] else token in combined for token in weak_finish_tokens)
+    if not weak_hit:
+        return False
+
+    followup_tokens = [
+        "待", "确认", "反馈", "review", "复核", "修改", "调整", "测试", "试", "返回",
+        "寄出", "送去", "送给", "交接", "交给", "转交", "文件", "工程版", "一版", "二版", "三版",
+    ]
+    if any(token in str(combined).lower() if token in ["review"] else token in combined for token in followup_tokens):
+        return False
+
+    scoped_completion_tokens = [
+        "工程版完成", "文件完成", "拆件完成", "头雕完成", "素体完成", "配件完成", "包装完成",
+    ]
+    if any(token in combined for token in scoped_completion_tokens):
+        return False
+
+    return False
+
+
 MACRO_PHASE_RULES = [
-    {"phase": "结束", "stage_any": ["完成", "结束", "撒花"]},
+    {"phase": "结束", "when": "finish_signal"},
     {"phase": "暂停", "stage_any": ["暂停", "搁置"], "when": "pause_stage"},
     {"phase": "暂停", "when": "global_pause"},
     {"phase": "生产", "stage_any": ["大货", "量产"]},
@@ -2530,6 +2578,8 @@ def _macro_phase_rule_matches(rule, stage_text, event_text, lower_evt, comp_name
             "全局" in str(comp_name or "")
             and has_pause_signal(evt)
         )
+    if when == "finish_signal":
+        return has_project_finish_signal(s, evt)
     if when == "print_signal":
         return ("打印" in evt) or ("签样" in evt) or (s == "打印") or any(x in evt for x in ["效果下模", "确认效果下模", "待确认效果下模"])
     if when == "mold_signal":
@@ -2912,6 +2962,78 @@ def classify_temporal_event_route(text, ref_date=None, prefer_past=False):
     }
 
 
+def parse_compact_month_day_marker(text, ref_date=None):
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    ref = ref_date or datetime.date.today()
+    match = re.fullmatch(r"([01]?\d)([0-3]\d)", raw)
+    if not match:
+        return None
+    try:
+        month = int(match.group(1))
+        day = int(match.group(2))
+        if month < 1 or month > 12 or day < 1 or day > 31:
+            return None
+        candidate = datetime.date(ref.year, month, day)
+        if candidate < ref - datetime.timedelta(days=30):
+            candidate = datetime.date(ref.year + 1, month, day)
+        return candidate
+    except Exception:
+        return None
+
+
+def strip_update_date_prefix(text, ref_date=None):
+    raw = str(text or "").strip()
+    if not raw:
+        return None, raw, False
+
+    ref = ref_date or datetime.date.today()
+    patterns = [
+        r"^(?:【新增】\s*)?([01]?\d[0-3]\d)\s*(?:更新)?\s*[:：]?\s*",
+        r"^(?:【新增】\s*)?(\d{1,2})[.．](\d{1,2})\s*(?:更新)?\s*[:：]?\s*",
+        r"^(?:【新增】\s*)?(\d{1,2})[/-](\d{1,2})\s*(?:更新)?\s*[:：]?\s*",
+    ]
+    for idx, pattern in enumerate(patterns):
+        match = re.match(pattern, raw)
+        if not match:
+            continue
+        try:
+            if idx == 0:
+                marker_dt = parse_compact_month_day_marker(match.group(1), ref_date=ref)
+            else:
+                marker_dt = datetime.date(ref.year, int(match.group(1)), int(match.group(2)))
+            if not marker_dt:
+                continue
+            body = raw[match.end():].strip(" ，,;；:：|")
+            return marker_dt, body or raw, True
+        except Exception:
+            continue
+    return None, raw, False
+
+
+def extract_planned_compact_date_and_body(text, ref_date=None):
+    raw = str(text or "").strip()
+    if not raw:
+        return None, raw
+    ref = ref_date or datetime.date.today()
+    patterns = [
+        r"(?i)(CP|DDL)\s*([01]?\d[0-3]\d)",
+        r"(预计|计划|预期|约|大概)?\s*([01]?\d[0-3]\d)(?!\d)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, raw)
+        if not match:
+            continue
+        token = match.group(2)
+        dt = parse_compact_month_day_marker(token, ref_date=ref)
+        if not dt:
+            continue
+        body = (raw[:match.start(2)] + " " + raw[match.end(2):]).strip(" ，,;；:：|")
+        return dt, body or raw
+    return None, raw
+
+
 def resolve_todo_completion_event_day(title="", cpddl_text="", temporal_info=None, ref_date=None):
     ref = ref_date or datetime.date.today()
     temporal = temporal_info if isinstance(temporal_info, dict) else classify_temporal_event_route(
@@ -2935,6 +3057,7 @@ def extract_followup_todo_clause(text, route_hint=""):
         "待确认", "待收件", "待回件", "待反馈", "待修改", "待补", "待回复",
         "待打样", "待打印", "待审", "待版权", "待做", "待处理", "待跟进",
         "待跟催", "需要", "需", "跟进", "跟催", "预计", "即将", "待",
+        "可以", "可安排", "本周可", "这周可", "预计本周", "预计这周",
     ]
     past_tokens = [
         "已于", "已经", "已安排", "安排了", "已转交", "已交接", "已提交",
@@ -2958,7 +3081,7 @@ def extract_followup_todo_clause(text, route_hint=""):
     has_past_context = any(tok in prefix for tok in past_tokens)
     has_clause_break = bool(re.search(r"[，,;；|、]", prefix))
     route_txt = str(route_hint or "").strip()
-    if (not has_past_context) and not (route_txt == "past" and has_clause_break):
+    if (not has_past_context) and not (route_txt in ["past", "todo"] and has_clause_break):
         return ""
 
     tail = raw[idx:].strip(" ，,;；|")
@@ -3076,6 +3199,8 @@ def extract_dashboard_people_text(text):
         "修改", "处理", "跟进", "待", "回复", "项目",
     }
     patterns = [
+        r"待\s*([A-Za-z0-9_\-]{1,20}|[\u4e00-\u9fa5]{1,6})(?:拆件|接手|确认|反馈|修改|回复|处理|跟进|跟催|打印|收件|回件|过|补)",
+        r"待\s*([A-Za-z0-9_\-]{1,20}|[\u4e00-\u9fa5]{1,6})\s*(?:接手确认|接手处理)",
         r"(?:已)?(?:转交|交给|发给|给)\s*([A-Za-z0-9_\-]{1,20}|[\u4e00-\u9fa5]{1,6})",
         r"待([A-Za-z0-9_\-]{1,20}|[\u4e00-\u9fa5]{1,6})打样",
     ]
@@ -3195,16 +3320,27 @@ def extract_dashboard_todo_segments(text, project_name="", ref_date=None):
     for seg in segments:
         body_text = seg
         hint_text = ""
+        prefix_stripper = globals().get("strip_update_date_prefix")
+        if callable(prefix_stripper):
+            prefix_marker_dt, prefix_body_text, has_update_date_prefix = prefix_stripper(seg, ref_date=ref)
+        else:
+            prefix_marker_dt, prefix_body_text, has_update_date_prefix = None, seg, False
+        if has_update_date_prefix:
+            body_text = prefix_body_text
         explicit_history_date_marker = bool(
             re.search(
                 r"已于\s*(?:20\d{2}[-/年.]?)?\d{1,2}(?:[-/月.]\d{1,2})",
                 str(seg or "").strip(),
             )
-        )
+        ) or bool(has_update_date_prefix)
         m = re.match(r"^(.*?)(?:\s*(?:--+|——+)\s*)(.+)$", seg)
         if m:
             body_text = str(m.group(1) or "").strip() or seg
             hint_text = str(m.group(2) or "").strip()
+            if has_update_date_prefix:
+                _marker_dt, marker_body, marker_hit = prefix_stripper(body_text, ref_date=ref) if callable(prefix_stripper) else (None, body_text, False)
+                if marker_hit:
+                    body_text = marker_body
 
         route_probe = " ".join([body_text, hint_text]).strip()
         route_info = classify_temporal_event_route(route_probe, ref_date=ref, prefer_past=False)
@@ -3213,6 +3349,14 @@ def extract_dashboard_todo_segments(text, project_name="", ref_date=None):
             route = "todo"
 
         due_dt, body_without_date = extract_event_date_and_body(body_text, ref_date=ref, prefer_past=False)
+        planned_due_from_body = False
+        if due_dt is None:
+            planned_extractor = globals().get("extract_planned_compact_date_and_body")
+            planned_dt, planned_body = planned_extractor(body_text, ref_date=ref) if callable(planned_extractor) else (None, body_text)
+            if isinstance(planned_dt, datetime.date):
+                due_dt = planned_dt
+                body_without_date = planned_body
+                planned_due_from_body = True
         task_seed = body_without_date or body_text
         followup_picker = globals().get("extract_followup_todo_clause")
         followup_clause = followup_picker(task_seed, route_hint=route) if callable(followup_picker) else ""
@@ -3231,7 +3375,11 @@ def extract_dashboard_todo_segments(text, project_name="", ref_date=None):
         elif explicit_history_date_marker and any(tok in task_seed for tok in ["待", "需", "需要", "跟进", "跟催"]):
             route = "todo"
 
-        if explicit_history_date_marker and isinstance(due_dt, datetime.date):
+        if explicit_history_date_marker and isinstance(due_dt, datetime.date) and (not planned_due_from_body):
+            date_token_text = str(body_without_date or "").strip()
+            if date_token_text and date_token_text != str(body_text or "").strip():
+                planned_due_from_body = True
+        if explicit_history_date_marker and isinstance(due_dt, datetime.date) and (not planned_due_from_body):
             due_dt = None
         task = clean_auto_todo_task_text(task_seed)
         if not task:
@@ -5083,6 +5231,12 @@ def extract_todo_segment_hints(text, project_components=None, comp_kw=None, stag
             tok in seg_text_value for tok in ["拆", "拆件", "结构", "分件", "脖子", "眼睛"]
         ):
             return "工程拆件"
+        if any(tok in seg_text_value for tok in ["给工程", "过工程", "转发工程", "文件给工程", "工程返回版", "待过FF", "过FF"]):
+            return "工程拆件"
+        if any(tok in seg_text_value for tok in ["手板组好", "组手板", "手板测试", "结构板", "结构测试"]):
+            return "手板/结构板"
+        if "补纹" in seg_text_value:
+            return "设计"
         for kw, stage_name in _sorted_kw_items(stage_kw_map):
             kw_norm = norm_text(kw)
             if kw in seg_text_value or (kw_norm and kw_norm in seg_norm):
@@ -6160,10 +6314,215 @@ def build_todo_explanation_snapshot(project_name, todo_binding=None, live_todo=N
     }
 
 
+def build_project_current_explanation_signature(project_name, pm_view=None):
+    proj = str(project_name or "").strip()
+    if not proj:
+        return ""
+
+    cfg = db.get("系统配置", {}) if isinstance(db.get("系统配置", {}), dict) else {}
+    alias_map = cfg.get("项目别名", {}) if isinstance(cfg.get("项目别名", {}), dict) else {}
+    proj_payload = {}
+    if isinstance(db.get(proj), dict):
+        proj_payload = {
+            key: value
+            for key, value in db.get(proj, {}).items()
+            if key not in ("配件清单长图",)
+        }
+
+    std_events = [
+        evt
+        for evt in (cfg.get("标准事件流", []) or [])
+        if str((evt or {}).get("项目", "")).strip() == proj
+    ]
+
+    related_todos = []
+    for td in (cfg.get("PM_TODO_LIST", []) or []):
+        if not isinstance(td, dict):
+            continue
+        matched = False
+        matcher = globals().get("todo_matches_project")
+        if callable(matcher):
+            try:
+                matched = bool(matcher(td, proj))
+            except Exception:
+                matched = False
+        if not matched:
+            proj_list = [str(x).strip() for x in (td.get("关联项目列表", []) or []) if str(x).strip()]
+            matched = (str(td.get("关联项目", "")).strip() == proj) or (proj in proj_list)
+        if matched:
+            related_todos.append(td)
+
+    payload = {
+        "project": proj_payload,
+        "aliases": alias_map,
+        "events": std_events,
+        "todos": related_todos,
+        "pm_view": str(pm_view or "").strip(),
+    }
+    _hashlib = globals().get("hashlib") or __import__("hashlib")
+    _json = globals().get("json") or __import__("json")
+    return _hashlib.md5(
+        _json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _build_project_current_explanation_body(project_name, pm_view=None):
+    proj = str(project_name or "").strip()
+    if (not proj) or proj not in db:
+        return {}
+
+    std_pair = get_latest_standard_event_pair(proj, pm_view=pm_view)
+    std_binding = std_pair.get("progress")
+    todo_binding = std_pair.get("todo")
+    log_binding = get_latest_project_log_binding(proj)
+    live_todo_binding = get_latest_live_todo_binding(proj, pm_view=pm_view)
+    live_todo = (live_todo_binding or {}).get("todo", {}) if live_todo_binding else {}
+    todo_reminder = build_project_todo_reminder(
+        todo_event=(todo_binding or {}).get("event", {}) if todo_binding else {},
+        live_todo_binding=live_todo_binding,
+        pm_view=pm_view,
+        project_name=proj,
+    )
+    todo_explanation = build_todo_explanation_snapshot(
+        proj,
+        todo_binding=(todo_binding or {}).get("event", {}) if todo_binding else {},
+        live_todo=live_todo,
+        todo_reminder=todo_reminder,
+    )
+
+    std_date = clamp_timeline_date(parse_date_safe(((std_binding or {}).get("event", {}) or {}).get("日期", ""))) if std_binding else None
+    log_date = clamp_timeline_date(parse_date_safe(((log_binding or {}).get("log", {}) or {}).get("日期", ""))) if log_binding else None
+    std_write_time = str(((std_binding or {}).get("event", {}) or {}).get("写入时间", "")).strip() if std_binding else ""
+    log_write_time = str(((log_binding or {}).get("log", {}) or {}).get("写入时间", "")).strip() if log_binding else ""
+
+    use_std = False
+    if std_binding and not log_binding:
+        use_std = True
+    elif std_binding and log_binding:
+        std_rank = (
+            std_date.toordinal() if isinstance(std_date, datetime.date) else -1,
+            std_write_time,
+            str(((std_binding or {}).get("event", {}) or {}).get("_id", "")).strip(),
+        )
+        log_rank = (
+            log_date.toordinal() if isinstance(log_date, datetime.date) else -1,
+            log_write_time,
+            str(((log_binding or {}).get("log", {}) or {}).get("_id", "")).strip(),
+        )
+        if std_rank >= log_rank:
+            use_std = True
+
+    if use_std:
+        evt = std_binding["event"]
+        content = str(evt.get("内容", "")).strip() or str(evt.get("原始文本", "")).strip() or "无数据"
+        raw = str(evt.get("原始文本", "")).strip() or content
+        current = {
+            "_事件ID": str(evt.get("_id", "")).strip(),
+            "项目": proj,
+            "日期": str(evt.get("日期", "")).strip(),
+            "来源": str(evt.get("来源", "")).strip() or "标准事件",
+            "动作": str(evt.get("动作", "")).strip(),
+            "部件": str(evt.get("部件", "")).strip() or "全局进度",
+            "阶段": str(evt.get("阶段", "")).strip() or "-",
+            "内容": content,
+            "原始文本": raw,
+            "关联人员": str(evt.get("关联人员", "")).strip(),
+            "关联待办": [str(x).strip() for x in (evt.get("关联待办", []) or []) if str(x).strip()],
+            "意图": str(evt.get("意图", "")).strip(),
+            "提醒内容": str(todo_reminder.get("text", "")).strip(),
+            "提醒日期": str(todo_reminder.get("date", "")).strip(),
+            "提醒动作": str(todo_reminder.get("action", "")).strip(),
+            "提醒部件": str(todo_reminder.get("component", "")).strip(),
+            "提醒阶段": str(todo_reminder.get("stage", "")).strip(),
+            "模式": "标准事件",
+        }
+        if should_promote_todo_explanation(current, todo_explanation):
+            return todo_explanation
+        return current
+
+    if log_binding and isinstance(log_binding.get("log"), dict):
+        lg = log_binding["log"]
+        evt = str(lg.get("事件", "")).strip() or "无数据"
+        clean = evt
+        if "补充:" in clean:
+            clean = clean.split("补充:")[-1]
+        if "】" in clean:
+            clean = clean.split("】")[-1]
+        clean = clean.split("[系统]")[0].strip() or evt
+        current = {
+            "_事件ID": "",
+            "项目": proj,
+            "日期": str(lg.get("日期", "")).strip(),
+            "来源": "项目日志",
+            "动作": str(lg.get("流转", "")).strip() or "日志记录",
+            "部件": str(log_binding.get("component", "")).strip() or "全局进度",
+            "阶段": str(lg.get("工序", "")).strip() or "-",
+            "内容": clean,
+            "原始文本": evt,
+            "关联人员": "",
+            "关联待办": [],
+            "意图": "",
+            "提醒内容": str(todo_reminder.get("text", "")).strip(),
+            "提醒日期": str(todo_reminder.get("date", "")).strip(),
+            "提醒动作": str(todo_reminder.get("action", "")).strip(),
+            "提醒部件": str(todo_reminder.get("component", "")).strip(),
+            "提醒阶段": str(todo_reminder.get("stage", "")).strip(),
+            "模式": "项目日志",
+        }
+        if should_promote_todo_explanation(current, todo_explanation):
+            return todo_explanation
+        return current
+
+    if todo_explanation:
+        return todo_explanation
+
+    return {
+        "_事件ID": "",
+        "项目": proj,
+        "日期": "",
+        "来源": "",
+        "动作": "",
+        "部件": "全局进度",
+        "阶段": "-",
+        "内容": "无数据",
+        "原始文本": "",
+        "关联人员": "",
+        "关联待办": [],
+        "意图": "",
+        "提醒内容": "",
+        "提醒日期": "",
+        "提醒动作": "",
+        "提醒部件": "",
+        "提醒阶段": "",
+        "模式": "空",
+    }
+
+
+@lru_cache(maxsize=256)
+def _build_project_current_explanation_cached(project_name, pm_view, signature):
+    return _build_project_current_explanation_body(project_name, pm_view=pm_view)
+
+
 def build_project_current_explanation(project_name, pm_view=None):
     proj = str(project_name or "").strip()
     if (not proj) or proj not in db:
         return {}
+
+    sig_builder = globals().get("build_project_current_explanation_signature")
+    cached_builder = globals().get("_build_project_current_explanation_cached")
+    if callable(sig_builder) and callable(cached_builder):
+        try:
+            sig = sig_builder(proj, pm_view=pm_view)
+            return dict(cached_builder(proj, str(pm_view or "").strip(), sig))
+        except Exception:
+            pass
+
+    body_builder = globals().get("_build_project_current_explanation_body")
+    if callable(body_builder):
+        try:
+            return dict(body_builder(proj, pm_view=pm_view))
+        except Exception:
+            pass
 
     std_pair = get_latest_standard_event_pair(proj, pm_view=pm_view)
     std_binding = std_pair.get("progress")
@@ -6613,8 +6972,40 @@ def analyze_standard_event_confidence(evt_obj):
 
 
 def collect_low_confidence_standard_events(limit=120):
+    sig_builder = globals().get("build_standard_event_stream_signature")
+    cached_builder = globals().get("_collect_low_confidence_standard_events_cached")
+    if callable(sig_builder) and callable(cached_builder):
+        try:
+            sig = sig_builder()
+            return [dict(row) for row in cached_builder(sig, int(limit or 120))]
+        except Exception:
+            pass
+
     events = db.get("系统配置", {}).get("标准事件流", [])
     picked = []
+    for evt in reversed(events):
+        conf = analyze_standard_event_confidence(evt)
+        if conf["score"] >= 70:
+            continue
+        row = dict(evt)
+        row["_confidence"] = conf
+        picked.append(row)
+        if len(picked) >= limit:
+            break
+    return picked
+
+
+def build_standard_event_stream_signature():
+    events = db.get("系统配置", {}).get("标准事件流", [])
+    return hashlib.md5(
+        json.dumps(events, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+@lru_cache(maxsize=16)
+def _collect_low_confidence_standard_events_cached(signature, limit):
+    picked = []
+    events = db.get("系统配置", {}).get("标准事件流", [])
     for evt in reversed(events):
         conf = analyze_standard_event_confidence(evt)
         if conf["score"] >= 70:
@@ -11121,6 +11512,58 @@ def _append_print_tracking_standard_event(row_obj, action_type="打印追踪更�
     )
 
 
+def build_print_tracking_scope_signature(pm_view, visible_projects, locations):
+    scope_projects = _normalize_visible_print_projects(visible_projects)
+    cfg = db.get("系统配置", {}) if isinstance(db.get("系统配置", {}), dict) else {}
+    scope_set = set(scope_projects)
+
+    todo_payload = []
+    for td in (cfg.get("PM_TODO_LIST", []) or []):
+        if not isinstance(td, dict):
+            continue
+        if pm_view and not todo_visible_for_view(td, pm_view):
+            continue
+        proj_list = [p for p in todo_project_list(td) if p in scope_set]
+        if not proj_list:
+            continue
+        todo_payload.append(td)
+
+    log_payload = {}
+    for proj in scope_projects:
+        proj_data = db.get(proj, {}) if isinstance(db.get(proj, {}), dict) else {}
+        comp_rows = {}
+        for comp_name, comp_data in (proj_data.get("部件列表", {}) or {}).items():
+            logs = [lg for lg in ((comp_data or {}).get("日志流", []) or []) if not is_hidden_system_log(lg)]
+            if logs:
+                comp_rows[str(comp_name).strip()] = logs
+        if comp_rows:
+            log_payload[proj] = comp_rows
+
+    payload = {
+        "pm_view": str(pm_view or "").strip(),
+        "today": str(datetime.date.today()),
+        "projects": scope_projects,
+        "locations": [str(x).strip() for x in (locations or []) if str(x).strip()],
+        "todos": todo_payload,
+        "logs": log_payload,
+    }
+    _hashlib = globals().get("hashlib") or __import__("hashlib")
+    _json = globals().get("json") or __import__("json")
+    return _hashlib.md5(
+        _json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+@lru_cache(maxsize=48)
+def _build_print_tracking_auto_rows_cached(pm_view, scope_projects_key, locations_key, scope_signature):
+    scope_projects = list(scope_projects_key or [])
+    locations = list(locations_key or [])
+    auto_rows = []
+    auto_rows.extend(_build_auto_print_rows_from_todo(pm_view, scope_projects, locations))
+    auto_rows.extend(_build_auto_print_rows_from_logs(scope_projects, locations, days=30))
+    return auto_rows
+
+
 def render_print_tracking_board(pm_view, visible_projects, ui_prefix="print_track"):
     st.title("\U0001f5a8\ufe0f \u6253\u5370\u8ffd\u8e2a")
     st.caption("\u81ea\u52a8\u6c47\u805a\u5f85\u529e/\u65e5\u5fd7\u4e2d\u7684\u6253\u5370\u4fe1\u606f\uff0c\u5e76\u7edf\u4e00\u8ffd\u8e2a\uff1a\u662f\u5426\u5b89\u6392\u6253\u5370\u3001\u7ed9\u8c01\u6253\u3001\u662f\u5426\u6536\u5230\u4ef6\u3002")
@@ -11131,9 +11574,27 @@ def render_print_tracking_board(pm_view, visible_projects, ui_prefix="print_trac
     scope_projects = _normalize_visible_print_projects(visible_projects)
     stored_rows, stored_rows_outside_scope, scoped_projects = _split_print_tracking_rows_by_scope(stored_rows_all, visible_projects)
 
-    auto_rows = []
-    auto_rows.extend(_build_auto_print_rows_from_todo(pm_view, scope_projects, locations))
-    auto_rows.extend(_build_auto_print_rows_from_logs(scope_projects, locations, days=30))
+    auto_rows = None
+    sig_builder = globals().get("build_print_tracking_scope_signature")
+    cached_builder = globals().get("_build_print_tracking_auto_rows_cached")
+    if callable(sig_builder) and callable(cached_builder):
+        try:
+            scope_signature = sig_builder(pm_view, scope_projects, locations)
+            auto_rows = [
+                dict(row)
+                for row in cached_builder(
+                    str(pm_view or "").strip(),
+                    tuple(scope_projects),
+                    tuple(locations),
+                    scope_signature,
+                )
+            ]
+        except Exception:
+            auto_rows = None
+    if auto_rows is None:
+        auto_rows = []
+        auto_rows.extend(_build_auto_print_rows_from_todo(pm_view, scope_projects, locations))
+        auto_rows.extend(_build_auto_print_rows_from_logs(scope_projects, locations, days=30))
     merged_rows = _merge_print_tracking_rows(stored_rows, auto_rows)
     project_locked_scope = len(scoped_projects) == 1
 

@@ -2404,6 +2404,53 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         self.assertEqual(rows[0]["最近更新"], "2026-03-28")
         self.assertIn("马海毛到货开始植发", rows[0]["动态"])
 
+    def test_has_project_finish_signal_requires_explicit_project_completion(self) -> None:
+        ns = load_app_functions("norm_text", "has_project_finish_signal")
+
+        self.assertFalse(ns.has_project_finish_signal("", "工程版完成 待设计确认"))
+        self.assertFalse(ns.has_project_finish_signal("", "头雕完成 待回件"))
+        self.assertTrue(ns.has_project_finish_signal("", "项目结束撒花"))
+
+    def test_get_macro_phase_does_not_treat_scoped_completion_as_project_end(self) -> None:
+        ns = load_app_functions(
+            "norm_text",
+            "_is_small_scale_project",
+            "_is_packaging_context",
+            "_allows_design_phase",
+            "has_project_finish_signal",
+            "_macro_phase_rule_matches",
+            "get_macro_phase",
+        )
+        globals_map = ns.get_macro_phase.__globals__
+        globals_map["MACRO_PHASE_RULES"] = [
+            {"phase": "结束", "when": "finish_signal"},
+            {"phase": "暂停", "stage_any": ["暂停", "搁置"], "when": "pause_stage"},
+            {"phase": "暂停", "when": "global_pause"},
+            {"phase": "生产", "stage_any": ["大货", "量产"]},
+            {"phase": "复样", "stage_any": ["复样"]},
+            {"phase": "打印", "when": "print_signal"},
+            {"phase": "涂装", "stage_any": ["涂装", "喷涂", "涂色", "上色"]},
+            {"phase": "开模", "when": "mold_signal"},
+            {"phase": "设计", "when": "design_signal"},
+            {"phase": "工程", "stage_any": ["拆件", "手板", "结构"], "event_any": ["拆件", "结构", "手板", "工程"]},
+            {"phase": "工程", "stage_any": ["设计", "官图"]},
+            {"phase": "建模", "stage_any": ["建模"]},
+            {"phase": "预研", "stage_any": ["预研", "资料验证", "资料确认", "资料预判"]},
+            {"phase": "立项", "stage_any": ["立项"]},
+        ]
+        globals_map["has_pause_signal"] = lambda _text: False
+        globals_map["is_pause_stage"] = lambda _stage: False
+
+        macro = ns.get_macro_phase(
+            "",
+            "工程版完成 待设计确认",
+            comp_name="全局进度",
+            proj_label="1/12黑归-变种人首领",
+            proj_data={"Milestone": "研发中"},
+        )
+
+        self.assertNotEqual(macro, "结束")
+
     def test_switch_main_menu_updates_selection_and_project_context(self) -> None:
         ns = load_app_functions("switch_main_menu")
 
@@ -2790,6 +2837,185 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
 
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["内容"], "头雕待收件")
+
+    def test_strip_update_date_prefix_handles_compact_and_dot_dates(self) -> None:
+        ns = load_app_functions("parse_compact_month_day_marker", "strip_update_date_prefix")
+
+        dt, body, hit = ns.strip_update_date_prefix(
+            "0420更新：预计0420设计过完可以开始补纹",
+            ref_date=datetime.date(2026, 4, 20),
+        )
+        self.assertTrue(hit)
+        self.assertEqual(dt, datetime.date(2026, 4, 20))
+        self.assertEqual(body, "预计0420设计过完可以开始补纹")
+
+        dot_dt, dot_body, dot_hit = ns.strip_update_date_prefix(
+            "3.26ZB文件已下发待雨萱拆件",
+            ref_date=datetime.date(2026, 4, 20),
+        )
+        self.assertTrue(dot_hit)
+        self.assertEqual(dot_dt, datetime.date(2026, 3, 26))
+        self.assertEqual(dot_body, "ZB文件已下发待雨萱拆件")
+
+    def test_parse_compact_month_day_marker_rolls_future_year_boundary(self) -> None:
+        ns = load_app_functions("parse_compact_month_day_marker")
+
+        self.assertEqual(
+            ns.parse_compact_month_day_marker("0102", ref_date=datetime.date(2026, 12, 31)),
+            datetime.date(2027, 1, 2),
+        )
+
+    def test_extract_dashboard_todo_segments_handles_user_batch_update_dates(self) -> None:
+        ns = load_app_functions(
+            "norm_text",
+            "parse_compact_month_day_marker",
+            "strip_update_date_prefix",
+            "extract_planned_compact_date_and_body",
+            "clean_auto_todo_task_text",
+            "extract_event_date_and_body",
+            "classify_text_intent",
+            "classify_temporal_event_route",
+            "extract_followup_todo_clause",
+            "refine_dashboard_todo_task_text",
+            "extract_todo_segment_hints",
+            "extract_dashboard_todo_segments",
+        )
+        globals_map = ns.extract_dashboard_todo_segments.__globals__
+        project_name = "1/12黑归-变种人首领"
+        globals_map["db"].update({project_name: {"部件列表": {"全局进度": {}, "素体": {}}}})
+        globals_map["get_recognition_keywords"] = lambda key: {
+            "未来意图词": ["待", "待办", "需要", "需", "安排", "预计", "可以", "补", "CP"],
+            "过去意图词": ["已", "已经", "完成", "收到", "已安排", "更新"],
+            "日期噪音词": ["预计", "计划", "可", "能", "更新"],
+        }.get(key, [])
+        globals_map["get_component_keyword_map"] = lambda: {"素体": "素体", "补纹": "全局进度"}
+        globals_map["get_stage_keyword_map"] = lambda: {"补纹": "设计", "设计": "设计", "工程": "工程拆件"}
+        globals_map["infer_todo_handoff_prefill"] = lambda td, proj_name: {}
+
+        rows = ns.extract_dashboard_todo_segments(
+            "0420更新：预计0420设计过完可以开始补纹",
+            project_name=project_name,
+            ref_date=datetime.date(2026, 4, 20),
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["route"], "todo")
+        self.assertEqual(rows[0]["due_dt"], datetime.date(2026, 4, 20))
+        self.assertEqual(rows[0]["stage"], "设计")
+        self.assertNotIn("0420更新", rows[0]["task"])
+
+    def test_extract_dashboard_todo_segments_keeps_body_due_after_update_prefix(self) -> None:
+        ns = load_app_functions(
+            "norm_text",
+            "parse_compact_month_day_marker",
+            "strip_update_date_prefix",
+            "extract_planned_compact_date_and_body",
+            "clean_auto_todo_task_text",
+            "extract_event_date_and_body",
+            "classify_text_intent",
+            "classify_temporal_event_route",
+            "extract_followup_todo_clause",
+            "refine_dashboard_todo_task_text",
+            "extract_todo_segment_hints",
+            "extract_dashboard_todo_segments",
+        )
+        globals_map = ns.extract_dashboard_todo_segments.__globals__
+        project_name = "1/6伏地魔"
+        globals_map["db"].update({project_name: {"部件列表": {"配件": {}, "全局进度": {}}}})
+        globals_map["get_recognition_keywords"] = lambda key: {
+            "未来意图词": ["待", "待办", "需要", "需", "安排", "预计", "可以", "补", "CP"],
+            "过去意图词": ["已", "已经", "完成", "收到", "已安排", "更新"],
+            "日期噪音词": ["预计", "计划", "可", "能", "更新"],
+        }.get(key, [])
+        globals_map["get_component_keyword_map"] = lambda: {"配件": "配件", "打样": "配件"}
+        globals_map["get_stage_keyword_map"] = lambda: {"打样": "工厂复样(含胶件/上色等)"}
+        globals_map["infer_todo_handoff_prefill"] = lambda td, proj_name: {}
+
+        rows = ns.extract_dashboard_todo_segments(
+            "0420更新：预计4/25打样",
+            project_name=project_name,
+            ref_date=datetime.date(2026, 4, 20),
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["due_dt"], datetime.date(2026, 4, 25))
+        self.assertFalse(rows[0]["allow_empty_due"])
+
+    def test_print_tracking_scope_signature_includes_current_day(self) -> None:
+        ns = load_app_functions("build_print_tracking_scope_signature")
+        globals_map = ns.build_print_tracking_scope_signature.__globals__
+        globals_map["db"] = {"系统配置": {}, "proj_a": {"部件列表": {}}}
+        globals_map["_normalize_visible_print_projects"] = lambda projects: list(projects or [])
+        globals_map["todo_visible_for_view"] = lambda td, pm_view: True
+        globals_map["todo_project_list"] = lambda td: list(td.get("关联项目列表", []) or [])
+        globals_map["is_hidden_system_log"] = lambda _log: False
+
+        class FakeDate(datetime.date):
+            @classmethod
+            def today(cls):
+                return cls(2026, 4, 20)
+
+        class FakeDateNext(datetime.date):
+            @classmethod
+            def today(cls):
+                return cls(2026, 4, 21)
+
+        old_date = globals_map["datetime"].date
+        try:
+            globals_map["datetime"].date = FakeDate
+            sig_today = ns.build_print_tracking_scope_signature("袁", ["proj_a"], ["内部"])
+            globals_map["datetime"].date = FakeDateNext
+            sig_next = ns.build_print_tracking_scope_signature("袁", ["proj_a"], ["内部"])
+        finally:
+            globals_map["datetime"].date = old_date
+
+        self.assertNotEqual(sig_today, sig_next)
+
+    def test_extract_dashboard_todo_segments_treats_dot_prefix_as_history_marker_not_due(self) -> None:
+        ns = load_app_functions(
+            "norm_text",
+            "parse_compact_month_day_marker",
+            "strip_update_date_prefix",
+            "extract_planned_compact_date_and_body",
+            "clean_auto_todo_task_text",
+            "extract_event_date_and_body",
+            "classify_text_intent",
+            "classify_temporal_event_route",
+            "extract_followup_todo_clause",
+            "refine_dashboard_todo_task_text",
+            "extract_todo_segment_hints",
+            "extract_dashboard_todo_segments",
+        )
+        globals_map = ns.extract_dashboard_todo_segments.__globals__
+        project_name = "小比例megalobox-JOE"
+        globals_map["db"].update({project_name: {"部件列表": {"全局进度": {}}}})
+        globals_map["get_recognition_keywords"] = lambda key: {
+            "未来意图词": ["待", "待办", "需要", "需", "安排", "预计", "可以", "补", "CP"],
+            "过去意图词": ["已", "已经", "完成", "收到", "已安排", "下发"],
+            "日期噪音词": ["预计", "计划", "可", "能", "更新"],
+        }.get(key, [])
+        globals_map["get_component_keyword_map"] = lambda: {}
+        globals_map["get_stage_keyword_map"] = lambda: {"拆件": "工程拆件"}
+        globals_map["infer_todo_handoff_prefill"] = lambda td, proj_name: {}
+
+        rows = ns.extract_dashboard_todo_segments(
+            "3.26ZB文件已下发待雨萱拆件",
+            project_name=project_name,
+            ref_date=datetime.date(2026, 4, 20),
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["route"], "todo")
+        self.assertIsNone(rows[0]["due_dt"])
+        self.assertTrue(rows[0]["allow_empty_due"])
+        self.assertNotIn("3.26", rows[0]["task"])
+
+    def test_extract_dashboard_people_text_handles_waiting_person_actions(self) -> None:
+        ns = load_app_functions("extract_dashboard_people_text")
+
+        self.assertEqual(ns.extract_dashboard_people_text("ZB文件已下发待雨萱拆件"), "雨萱")
+        self.assertEqual(ns.extract_dashboard_people_text("由于宇涵毕设待Venchar接手确认工程返回版"), "Venchar")
+        self.assertEqual(ns.extract_dashboard_people_text("工程版完成 待设计确认"), "")
 
 if __name__ == "__main__":
     unittest.main()
