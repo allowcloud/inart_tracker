@@ -2838,5 +2838,109 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["内容"], "头雕待收件")
 
+    def test_strip_update_date_prefix_handles_compact_and_dot_dates(self) -> None:
+        ns = load_app_functions("parse_compact_month_day_marker", "strip_update_date_prefix")
+
+        dt, body, hit = ns.strip_update_date_prefix(
+            "0420更新：预计0420设计过完可以开始补纹",
+            ref_date=datetime.date(2026, 4, 20),
+        )
+        self.assertTrue(hit)
+        self.assertEqual(dt, datetime.date(2026, 4, 20))
+        self.assertEqual(body, "预计0420设计过完可以开始补纹")
+
+        dot_dt, dot_body, dot_hit = ns.strip_update_date_prefix(
+            "3.26ZB文件已下发待雨萱拆件",
+            ref_date=datetime.date(2026, 4, 20),
+        )
+        self.assertTrue(dot_hit)
+        self.assertEqual(dot_dt, datetime.date(2026, 3, 26))
+        self.assertEqual(dot_body, "ZB文件已下发待雨萱拆件")
+
+    def test_extract_dashboard_todo_segments_handles_user_batch_update_dates(self) -> None:
+        ns = load_app_functions(
+            "norm_text",
+            "parse_compact_month_day_marker",
+            "strip_update_date_prefix",
+            "extract_planned_compact_date_and_body",
+            "clean_auto_todo_task_text",
+            "extract_event_date_and_body",
+            "classify_text_intent",
+            "classify_temporal_event_route",
+            "extract_followup_todo_clause",
+            "refine_dashboard_todo_task_text",
+            "extract_todo_segment_hints",
+            "extract_dashboard_todo_segments",
+        )
+        globals_map = ns.extract_dashboard_todo_segments.__globals__
+        project_name = "1/12黑归-变种人首领"
+        globals_map["db"].update({project_name: {"部件列表": {"全局进度": {}, "素体": {}}}})
+        globals_map["get_recognition_keywords"] = lambda key: {
+            "未来意图词": ["待", "待办", "需要", "需", "安排", "预计", "可以", "补", "CP"],
+            "过去意图词": ["已", "已经", "完成", "收到", "已安排", "更新"],
+            "日期噪音词": ["预计", "计划", "可", "能", "更新"],
+        }.get(key, [])
+        globals_map["get_component_keyword_map"] = lambda: {"素体": "素体", "补纹": "全局进度"}
+        globals_map["get_stage_keyword_map"] = lambda: {"补纹": "设计", "设计": "设计", "工程": "工程拆件"}
+        globals_map["infer_todo_handoff_prefill"] = lambda td, proj_name: {}
+
+        rows = ns.extract_dashboard_todo_segments(
+            "0420更新：预计0420设计过完可以开始补纹",
+            project_name=project_name,
+            ref_date=datetime.date(2026, 4, 20),
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["route"], "todo")
+        self.assertEqual(rows[0]["due_dt"], datetime.date(2026, 4, 20))
+        self.assertEqual(rows[0]["stage"], "设计")
+        self.assertNotIn("0420更新", rows[0]["task"])
+
+    def test_extract_dashboard_todo_segments_treats_dot_prefix_as_history_marker_not_due(self) -> None:
+        ns = load_app_functions(
+            "norm_text",
+            "parse_compact_month_day_marker",
+            "strip_update_date_prefix",
+            "extract_planned_compact_date_and_body",
+            "clean_auto_todo_task_text",
+            "extract_event_date_and_body",
+            "classify_text_intent",
+            "classify_temporal_event_route",
+            "extract_followup_todo_clause",
+            "refine_dashboard_todo_task_text",
+            "extract_todo_segment_hints",
+            "extract_dashboard_todo_segments",
+        )
+        globals_map = ns.extract_dashboard_todo_segments.__globals__
+        project_name = "小比例megalobox-JOE"
+        globals_map["db"].update({project_name: {"部件列表": {"全局进度": {}}}})
+        globals_map["get_recognition_keywords"] = lambda key: {
+            "未来意图词": ["待", "待办", "需要", "需", "安排", "预计", "可以", "补", "CP"],
+            "过去意图词": ["已", "已经", "完成", "收到", "已安排", "下发"],
+            "日期噪音词": ["预计", "计划", "可", "能", "更新"],
+        }.get(key, [])
+        globals_map["get_component_keyword_map"] = lambda: {}
+        globals_map["get_stage_keyword_map"] = lambda: {"拆件": "工程拆件"}
+        globals_map["infer_todo_handoff_prefill"] = lambda td, proj_name: {}
+
+        rows = ns.extract_dashboard_todo_segments(
+            "3.26ZB文件已下发待雨萱拆件",
+            project_name=project_name,
+            ref_date=datetime.date(2026, 4, 20),
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["route"], "todo")
+        self.assertIsNone(rows[0]["due_dt"])
+        self.assertTrue(rows[0]["allow_empty_due"])
+        self.assertNotIn("3.26", rows[0]["task"])
+
+    def test_extract_dashboard_people_text_handles_waiting_person_actions(self) -> None:
+        ns = load_app_functions("extract_dashboard_people_text")
+
+        self.assertEqual(ns.extract_dashboard_people_text("ZB文件已下发待雨萱拆件"), "雨萱")
+        self.assertEqual(ns.extract_dashboard_people_text("由于宇涵毕设待Venchar接手确认工程返回版"), "Venchar")
+        self.assertEqual(ns.extract_dashboard_people_text("工程版完成 待设计确认"), "")
+
 if __name__ == "__main__":
     unittest.main()
