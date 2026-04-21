@@ -2532,7 +2532,7 @@ def has_project_finish_signal(detail_stage="", event_text=""):
     ]
     has_followup = any(token in evt_txt.lower() if token in ["review"] else token in evt_txt for token in followup_tokens)
     has_scoped_completion = any(token in evt_txt for token in scoped_completion_tokens)
-    if stage_txt == "✅ 已完成(结束)":
+    if norm_text(stage_txt) == norm_text("✅ 已完成(结束)"):
         return not (has_followup or has_scoped_completion)
 
     weak_finish_tokens = ["完成", "结束", "done", "finished"]

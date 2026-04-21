@@ -2524,6 +2524,7 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
 
         self.assertFalse(ns.has_project_finish_signal("✅ 已完成(结束)", "工程版完成 待设计确认"))
         self.assertTrue(ns.has_project_finish_signal("✅ 已完成(结束)", "项目结束撒花"))
+        self.assertTrue(ns.has_project_finish_signal("✅已完成(结束)", ""))
         self.assertEqual(
             ns.get_macro_phase(
                 "✅ 已完成(结束)",
