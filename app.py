@@ -7516,6 +7516,7 @@ def build_project_stage_segments(proj_label, proj_data):
     all_records = []
     today = datetime.date.today()
     proj_base_label = str((proj_data or {}).get("项目名称", "")).strip() or str(proj_label).split(" 📦[", 1)[0].strip()
+    milestone = str((proj_data or {}).get("Milestone", "")).strip()
 
     for comp_name, comp_info in comps.items():
         for log in comp_info.get("日志流", []):
@@ -7570,9 +7571,34 @@ def build_project_stage_segments(proj_label, proj_data):
                             break
 
     if not all_records:
+        if milestone == "暂停研发":
+            pause_dt = today
+            return [{
+                "项目": proj_label,
+                "工序阶段": "暂停",
+                "Start": pause_dt.strftime("%Y-%m-%d"),
+                "Finish": (pause_dt + datetime.timedelta(days=1)).strftime("%Y-%m-%d"),
+                "详情": "• 项目基础阶段为【暂停研发】，但暂无历史日志；甘特按字段态补充暂停标记",
+            }]
         return []
 
     all_records = sorted(all_records, key=lambda x: (x["date"], x["stage"], x["component"], x["event"]))
+    if milestone == "暂停研发" and not stage_records.get("暂停"):
+        pause_anchor = max([x["date"] for x in all_records], default=today)
+        synthetic_pause = {
+            "date": pause_anchor,
+            "stage": "暂停",
+            "component": "全局进度",
+            "event": "项目基础阶段为【暂停研发】，甘特按字段态补充暂停锚点",
+            "review_type": "",
+            "review_result": "",
+            "review_round": "",
+            "raw_stage": "⏸️ 暂停/搁置",
+            "synthetic": True,
+        }
+        stage_records.setdefault("暂停", []).append(synthetic_pause)
+        all_records.append(synthetic_pause)
+        all_records = sorted(all_records, key=lambda x: (x["date"], x["stage"], x["component"], x["event"]))
     first_date = all_records[0]["date"]
     latest_date = all_records[-1]["date"]
     unique_dates = sorted({x["date"] for x in all_records})
@@ -7580,7 +7606,6 @@ def build_project_stage_segments(proj_label, proj_data):
     if isinstance(proj_data, dict) and (not str(proj_data.get("项目名称", "")).strip()):
         proj_data["项目名称"] = proj_base_label
     current_macros = infer_current_macro_stages(proj_data)
-    milestone = str((proj_data or {}).get("Milestone", "")).strip()
 
     if not stage_records["立项"]:
         stage_records["立项"].append({
@@ -9253,15 +9278,35 @@ def render_project_basic_info_editor(sel_proj):
         db[sel_proj]["发货区间"] = new_ship_norm
 
         td = str(datetime.date.today())
-        comps_list = list(db[sel_proj].get("部件列表", {}).keys())
-        t_c = "全局进度" if "全局进度" in comps_list else (comps_list[0] if comps_list else "全局进度")
+        t_c = "全局进度"
+        pause_stage = "⏸️ 暂停/搁置" if "⏸️ 暂停/搁置" in STAGES_UNIFIED else "暂停"
         event_text = " | ".join([f"{k}:{ov}→{nv}" for k, ov, nv in change_items])
-        append_component_log_entry(sel_proj, t_c, {
-            "日期": td,
-            "流转": "系统更新",
-            "工序": ensure_project_component(sel_proj, t_c).get("主流程", STAGES_UNIFIED[0]),
-            "事件": f"[属性更新] {event_text}"
-        })
+        if old_ms != new_ms_norm and new_ms_norm == "暂停研发":
+            append_component_log_entry(sel_proj, t_c, {
+                "日期": td,
+                "流转": "系统更新",
+                "工序": pause_stage,
+                "事件": f"[属性更新] {event_text} [系统] 项目基础阶段切换为暂停研发，已同步甘特暂停锚点",
+            }, resulting_stage=pause_stage, default_stage=pause_stage)
+            for sub_c, sub_info in db[sel_proj].get("部件列表", {}).items():
+                if "全局" in str(sub_c):
+                    continue
+                if not isinstance(sub_info, dict):
+                    continue
+                if sub_info.get("主流程") != pause_stage:
+                    append_component_log_entry(sel_proj, sub_c, {
+                        "日期": td,
+                        "流转": "系统自动",
+                        "工序": pause_stage,
+                        "事件": "[系统] 项目基础阶段已暂停，子部件自动同步为暂停",
+                    }, resulting_stage=pause_stage)
+        else:
+            append_component_log_entry(sel_proj, t_c, {
+                "日期": td,
+                "流转": "系统更新",
+                "工序": ensure_project_component(sel_proj, t_c).get("主流程", STAGES_UNIFIED[0]),
+                "事件": f"[属性更新] {event_text}",
+            })
         save_project_scope(sel_proj)
         st.success("基础信息已更新。")
         st.rerun()

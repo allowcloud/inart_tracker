@@ -263,6 +263,47 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         self.assertEqual(max(seg["Finish"] for seg in build_segments), str(datetime.date.today() + datetime.timedelta(days=1)))
         self.assertTrue(any(seg["Start"] > "2026-03-25" for seg in build_segments))
 
+    def test_build_project_stage_segments_reflects_milestone_pause_without_pause_log(self) -> None:
+        ns = load_app_functions("build_project_stage_segments")
+        globals_map = ns.build_project_stage_segments.__globals__
+        globals_map["is_hidden_system_log"] = lambda log_obj: False
+        globals_map["is_stage_timeline_driver_log"] = lambda log_obj: True
+        globals_map["_parse_log_date"] = lambda log_obj: datetime.datetime.strptime(
+            str((log_obj or {}).get("日期", "")), "%Y-%m-%d"
+        ).date()
+        globals_map["get_macro_phase"] = (
+            lambda detail_stage, event_text="", comp_name="", proj_label="", proj_data=None:
+            "建模" if "建模" in str(detail_stage or "") else ""
+        )
+        globals_map["normalize_review_type"] = lambda value: "(无)"
+        globals_map["infer_current_macro_stages"] = lambda proj_data: {"暂停"}
+        globals_map["get_project_status_bucket"] = lambda milestone: "pause" if milestone == "暂停研发" else "dev"
+        globals_map["get_pause_signal_keywords"] = lambda: ["暂停", "暂缓"]
+
+        proj_data = {
+            "项目名称": "1/6 黑客帝国-Neo（第二部）",
+            "Milestone": "暂停研发",
+            "部件列表": {
+                "全局进度": {
+                    "主流程": "建模(含打印/签样)",
+                    "日志流": [
+                        {"日期": "2026-03-01", "工序": "建模(含打印/签样)", "事件": "立项后建模启动"},
+                        {"日期": "2026-03-02", "工序": "建模(含打印/签样)", "事件": "资料进入建模"},
+                    ],
+                }
+            },
+        }
+
+        segments = ns.build_project_stage_segments("1/6 黑客帝国-Neo（第二部）", proj_data)
+        pause_segments = [seg for seg in segments if str(seg.get("工序阶段", "")).strip() == "暂停"]
+        build_segments = [seg for seg in segments if str(seg.get("工序阶段", "")).strip() == "建模"]
+
+        self.assertTrue(pause_segments)
+        self.assertEqual(pause_segments[0]["Start"], "2026-03-02")
+        self.assertIn("字段态补充暂停锚点", str(pause_segments[0].get("详情", "")))
+        self.assertTrue(build_segments)
+        self.assertEqual(max(seg["Finish"] for seg in build_segments), "2026-03-02")
+
     def test_build_project_stage_segments_extends_live_stage_without_explicit_stage_log(self) -> None:
         ns = load_app_functions("build_project_stage_segments")
         globals_map = ns.build_project_stage_segments.__globals__
