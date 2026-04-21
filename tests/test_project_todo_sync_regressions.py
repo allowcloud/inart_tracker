@@ -2492,6 +2492,50 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
 
         self.assertNotEqual(macro, "结束")
 
+    def test_stale_end_stage_with_followup_is_reclassified_as_engineering(self) -> None:
+        ns = load_app_functions(
+            "norm_text",
+            "_is_small_scale_project",
+            "_is_packaging_context",
+            "_allows_design_phase",
+            "has_project_finish_signal",
+            "_macro_phase_rule_matches",
+            "get_macro_phase",
+        )
+        globals_map = ns.get_macro_phase.__globals__
+        globals_map["MACRO_PHASE_RULES"] = [
+            {"phase": "结束", "when": "finish_signal"},
+            {"phase": "暂停", "stage_any": ["暂停", "搁置"], "when": "pause_stage"},
+            {"phase": "暂停", "when": "global_pause"},
+            {"phase": "生产", "stage_any": ["大货", "量产"]},
+            {"phase": "复样", "stage_any": ["复样"]},
+            {"phase": "打印", "when": "print_signal"},
+            {"phase": "涂装", "stage_any": ["涂装", "喷涂", "涂色", "上色"]},
+            {"phase": "开模", "when": "mold_signal"},
+            {"phase": "设计", "when": "design_signal"},
+            {"phase": "工程", "stage_any": ["拆件", "手板", "结构"], "event_any": ["拆件", "结构", "手板", "工程"]},
+            {"phase": "工程", "stage_any": ["设计", "官图"]},
+            {"phase": "建模", "stage_any": ["建模"]},
+            {"phase": "预研", "stage_any": ["预研", "资料验证", "资料确认", "资料预判"]},
+            {"phase": "立项", "stage_any": ["立项"]},
+        ]
+        globals_map["has_pause_signal"] = lambda _text: False
+        globals_map["is_pause_stage"] = lambda _stage: False
+
+        self.assertFalse(ns.has_project_finish_signal("✅ 已完成(结束)", "工程版完成 待设计确认"))
+        self.assertTrue(ns.has_project_finish_signal("✅ 已完成(结束)", "项目结束撒花"))
+        self.assertTrue(ns.has_project_finish_signal("✅已完成(结束)", ""))
+        self.assertEqual(
+            ns.get_macro_phase(
+                "✅ 已完成(结束)",
+                "工程版完成 待设计确认",
+                comp_name="全局进度",
+                proj_label="1/12黑归-变种人首领",
+                proj_data={"Milestone": "研发中"},
+            ),
+            "工程",
+        )
+
     def test_switch_main_menu_updates_selection_and_project_context(self) -> None:
         ns = load_app_functions("switch_main_menu")
 

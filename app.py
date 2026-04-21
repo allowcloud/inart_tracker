@@ -2509,8 +2509,7 @@ def has_project_finish_signal(detail_stage="", event_text=""):
     if not combined_norm:
         return False
 
-    explicit_finish_tokens = [
-        "✅已完成(结束)",
+    project_finish_tokens = [
         "项目结束撒花",
         "生产结束",
         "项目结束",
@@ -2521,27 +2520,29 @@ def has_project_finish_signal(detail_stage="", event_text=""):
         "完结撒花",
         "结项",
     ]
-    if any(norm_text(token) in combined_norm for token in explicit_finish_tokens):
+    if any(norm_text(token) in combined_norm for token in project_finish_tokens):
         return True
 
-    if stage_txt == "✅ 已完成(结束)":
-        return True
+    followup_tokens = [
+        "待", "确认", "反馈", "review", "复核", "修改", "调整", "测试", "试", "返回",
+        "寄出", "送去", "送给", "交接", "交给", "转交", "文件", "工程版", "一版", "二版", "三版",
+    ]
+    scoped_completion_tokens = [
+        "工程版完成", "文件完成", "拆件完成", "头雕完成", "素体完成", "配件完成", "包装完成",
+    ]
+    has_followup = any(token in evt_txt.lower() if token in ["review"] else token in evt_txt for token in followup_tokens)
+    has_scoped_completion = any(token in evt_txt for token in scoped_completion_tokens)
+    if norm_text(stage_txt) == norm_text("✅ 已完成(结束)"):
+        return not (has_followup or has_scoped_completion)
 
     weak_finish_tokens = ["完成", "结束", "done", "finished"]
     weak_hit = any(token in str(combined).lower() if token in ["done", "finished"] else token in combined for token in weak_finish_tokens)
     if not weak_hit:
         return False
 
-    followup_tokens = [
-        "待", "确认", "反馈", "review", "复核", "修改", "调整", "测试", "试", "返回",
-        "寄出", "送去", "送给", "交接", "交给", "转交", "文件", "工程版", "一版", "二版", "三版",
-    ]
-    if any(token in str(combined).lower() if token in ["review"] else token in combined for token in followup_tokens):
+    if has_followup:
         return False
 
-    scoped_completion_tokens = [
-        "工程版完成", "文件完成", "拆件完成", "头雕完成", "素体完成", "配件完成", "包装完成",
-    ]
     if any(token in combined for token in scoped_completion_tokens):
         return False
 
@@ -7927,21 +7928,87 @@ def build_project_stage_segments(proj_label, proj_data):
             "详情": _detail_lines(end_records),
         })
 
-    if milestone not in ["暂停研发", "生产结束", "项目结束撒花🎉", "✅ 已完成(结束)"]:
-        main_segments = [seg for seg in segments if seg.get("工序阶段") not in ["立项", "暂停", "结束"]]
-        main_segments.sort(key=lambda x: (x.get("Start", ""), x.get("Finish", "")))
-        for idx in range(len(main_segments) - 1):
-            cur_seg = main_segments[idx]
-            next_seg = main_segments[idx + 1]
-            try:
-                cur_finish = datetime.datetime.strptime(str(cur_seg.get("Finish", "")), "%Y-%m-%d").date()
-                next_start = datetime.datetime.strptime(str(next_seg.get("Start", "")), "%Y-%m-%d").date()
-            except Exception:
-                continue
-            if cur_finish < next_start:
-                cur_seg["Finish"] = next_start.strftime("%Y-%m-%d")
+    def _segment_date(seg, field_name):
+        try:
+            return datetime.datetime.strptime(str((seg or {}).get(field_name, "")), "%Y-%m-%d").date()
+        except Exception:
+            return None
+
+    main_segments = [seg for seg in segments if seg.get("工序阶段") not in ["立项", "暂停", "结束"]]
+    main_segments.sort(key=lambda x: (x.get("Start", ""), x.get("Finish", "")))
+    terminal_dates = sorted(
+        dt for dt in [_segment_date(seg, "Start") for seg in segments if seg.get("工序阶段") in ["暂停", "结束"]]
+        if isinstance(dt, datetime.date)
+    )
+    for idx in range(len(main_segments) - 1):
+        cur_seg = main_segments[idx]
+        next_seg = main_segments[idx + 1]
+        cur_finish = _segment_date(cur_seg, "Finish")
+        next_start = _segment_date(next_seg, "Start")
+        if not cur_finish or not next_start:
+            continue
+        cutoff = next((dt for dt in terminal_dates if cur_finish <= dt <= next_start), None)
+        target_finish = cutoff or next_start
+        if cur_finish < target_finish:
+            cur_seg["Finish"] = target_finish.strftime("%Y-%m-%d")
+    if main_segments and terminal_dates:
+        last_seg = main_segments[-1]
+        last_start = _segment_date(last_seg, "Start")
+        last_finish = _segment_date(last_seg, "Finish")
+        next_terminal = next((dt for dt in terminal_dates if last_start and dt >= last_start), None)
+        if last_finish and next_terminal and last_finish < next_terminal:
+            last_seg["Finish"] = next_terminal.strftime("%Y-%m-%d")
 
     return segments
+
+
+def close_gantt_display_gaps(df_display, df_source):
+    if df_display is None or getattr(df_display, "empty", True):
+        return df_display
+    if df_source is None or getattr(df_source, "empty", True):
+        return df_display
+
+    out = df_display.copy()
+    for col in ["Start_dt", "Finish_dt"]:
+        if col not in out.columns:
+            raw_col = "Start" if col == "Start_dt" else "Finish"
+            out[col] = pd.to_datetime(out.get(raw_col), errors="coerce")
+        if col not in df_source.columns:
+            raw_col = "Start" if col == "Start_dt" else "Finish"
+            df_source = df_source.copy()
+            df_source[col] = pd.to_datetime(df_source.get(raw_col), errors="coerce")
+
+    terminal_stages = {"暂停", "结束"}
+    non_timeline_stages = {"预研"}
+    for project_name, idx_list in out.groupby("项目").groups.items():
+        display_idxs = sorted(idx_list, key=lambda idx: (out.at[idx, "Start_dt"], out.at[idx, "Finish_dt"]))
+        source_proj = df_source[df_source["项目"] == project_name].copy()
+        if source_proj.empty:
+            continue
+        source_flow = source_proj[~source_proj["工序阶段"].isin(terminal_stages | non_timeline_stages)].copy()
+        terminal_starts = sorted(
+            pd.to_datetime(source_proj[source_proj["工序阶段"].isin(terminal_stages)]["Start"], errors="coerce").dropna().tolist()
+        )
+
+        for pos, row_idx in enumerate(display_idxs):
+            start_dt = out.at[row_idx, "Start_dt"]
+            finish_dt = out.at[row_idx, "Finish_dt"]
+            if pd.isna(start_dt) or pd.isna(finish_dt):
+                continue
+            if pos + 1 < len(display_idxs):
+                target_dt = out.at[display_idxs[pos + 1], "Start_dt"]
+            else:
+                following = source_flow[source_flow["Finish_dt"] > finish_dt]
+                target_dt = following["Finish_dt"].max() if not following.empty else finish_dt
+            if pd.isna(target_dt) or target_dt <= finish_dt:
+                continue
+            cutoff = next((dt for dt in terminal_starts if finish_dt <= dt <= target_dt), None)
+            if cutoff is not None:
+                target_dt = cutoff
+            if target_dt > finish_dt:
+                out.at[row_idx, "Finish_dt"] = target_dt
+                out.at[row_idx, "Finish"] = target_dt.strftime("%Y-%m-%d")
+    return out
 
 
 def render_pm_todo_manager(valid_projs, current_pm):
@@ -13023,7 +13090,7 @@ elif menu == MENU_DASHBOARD:
         else:
             y_order = sorted(df_g["项目"].unique().tolist())
         df_pre = df_g[df_g["工序阶段"] == "预研"].copy()
-        df_g_bars = df_g[df_g["工序阶段"] != "预研"].copy()
+        df_g_bars = df_g[~df_g["工序阶段"].isin(["预研", "暂停", "结束"])].copy()
         def _is_parallel_row(row):
             stage_name = str(row.get("工序阶段", "")).strip()
             proj_name = str(row.get("项目", "")).strip()
@@ -13039,6 +13106,8 @@ elif menu == MENU_DASHBOARD:
         df_parallel = df_g_bars[df_g_bars.apply(_is_parallel_row, axis=1)].copy()
         df_main = df_g_bars[~df_g_bars.apply(_is_parallel_row, axis=1)].copy()
         df_display = df_g_bars if show_parallel_tracks else df_main
+        if not show_parallel_tracks:
+            df_display = close_gantt_display_gaps(df_display, df_g)
         display_stage_order = bar_stage_order if show_parallel_tracks else main_stage_order
         if df_display.empty:
             fig = go.Figure()
@@ -13162,6 +13231,33 @@ elif menu == MENU_DASHBOARD:
                     textfont=dict(size=8, color="white"),
                     name="暂停标记",
                     customdata=df_pause_marks[["说明"]],
+                    hovertemplate="%{customdata[0]}<extra></extra>"
+                ))
+        end_marks = []
+        for row in gantt_data:
+            if str(row.get("工序阶段", "")).strip() != "结束":
+                continue
+            end_marks.append({
+                "日期": str(row.get("Start", "")).strip(),
+                "项目": str(row.get("项目", "")).strip(),
+                "说明": str(row.get("详情", "")).strip() or "结束",
+            })
+        if end_marks:
+            df_end_marks = pd.DataFrame(end_marks)
+            df_end_marks["日期_dt"] = pd.to_datetime(df_end_marks["日期"], errors="coerce")
+            if not showing_full_gantt:
+                df_end_marks = df_end_marks[(df_end_marks["日期_dt"] >= selected_start) & (df_end_marks["日期_dt"] <= selected_end)].copy()
+            if not df_end_marks.empty:
+                fig.add_trace(go.Scatter(
+                    x=df_end_marks["日期"],
+                    y=df_end_marks["项目"],
+                    mode="markers+text",
+                    marker=dict(symbol="square", size=12, color="#334155", line=dict(width=1, color="white")),
+                    text=["结"] * len(df_end_marks),
+                    textposition="middle center",
+                    textfont=dict(size=8, color="white"),
+                    name="结束标记",
+                    customdata=df_end_marks[["说明"]],
                     hovertemplate="%{customdata[0]}<extra></extra>"
                 ))
         if timeline_marks:
