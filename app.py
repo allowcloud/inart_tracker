@@ -3697,6 +3697,135 @@ def todo_sort_key(td, today=None):
     extract_fn = globals().get("extract_deadline_from_text")
     return _impl(td, today=today, deadline_extractor=extract_fn if callable(extract_fn) else None)
 
+
+def build_todo_view_signature(pm_view="", sidebar=False):
+    cfg = db.get("系统配置", {}) if isinstance(db.get("系统配置", {}), dict) else {}
+    todo_all = cfg.get("PM_TODO_LIST", []) if isinstance(cfg.get("PM_TODO_LIST", []), list) else []
+    payload_rows = []
+    for td in todo_all:
+        if not isinstance(td, dict):
+            continue
+        payload_rows.append({
+            "_id": str(td.get("_id", "")).strip(),
+            "任务": str(td.get("任务", "")).strip(),
+            "CPDDL": todo_cpddl_text(td),
+            "完成": bool(td.get("完成")),
+            "完成时间": str(td.get("完成时间", "")).strip(),
+            "创建": str(td.get("创建", "")).strip(),
+            "关联项目": str(td.get("关联项目", "")).strip(),
+            "关联项目列表": [str(x).strip() for x in (td.get("关联项目列表", []) or []) if str(x).strip()],
+            "所属视角": str(td.get("所属视角", "")).strip(),
+            "创建者视角": str(td.get("创建者视角", "")).strip(),
+        })
+    payload = {
+        "pm_view": str(pm_view or "").strip(),
+        "sidebar": bool(sidebar),
+        "today": str(datetime.date.today()),
+        "todos": payload_rows,
+    }
+    _hashlib = globals().get("hashlib") or __import__("hashlib")
+    _json = globals().get("json") or __import__("json")
+    return _hashlib.md5(
+        _json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+@lru_cache(maxsize=64)
+def _build_todo_view_summary_cached(pm_view, sidebar, limit, signature):
+    cfg = db.get("系统配置", {}) if isinstance(db.get("系统配置", {}), dict) else {}
+    todo_all = cfg.get("PM_TODO_LIST", []) if isinstance(cfg.get("PM_TODO_LIST", []), list) else []
+    today = datetime.date.today()
+    visible_checker = todo_visible_for_sidebar if sidebar else todo_visible_for_view
+    visible = [td for td in todo_all if isinstance(td, dict) and visible_checker(td, pm_view)]
+
+    pending_raw = sorted(
+        [td for td in visible if not bool(td.get("完成"))],
+        key=lambda item: todo_sort_key(item, today),
+    )
+    pending_rows = []
+    overdue_rows = []
+    soon_rows = []
+    for td in pending_raw:
+        due = todo_due_date(td)
+        row = {
+            "_id": str(td.get("_id", "")).strip(),
+            "任务": str(td.get("任务", "")).strip() or "(空任务)",
+            "项目": todo_project_text(td) or "未关联项目",
+            "项目列表": todo_project_list(td),
+            "到期": str(due) if isinstance(due, datetime.date) else "",
+            "到期短": due.strftime("%m-%d") if isinstance(due, datetime.date) else "无DDL",
+            "提醒": todo_alert_text(td, today),
+        }
+        pending_rows.append(row)
+        if isinstance(due, datetime.date) and due < today:
+            overdue_rows.append(row)
+        if isinstance(due, datetime.date) and 0 <= (due - today).days <= 3:
+            soon_rows.append(row)
+
+    display_rows = pending_rows[:limit] if isinstance(limit, int) and limit > 0 else pending_rows
+    return {
+        "pending": pending_rows,
+        "display": display_rows,
+        "overdue": overdue_rows,
+        "soon": soon_rows,
+        "pending_count": len(pending_rows),
+        "completed_count": len(visible) - len(pending_rows),
+        "overdue_count": len(overdue_rows),
+        "soon_count": len(soon_rows),
+    }
+
+
+def build_todo_view_summary(pm_view="", sidebar=False, limit=0):
+    sig_builder = globals().get("build_todo_view_signature")
+    cached_builder = globals().get("_build_todo_view_summary_cached")
+    if callable(sig_builder) and callable(cached_builder):
+        try:
+            signature = sig_builder(pm_view=pm_view, sidebar=sidebar)
+            result = cached_builder(str(pm_view or "").strip(), bool(sidebar), int(limit or 0), signature)
+            return {
+                key: ([dict(row) for row in value] if isinstance(value, list) else value)
+                for key, value in dict(result).items()
+            }
+        except Exception:
+            pass
+
+    cfg = db.get("系统配置", {}) if isinstance(db.get("系统配置", {}), dict) else {}
+    todo_all = cfg.get("PM_TODO_LIST", []) if isinstance(cfg.get("PM_TODO_LIST", []), list) else []
+    today = datetime.date.today()
+    visible_checker = todo_visible_for_sidebar if sidebar else todo_visible_for_view
+    visible = [td for td in todo_all if isinstance(td, dict) and visible_checker(td, pm_view)]
+    pending = sorted([td for td in visible if not bool(td.get("完成"))], key=lambda item: todo_sort_key(item, today))
+    rows = []
+    overdue = []
+    soon = []
+    for td in pending:
+        due = todo_due_date(td)
+        row = {
+            "_id": str(td.get("_id", "")).strip(),
+            "任务": str(td.get("任务", "")).strip() or "(空任务)",
+            "项目": todo_project_text(td) or "未关联项目",
+            "项目列表": todo_project_list(td),
+            "到期": str(due) if isinstance(due, datetime.date) else "",
+            "到期短": due.strftime("%m-%d") if isinstance(due, datetime.date) else "无DDL",
+            "提醒": todo_alert_text(td, today),
+        }
+        rows.append(row)
+        if isinstance(due, datetime.date) and due < today:
+            overdue.append(row)
+        if isinstance(due, datetime.date) and 0 <= (due - today).days <= 3:
+            soon.append(row)
+    return {
+        "pending": rows,
+        "display": rows[: int(limit or 0)] if int(limit or 0) > 0 else rows,
+        "overdue": overdue,
+        "soon": soon,
+        "pending_count": len(rows),
+        "completed_count": len(visible) - len(rows),
+        "overdue_count": len(overdue),
+        "soon_count": len(soon),
+    }
+
+
 def todo_scope_of(td):
     from core.shared_logic import todo_scope_of as _impl
 
@@ -8536,30 +8665,27 @@ def render_pm_todo_manager(valid_projs, current_pm):
     st.caption("建议：待办先做轻量提醒；图片、附件、流转详情统一在【细分配件交接工作台】里补充。")
     return [td for td in todo_all if todo_visible_for_view(td, current_pm)]
 def render_sidebar_todo_panel(pm_view):
-    cfg = db.setdefault("系统配置", {})
-    todo_all = cfg.setdefault("PM_TODO_LIST", [])
-    today = datetime.date.today()
-    visible = [td for td in todo_all if todo_visible_for_sidebar(td, pm_view)]
-    pending = sorted([td for td in visible if not td.get("完成")], key=lambda x: todo_sort_key(x, today))
-    completed_count = len([td for td in visible if td.get("完成")])
+    summary = build_todo_view_summary(pm_view, sidebar=True, limit=6)
+    pending = summary.get("display", [])
+    pending_count = int(summary.get("pending_count", 0) or 0)
+    completed_count = int(summary.get("completed_count", 0) or 0)
 
     st.sidebar.divider()
     st.sidebar.markdown("### 🗂️ 待办")
-    st.sidebar.caption(f"未完成 {len(pending)} | 已完成 {completed_count}")
+    st.sidebar.caption(f"未完成 {pending_count} | 已完成 {completed_count}")
     if not pending:
         st.sidebar.caption("当前视角下没有未完成待办。")
         return
 
-    for idx, td in enumerate(pending[:6], 1):
+    for idx, td in enumerate(pending, 1):
         task = str(td.get("任务", "")).strip() or "(空任务)"
-        due = todo_due_date(td)
-        due_txt = due.strftime("%m-%d") if due else "无DDL"
-        proj = todo_project_text(td) or "(未关联项目)"
-        status_icon = todo_alert_text(td, today).split(" ")[0]
+        due_txt = str(td.get("到期短", "")).strip() or "无DDL"
+        proj = str(td.get("项目", "")).strip() or "(未关联项目)"
+        status_icon = str(td.get("提醒", "")).strip().split(" ")[0] if str(td.get("提醒", "")).strip() else "⚪"
         st.sidebar.markdown(f"`{idx}` {status_icon} **{task}**")
         st.sidebar.caption(f"{due_txt} | {proj}")
-    if len(pending) > 6:
-        st.sidebar.caption(f"还有 {len(pending) - 6} 条未完成待办未展开。")
+    if pending_count > len(pending):
+        st.sidebar.caption(f"还有 {pending_count - len(pending)} 条未完成待办未展开。")
 
 
 def apply_pending_main_navigation(menu_options, valid_projects=None):
@@ -9233,13 +9359,11 @@ def render_home_view(valid_projs, current_pm):
         render_fastlog_workspace(valid_projs, current_pm, mode_key="home_fastlog_mode")
         return
 
-    cfg = db.get("系统配置", {}) if isinstance(db, dict) else {}
-    todo_all = cfg.get("PM_TODO_LIST", []) if isinstance(cfg.get("PM_TODO_LIST", []), list) else []
-    visible_todos = [td for td in todo_all if todo_visible_for_view(td, current_pm)]
-    today = datetime.date.today()
-    pending = [td for td in visible_todos if not bool(td.get("完成"))]
-    overdue = [td for td in pending if todo_due_date(td) and todo_due_date(td) < today]
-    soon = [td for td in pending if todo_due_date(td) and 0 <= (todo_due_date(td) - today).days <= 3]
+    todo_summary = build_todo_view_summary(current_pm, sidebar=False, limit=8)
+    pending_rows = list(todo_summary.get("pending", []) or [])
+    focus_todos = list(todo_summary.get("display", []) or [])
+    overdue = list(todo_summary.get("overdue", []) or [])
+    soon = list(todo_summary.get("soon", []) or [])
 
     warning_rows = build_home_project_warning_rows(valid_projs, current_pm)
     stale_rows = [row for row in warning_rows if isinstance(row.get("断更天数"), int) and row["断更天数"] >= 7]
@@ -9252,9 +9376,9 @@ def render_home_view(valid_projs, current_pm):
                 switch_main_menu(MENU_PROJECTS, project_name=proj_txt)
 
     top1, top2, top3, top4 = st.columns(4)
-    top1.metric("未完成待办", len(pending))
-    top2.metric("已逾期待办", len(overdue))
-    top3.metric("3天内到期", len(soon))
+    top1.metric("未完成待办", int(todo_summary.get("pending_count", len(pending_rows)) or 0))
+    top2.metric("已逾期待办", int(todo_summary.get("overdue_count", len(overdue)) or 0))
+    top3.metric("3天内到期", int(todo_summary.get("soon_count", len(soon)) or 0))
     top4.metric("断更≥7天项目", len(stale_rows))
 
     qa1, qa2, qa3 = st.columns(3)
@@ -9273,14 +9397,12 @@ def render_home_view(valid_projs, current_pm):
 
     with left_col:
         st.markdown("**今日待办**")
-        focus_todos = sorted(pending, key=lambda td: todo_sort_key(td, today))[:8]
         if focus_todos:
             for idx, td in enumerate(focus_todos, start=1):
-                proj_list = todo_project_list(td)
-                proj_text = todo_project_text(td) or "未关联项目"
-                due = todo_due_date(td)
-                due_txt = str(due) if due else "无DDL"
-                alert_txt = todo_alert_text(td, today)
+                proj_list = list(td.get("项目列表", []) or [])
+                proj_text = str(td.get("项目", "")).strip() or "未关联项目"
+                due_txt = str(td.get("到期", "")).strip() or "无DDL"
+                alert_txt = str(td.get("提醒", "")).strip()
                 c1, c2 = st.columns([4.0, 1.0])
                 with c1:
                     st.markdown(f"`{idx}` **{str(td.get('任务', '')).strip() or '(空任务)'}**")
@@ -9325,16 +9447,16 @@ def render_home_view(valid_projs, current_pm):
         for td in overdue[:5]:
             warning_cards.append({
                 "类型": "待办逾期",
-                "项目": todo_project_text(td) or "未关联项目",
+                "项目": str(td.get("项目", "")).strip() or "未关联项目",
                 "说明": str(td.get("任务", "")).strip(),
-                "跳转项目": (todo_project_list(td)[0] if todo_project_list(td) else ""),
+                "跳转项目": ((td.get("项目列表", []) or [""])[0] if td.get("项目列表") else ""),
             })
         for td in soon[:5]:
             warning_cards.append({
                 "类型": "即将到期",
-                "项目": todo_project_text(td) or "未关联项目",
+                "项目": str(td.get("项目", "")).strip() or "未关联项目",
                 "说明": str(td.get("任务", "")).strip(),
-                "跳转项目": (todo_project_list(td)[0] if todo_project_list(td) else ""),
+                "跳转项目": ((td.get("项目列表", []) or [""])[0] if td.get("项目列表") else ""),
             })
         for row in stale_rows[:5]:
             warning_cards.append({
