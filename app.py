@@ -469,6 +469,14 @@ def collect_stage_activity(raw_logs, stages):
     for log in raw_logs:
         stg = log.get('工序', ''); evt = log.get('事件', '')
         if stg in stages:
+            if norm_text(stg) == norm_text("✅ 已完成(结束)") and not has_project_finish_signal(stg, evt):
+                fallback_stage = matrix_stage_from_macro_phase(
+                    get_macro_phase(stg, evt),
+                    stages,
+                )
+                if fallback_stage in stages and fallback_stage != "✅ 已完成(结束)":
+                    active_stages.add(fallback_stage)
+                continue
             active_stages.add(stg)
             if any(k in evt for k in ["彻底完成", "OK", "通过", "完结", "结束", "撒花"]):
                 active_stages.discard(stg); completed_stages.add(stg)
@@ -491,6 +499,58 @@ def collect_stage_activity(raw_logs, stages):
     if active_stages or completed_stages:
         active_stages.discard("立项"); completed_stages.add("立项")
     return active_stages, completed_stages
+
+def matrix_stage_from_macro_phase(macro_phase, stages):
+    macro = str(macro_phase or "").strip()
+    candidates = {
+        "预研": ["预研"],
+        "立项": ["立项"],
+        "建模": ["建模(含打印/签样)", "建模"],
+        "打印": ["建模(含打印/签样)", "建模"],
+        "涂装": ["涂装"],
+        "设计": ["设计"],
+        "工程": ["工程拆件", "手板/结构板"],
+        "开模": ["工厂复样(含胶件/上色等)", "大货"],
+        "复样": ["工厂复样(含胶件/上色等)"],
+        "生产": ["大货"],
+        "暂停": ["⏸️ 暂停/搁置"],
+        "结束": ["✅ 已完成(结束)"],
+    }.get(macro, [])
+    for cand in candidates:
+        if cand in stages:
+            return cand
+    return ""
+
+
+def normalize_matrix_current_stage(cur_stage, raw_logs, stages):
+    stage = str(cur_stage or "").strip()
+    if norm_text(stage) != norm_text("✅ 已完成(结束)"):
+        return stage
+
+    parsed_logs = []
+    for idx, log in enumerate(raw_logs or []):
+        if not isinstance(log, dict):
+            continue
+        try:
+            dt = datetime.datetime.strptime(str(log.get("日期", "")), "%Y-%m-%d").date()
+        except Exception:
+            dt = datetime.date.min
+        parsed_logs.append((dt, idx, log))
+    parsed_logs.sort(key=lambda x: (x[0], x[1]), reverse=True)
+
+    for _, _, log in parsed_logs:
+        log_stage = str(log.get("工序", "")).strip()
+        evt = str(log.get("事件", "")).strip()
+        if norm_text(log_stage) == norm_text("✅ 已完成(结束)"):
+            if has_project_finish_signal(log_stage, evt):
+                return "✅ 已完成(结束)"
+            fallback = matrix_stage_from_macro_phase(get_macro_phase(log_stage, evt), stages)
+            if fallback:
+                return fallback
+            continue
+        if log_stage in stages and not is_pause_stage(log_stage):
+            return log_stage
+    return stage
 
 def get_project_production_start_date(proj_data):
     """推断项目进入生产期（工厂复样/大货或里程碑设为生产中）的起始日期。"""
@@ -14441,11 +14501,12 @@ elif menu == MENU_PROJECTS:
                     display_name = f"{comp_name} 👤 {owner_str}" if owner_str and owner_str != '未分配' else comp_name
                     y_labels_display.append(display_name)
                     cur_stage = comp_info.get('主流程', STAGES_UNIFIED[0])
-                    c_idx = STAGES_UNIFIED.index(cur_stage) if cur_stage in STAGES_UNIFIED else 0
                     active_stages = set()
                     completed_stages = set()
                     stage_recent_logs = {}
                     raw_logs = [log for log in comp_info.get('日志流', []) if not is_hidden_system_log(log)]
+                    cur_stage = normalize_matrix_current_stage(cur_stage, raw_logs, STAGES_UNIFIED)
+                    c_idx = STAGES_UNIFIED.index(cur_stage) if cur_stage in STAGES_UNIFIED else 0
                     sorted_logs_desc = sorted(raw_logs, key=lambda x: x.get('日期', ''), reverse=True)
                     for log in sorted_logs_desc:
                         stg = log.get('工序', '')
