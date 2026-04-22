@@ -2536,6 +2536,43 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
             "工程",
         )
 
+    def test_matrix_does_not_treat_scoped_completion_followup_as_project_done(self) -> None:
+        ns = load_app_functions(
+            "norm_text",
+            "has_project_finish_signal",
+            "matrix_stage_from_macro_phase",
+            "collect_stage_activity",
+            "normalize_matrix_current_stage",
+        )
+        stages = [
+            "预研", "立项", "建模(含打印/签样)", "涂装", "设计",
+            "工程拆件", "手板/结构板", "官图", "工厂复样(含胶件/上色等)",
+            "大货", "⏸️ 暂停/搁置", "✅ 已完成(结束)",
+        ]
+        globals_map = ns.collect_stage_activity.__globals__
+        globals_map["get_macro_phase"] = lambda stage, evt="", **kwargs: "工程"
+        globals_map["is_pause_stage"] = lambda stage: "暂停" in str(stage or "")
+        ns.normalize_matrix_current_stage.__globals__["get_macro_phase"] = globals_map["get_macro_phase"]
+        ns.normalize_matrix_current_stage.__globals__["is_pause_stage"] = globals_map["is_pause_stage"]
+
+        logs = [
+            {
+                "日期": "2026-04-15",
+                "工序": "✅ 已完成(结束)",
+                "事件": "工程版完成 待设计确认",
+            }
+        ]
+
+        active, completed = ns.collect_stage_activity(logs, stages)
+
+        self.assertIn("工程拆件", active)
+        self.assertNotIn("✅ 已完成(结束)", active)
+        self.assertNotIn("✅ 已完成(结束)", completed)
+        self.assertEqual(
+            ns.normalize_matrix_current_stage("✅ 已完成(结束)", logs, stages),
+            "工程拆件",
+        )
+
     def test_switch_main_menu_updates_selection_and_project_context(self) -> None:
         ns = load_app_functions("switch_main_menu")
 
