@@ -873,6 +873,28 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
             "[配件] 待修改狗绳结构 ｜ [手型] 待确认手型角度 ｜ [素体] 已安排打印 ｜ ... 另有1条（共4条）",
         )
 
+    def test_build_dashboard_dynamic_display_merges_same_text_components(self) -> None:
+        ns = load_app_functions("build_dashboard_dynamic_display", "norm_text")
+        globals_map = ns.build_dashboard_dynamic_display.__globals__
+        globals_map["collect_latest_dashboard_dynamic_group_logs"] = lambda project_name, anchor_binding=None: [
+            {"component": "头雕(表情)", "text": "确认头雕放大100.5%，水杯C4待建模", "split_index": 1, "log_index": 0},
+            {"component": "配件", "text": "确认头雕放大100.5%，水杯C4待建模", "split_index": 2, "log_index": 1},
+        ]
+        globals_map["build_project_current_explanation"] = lambda project_name, pm_view=None: {}
+        globals_map["format_todo_reminder_label"] = lambda text, date_text="", action_text="": str(text or "").strip()
+        globals_map["parse_date_safe"] = lambda text: None
+        globals_map["clamp_timeline_date"] = lambda d: d
+        globals_map["event_attention_priority"] = lambda content_text="", action_type="", source_module="", extra_payload=None: 1
+        globals_map["STD_COMPONENTS"] = ["头雕(表情)", "素体", "手型", "服装", "配件", "地台", "包装"]
+
+        text = ns.build_dashboard_dynamic_display(
+            "1/6萨鲁曼",
+            explanation={"来源": "全局大盘", "内容": "确认头雕放大100.5%，水杯C4待建模", "部件": "头雕(表情)"},
+            compact=False,
+        )
+
+        self.assertEqual(text, "[头雕(表情)][配件] 确认头雕放大100.5%，水杯C4待建模")
+
     def test_build_dashboard_dynamic_display_dedupes_same_todo_reminder(self) -> None:
         ns = load_app_functions("build_dashboard_dynamic_display")
         globals_map = ns.build_dashboard_dynamic_display.__globals__
@@ -904,6 +926,39 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         )
 
         self.assertEqual(text, "[地台] 冰川地台的防雾帮件有水纹，需确认是否能上色盖住")
+
+    def test_pending_todo_explanation_promotes_over_stale_progress(self) -> None:
+        ns = load_app_functions(
+            "norm_text",
+            "parse_date_safe",
+            "clamp_timeline_date",
+            "_normalize_standard_event_component",
+            "normalize_linkage_match_text",
+            "build_explanation_identity",
+            "same_event_match_score",
+            "should_promote_todo_explanation",
+        )
+        today = datetime.date.today()
+        current = {
+            "来源": "全局大盘",
+            "日期": str(today - datetime.timedelta(days=30)),
+            "内容": "ZB文件已下发待雨萱拆件",
+            "部件": "全局进度",
+            "阶段": "工程拆件",
+        }
+        todo_exp = {
+            "来源": "To-do",
+            "动作": "待办提醒",
+            "意图": "todo",
+            "日期": str(today),
+            "提醒日期": str(today + datetime.timedelta(days=5)),
+            "内容": "0420更新：本周手板组好，预计这周可以把文件给工程",
+            "原始文本": "0420更新：本周手板组好，预计这周可以把文件给工程",
+            "部件": "全局进度",
+            "阶段": "工程拆件",
+        }
+
+        self.assertTrue(ns.should_promote_todo_explanation(current, todo_exp))
 
     def test_extract_event_date_and_body_does_not_treat_decimal_like_text_as_date(self) -> None:
         ns = load_app_functions("extract_event_date_and_body")
@@ -1346,6 +1401,61 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
         self.assertFalse(rows[0]["allow_empty_due"])
         self.assertEqual(rows[0]["component"], "\u914d\u4ef6")
         self.assertEqual(rows[0]["stage"], "\u5de5\u5382\u590d\u6837(\u542b\u80f6\u4ef6/\u4e0a\u8272\u7b49)")
+
+    def test_extract_dashboard_todo_segments_shares_trailing_cp_across_voice_segments(self) -> None:
+        ns = load_app_functions(
+            "clean_auto_todo_task_text",
+            "refine_dashboard_todo_task_text",
+            "extract_event_date_and_body",
+            "classify_text_intent",
+            "classify_temporal_event_route",
+            "extract_followup_todo_clause",
+            "extract_dashboard_todo_segments",
+            "extract_todo_segment_hints",
+        )
+        globals_map = ns.extract_dashboard_todo_segments.__globals__
+        project_name = "1/6\u739b\u5947\u739b"
+        globals_map["db"].update(
+            {
+                project_name: {
+                    "\u90e8\u4ef6\u5217\u8868": {
+                        "\u5934\u96d5(\u8868\u60c5)": {},
+                        "\u5730\u53f0": {},
+                        "\u5168\u5c40\u8fdb\u5ea6": {},
+                    }
+                }
+            }
+        )
+        globals_map["norm_text"] = lambda text: str(text or "").strip().lower().replace(" ", "")
+        globals_map["get_recognition_keywords"] = lambda key: {
+            "\u672a\u6765\u610f\u56fe\u8bcd": ["\u5f85", "\u5f85\u529e", "\u9700\u8981", "\u9700", "\u9884\u8ba1", "cp"],
+            "\u8fc7\u53bb\u610f\u56fe\u8bcd": ["\u5df2", "\u5df2\u7ecf", "\u5b8c\u6210", "\u6536\u5230", "\u5b89\u6392\u4e86", "\u5df2\u5b89\u6392"],
+            "\u65e5\u671f\u566a\u97f3\u8bcd": ["\u9884\u8ba1", "\u5de6\u53f3", "\u5927\u6982", "\u7ea6"],
+        }.get(key, [])
+        globals_map["get_component_keyword_map"] = lambda: {
+            "\u5934\u53d1\u7403\u5934\u4f4d": "\u5934\u96d5(\u8868\u60c5)",
+            "\u7403\u5934": "\u5934\u96d5(\u8868\u60c5)",
+            "\u5934": "\u5934\u96d5(\u8868\u60c5)",
+            "\u5730\u53f0": "\u5730\u53f0",
+        }
+        globals_map["get_stage_keyword_map"] = lambda: {
+            "\u91cd\u65b0\u6d82": "\u6d82\u88c5",
+            "\u8865\u6f06": "\u6d82\u88c5",
+            "\u624b\u677f": "\u624b\u677f/\u7ed3\u6784\u677f",
+            "\u5b98\u56fe": "\u5b98\u56fe",
+        }
+        globals_map["infer_todo_handoff_prefill"] = lambda td, proj_name: {}
+
+        rows = ns.extract_dashboard_todo_segments(
+            "\u5f85\u62cd\u5b98\u56fe\uff1a\u5934\u5f85VJ\u91cd\u65b0\u6d82\uff1b\u5730\u53f0\u5f85\u8865\u6f06\uff1b\u5934\u53d1\u7403\u5934\u4f4d\u5f85\u624b\u677f\u52a0\u56fa\uff1bCP4/28",
+            project_name=project_name,
+            ref_date=datetime.date(2026, 4, 23),
+        )
+
+        self.assertEqual(len(rows), 3)
+        self.assertTrue(all(row["due_dt"] == datetime.date(2026, 4, 28) for row in rows))
+        self.assertEqual([row["component"] for row in rows], ["\u5934\u96d5(\u8868\u60c5)", "\u5730\u53f0", "\u5934\u96d5(\u8868\u60c5)"])
+        self.assertEqual([row["task"] for row in rows], ["\u5934\u5f85VJ\u91cd\u65b0\u6d82", "\u5730\u53f0\u5f85\u8865\u6f06", "\u5934\u53d1\u7403\u5934\u4f4d\u5f85\u624b\u677f\u52a0\u56fa"])
 
     def test_extract_todo_segment_hints_maps_version_feedback_to_head_modeling(self) -> None:
         ns = load_app_functions("norm_text", "extract_todo_segment_hints")
