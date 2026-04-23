@@ -1005,6 +1005,24 @@ class ProjectTodoSyncRegressionTest(unittest.TestCase):
 
         self.assertEqual(repaired, ["1/6 Batman"])
 
+    def test_get_component_owner_text_is_safe_for_workbench_todo_autofill(self) -> None:
+        ns = load_app_functions("get_component_owner_text")
+        ns.db.update(
+            {
+                "1/6 Test": {
+                    "部件列表": {
+                        "全局进度": {"负责人": "袁"},
+                        "配件": {"负责人": "工程-平姐"},
+                    }
+                }
+            }
+        )
+
+        self.assertEqual(ns.get_component_owner_text("1/6 Test", "配件"), "工程-平姐")
+        self.assertEqual(ns.get_component_owner_text("1/6 Test", "🌐 全局进度 (Overall)"), "袁")
+        self.assertEqual(ns.get_component_owner_text("1/6 Test", "不存在部件"), "")
+        self.assertEqual(ns.get_component_owner_text("不存在项目", "配件"), "")
+
     def test_append_standard_event_entry_updates_todo_recent_linkage(self) -> None:
         ns = load_app_functions(
             "norm_text",

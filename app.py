@@ -2515,6 +2515,20 @@ def ensure_project_component(proj_name, comp_name, default_stage=None):
     )
 
 
+def get_component_owner_text(project_name, component_name):
+    proj = str(project_name or "").strip()
+    comp = str(component_name or "").strip()
+    if comp == "🌐 全局进度 (Overall)":
+        comp = "全局进度"
+    if not comp:
+        comp = "全局进度"
+    pdata = db.get(proj, {}) if isinstance(db, dict) and isinstance(db.get(proj, {}), dict) else {}
+    comp_info = (pdata.get("部件列表", {}) or {}).get(comp, {})
+    if not isinstance(comp_info, dict):
+        comp_info = {}
+    return str(comp_info.get("负责人", "")).strip()
+
+
 def normalize_component_log_entry(log_entry, fallback_date=None, write_time=""):
     from core.project_ops import normalize_component_log_entry as _impl
 
@@ -15417,7 +15431,7 @@ elif menu == MENU_PROJECTS:
                                     str(wb_text).strip(),
                                     forced_due_dt=temporal_date,
                                     forced_task_body=temporal_body,
-                                    people_text=str(comp_data.get("负责人", "")).strip(),
+                                    people_text=get_component_owner_text(sel_proj, actual_c),
                                     actor=current_pm if current_pm != "所有人" else "系统",
                                     prefer_existing_pending=True,
                                     return_payload=True,
