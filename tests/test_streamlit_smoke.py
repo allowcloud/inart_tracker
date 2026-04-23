@@ -112,6 +112,44 @@ class StreamlitSmokeTest(unittest.TestCase):
         )
         self.assertIn("HOME_DASHBOARD_JUMP_OK", proc.stdout)
 
+    def test_home_dashboard_recovers_legacy_workspace_value(self) -> None:
+        script = textwrap.dedent(
+            f"""
+            from pathlib import Path
+            from streamlit.testing.v1 import AppTest
+
+            app_path = Path(r"{APP_PATH}")
+            at = AppTest.from_file(str(app_path), default_timeout=30)
+            at.session_state["home_workspace_mode"] = "今日总览"
+            at.run()
+            if at.exception:
+                raise SystemExit("legacy home run exceptions: " + " | ".join(str(x.value) for x in at.exception))
+
+            jump_btn = next((b for b in at.button if str(getattr(b, "key", "")) == "home_jump_dashboard"), None)
+            if jump_btn is None:
+                raise SystemExit("home dashboard content missing after legacy workspace value")
+
+            print("HOME_LEGACY_WORKSPACE_OK")
+            """
+        )
+
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=REPO_ROOT,
+            env={**os.environ, "INART_ALLOW_MEMORY_DB": "1"},
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+
+        self.assertEqual(
+            proc.returncode,
+            0,
+            f"stdout:\n{proc.stdout}\n\nstderr:\n{proc.stderr}",
+        )
+        self.assertIn("HOME_LEGACY_WORKSPACE_OK", proc.stdout)
+
     def test_fastlog_renders_without_exceptions(self) -> None:
         script = textwrap.dedent(
             f"""
