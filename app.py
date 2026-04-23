@@ -846,6 +846,9 @@ MENU_MAINTENANCE  = "🛠️ 数据维护"
 MENU_PACKING      = "📦 包装与入库特殊领用（隐藏）"
 MENU_COST         = "💰 专属成本台账（隐藏）"
 MENU_GUIDE        = "📖 新手使用指南（隐藏）"
+HOME_WORKSPACE_DASHBOARD = "📌 今日总览"
+HOME_WORKSPACE_FASTLOG = "📝 速记"
+HOME_WORKSPACE_OPTIONS = [HOME_WORKSPACE_DASHBOARD, HOME_WORKSPACE_FASTLOG]
 
 TODO_NEW_PROJECT_OPTION = "➕ 新增项目..."
 TODO_NEW_PERSON_OPTION = "➕ 新增关联人员..."
@@ -9195,35 +9198,139 @@ def _build_home_project_warning_rows_cached(project_names_key, pm_view, db_sig):
     return rows
 
 
-def build_home_warning_db_signature():
+def _compact_log_signature_rows(logs, limit=6):
+    rows = []
+    for lg in (logs or []):
+        if not isinstance(lg, dict):
+            continue
+        rows.append({
+            "_id": str(lg.get("_id", "")).strip(),
+            "日期": str(lg.get("日期", "")).strip(),
+            "流转": str(lg.get("流转", "")).strip(),
+            "工序": str(lg.get("工序", "")).strip(),
+            "事件": str(lg.get("事件", "")).strip(),
+            "动作": str(lg.get("动作", "")).strip(),
+        })
+    rows.sort(key=lambda item: (item.get("日期", ""), item.get("_id", ""), item.get("事件", "")), reverse=True)
+    return rows[: max(1, int(limit or 1))]
+
+
+def _compact_project_warning_payload(project_name):
+    proj = str(project_name or "").strip()
+    pdata = db.get(proj, {}) if isinstance(db.get(proj, {}), dict) else {}
+    components_payload = {}
+    for comp_name, comp_info in (pdata.get("部件列表", {}) or {}).items():
+        if not isinstance(comp_info, dict):
+            continue
+        logs = comp_info.get("日志流", []) if isinstance(comp_info.get("日志流", []), list) else []
+        components_payload[str(comp_name)] = {
+            "主流程": str(comp_info.get("主流程", "")).strip(),
+            "日志数": len(logs),
+            "最近日志": _compact_log_signature_rows(logs, limit=6),
+        }
+    return {
+        "负责人": str(pdata.get("负责人", "")).strip(),
+        "Milestone": str(pdata.get("Milestone", "")).strip(),
+        "Target": str(pdata.get("Target", "")).strip(),
+        "发货区间": str(pdata.get("发货区间", "")).strip(),
+        "部件列表": components_payload,
+    }
+
+
+def build_home_warning_db_signature(project_names=None, pm_view=None):
     cfg_for_sig = db.get("系统配置", {}) if isinstance(db.get("系统配置", {}), dict) else {}
+    if project_names is None:
+        project_names = [
+            k for k, v in db.items()
+            if k != "系统配置" and isinstance(v, dict)
+        ]
+    proj_names = tuple(str(x).strip() for x in (project_names or []) if str(x).strip())
+    std_events = []
+    for evt in (cfg_for_sig.get("标准事件流", []) or []):
+        if not isinstance(evt, dict):
+            continue
+        evt_proj = str(evt.get("项目", "")).strip()
+        evt_projects_raw = evt.get("项目列表", []) or []
+        if isinstance(evt_projects_raw, str):
+            evt_projects_raw = [evt_projects_raw]
+        evt_projects = [str(x).strip() for x in evt_projects_raw if str(x).strip()]
+        if evt_proj not in proj_names and not any(p in proj_names for p in evt_projects):
+            continue
+        std_events.append({
+            "_id": str(evt.get("_id", "")).strip(),
+            "项目": evt_proj,
+            "项目列表": evt_projects,
+            "日期": str(evt.get("日期", "")).strip(),
+            "来源": str(evt.get("来源", "")).strip(),
+            "动作": str(evt.get("动作", "")).strip(),
+            "部件": str(evt.get("部件", "")).strip(),
+            "阶段": str(evt.get("阶段", "")).strip(),
+            "内容": str(evt.get("内容", "")).strip(),
+            "关联待办": [str(x).strip() for x in (evt.get("关联待办", []) or []) if str(x).strip()],
+        })
+    std_events.sort(key=lambda item: (item.get("日期", ""), item.get("_id", ""), item.get("内容", "")), reverse=True)
+
+    todo_refs = []
+    for td in (cfg_for_sig.get("PM_TODO_LIST", []) or []):
+        if not isinstance(td, dict):
+            continue
+        proj_list_raw = td.get("关联项目列表", []) or []
+        if isinstance(proj_list_raw, str):
+            proj_list_raw = [proj_list_raw]
+        proj_list = [str(x).strip() for x in proj_list_raw if str(x).strip()]
+        single_proj = str(td.get("关联项目", "")).strip()
+        if single_proj and single_proj not in proj_list:
+            proj_list.append(single_proj)
+        if not any(p in proj_names for p in proj_list):
+            continue
+        todo_refs.append({
+            "_id": str(td.get("_id", "")).strip(),
+            "任务": str(td.get("任务", "")).strip(),
+            "CPDDL": todo_cpddl_text(td),
+            "完成": bool(td.get("完成")),
+            "完成时间": str(td.get("完成时间", "")).strip(),
+            "关联项目列表": proj_list,
+            "所属视角": str(td.get("所属视角", "")).strip(),
+            "创建者视角": str(td.get("创建者视角", "")).strip(),
+        })
     sig_payload = {
         "projects": {
-            k: {fk: fv for fk, fv in v.items() if fk not in ("配件清单长图",)}
-            for k, v in db.items()
-            if k != "系统配置" and isinstance(v, dict)
+            proj: _compact_project_warning_payload(proj)
+            for proj in proj_names
         },
         "cfg": {
-            "PM_TODO_LIST": cfg_for_sig.get("PM_TODO_LIST", []),
-            "标准事件流": cfg_for_sig.get("标准事件流", []),
+            "PM_TODO_LIST": todo_refs,
+            "标准事件流": std_events,
             "项目别名": cfg_for_sig.get("项目别名", {}),
         },
+        "pm_view": str(pm_view or "").strip(),
+        "today": str(datetime.date.today()),
     }
-    return hashlib.md5(json.dumps(sig_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+    return hashlib.md5(
+        json.dumps(sig_payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
 
 
 def build_home_project_warning_rows(project_names, pm_view):
     proj_key = tuple(str(x).strip() for x in (project_names or []) if str(x).strip())
     sig_builder = globals().get("build_home_warning_db_signature")
-    if callable(sig_builder):
-        db_sig = sig_builder()
-    else:
-        _hashlib = globals().get("hashlib") or __import__("hashlib")
-        _json = globals().get("json") or __import__("json")
-        db_sig = _hashlib.md5(_json.dumps(db, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+    _hashlib = globals().get("hashlib") or __import__("hashlib")
+    _json = globals().get("json") or __import__("json")
+    try:
+        if callable(sig_builder):
+            db_sig = sig_builder(proj_key, pm_view)
+        else:
+            db_sig = _hashlib.md5(_json.dumps(db, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+    except Exception:
+        db_sig = _hashlib.md5(
+            _json.dumps({"projects": proj_key, "today": str(datetime.date.today())}, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
     cached_builder = globals().get("_build_home_project_warning_rows_cached")
     if callable(cached_builder):
-        return [dict(row) for row in cached_builder(proj_key, str(pm_view or "").strip(), db_sig)]
+        try:
+            return [dict(row) for row in cached_builder(proj_key, str(pm_view or "").strip(), db_sig)]
+        except Exception:
+            pass
 
     rows = []
     today = datetime.date.today()
@@ -9512,32 +9619,56 @@ def render_project_special_groups(sel_proj, current_pm):
                 switch_project_detail_view(sel_proj, "💰 成本")
 
 
+def normalize_home_workspace_mode(value):
+    raw = str(value or "").strip()
+    if raw in HOME_WORKSPACE_OPTIONS:
+        return raw
+    compact = re.sub(r"\s+", "", raw).lower()
+    compact = compact.replace("📌", "").replace("📍", "").replace("🏠", "")
+    if "速记" in compact or "快记" in compact or "fastlog" in compact:
+        return HOME_WORKSPACE_FASTLOG
+    if "今日" in compact or "总览" in compact or "首页" in compact or "dashboard" in compact or "home" in compact:
+        return HOME_WORKSPACE_DASHBOARD
+    return HOME_WORKSPACE_DASHBOARD
+
+
 def render_home_view(valid_projs, current_pm):
     st.title("🏠 今日视图")
 
-    home_workspace_options = ["📌 今日总览", "📝 速记"]
+    home_workspace_options = list(HOME_WORKSPACE_OPTIONS)
     pending_home_focus = str(st.session_state.pop("_pending_home_focus", "")).strip()
-    if pending_home_focus in home_workspace_options:
-        st.session_state["home_workspace_mode"] = pending_home_focus
-    elif str(st.session_state.get("home_workspace_mode", "")).strip() not in home_workspace_options:
-        st.session_state["home_workspace_mode"] = "📌 今日总览"
+    if pending_home_focus:
+        st.session_state["home_workspace_mode"] = normalize_home_workspace_mode(pending_home_focus)
+    else:
+        st.session_state["home_workspace_mode"] = normalize_home_workspace_mode(
+            st.session_state.get("home_workspace_mode", HOME_WORKSPACE_DASHBOARD)
+        )
     home_workspace_mode = st.radio(
         "今日视图工作区",
         home_workspace_options,
         horizontal=True,
         key="home_workspace_mode",
     )
-    if home_workspace_mode == "📝 速记":
+    home_workspace_mode = normalize_home_workspace_mode(home_workspace_mode)
+    if home_workspace_mode == HOME_WORKSPACE_FASTLOG:
         render_fastlog_workspace(valid_projs, current_pm, mode_key="home_fastlog_mode")
         return
 
-    todo_summary = build_todo_view_summary(current_pm, sidebar=False, limit=8)
+    todo_summary = {}
+    try:
+        todo_summary = build_todo_view_summary(current_pm, sidebar=False, limit=8)
+    except Exception as e:
+        st.warning(f"今日待办汇总暂时不可用，页面其它入口已保留：{e}")
     pending_rows = list(todo_summary.get("pending", []) or [])
     focus_todos = list(todo_summary.get("display", []) or [])
     overdue = list(todo_summary.get("overdue", []) or [])
     soon = list(todo_summary.get("soon", []) or [])
 
-    warning_rows = build_home_project_warning_rows(valid_projs, current_pm)
+    try:
+        warning_rows = build_home_project_warning_rows(valid_projs, current_pm)
+    except Exception as e:
+        warning_rows = []
+        st.warning(f"项目断更汇总暂时不可用，先显示待办和快捷入口：{e}")
     stale_rows = [row for row in warning_rows if isinstance(row.get("断更天数"), int) and row["断更天数"] >= 7]
     stale_rows = sorted(stale_rows, key=lambda row: (-int(row.get("断更天数", 0)), str(row.get("项目", ""))))
 
@@ -9651,7 +9782,11 @@ def render_home_view(valid_projs, current_pm):
 
         st.divider()
         st.markdown("**本周重点（轻量版）**")
-        plan_rows, soon_cnt, delay_cnt = build_plan_board_rows(valid_projs)
+        try:
+            plan_rows, soon_cnt, delay_cnt = build_plan_board_rows(valid_projs)
+        except Exception as e:
+            plan_rows, soon_cnt, delay_cnt = [], 0, 0
+            st.warning(f"计划排期汇总暂时不可用：{e}")
         if plan_rows:
             focus_rows = [
                 {
