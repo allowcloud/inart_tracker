@@ -882,7 +882,7 @@ PRINT_TRACK_SOURCE_LABELS = {
 }
 DEFAULT_COMPONENT_KEYWORDS = {
     "头雕": "头雕(表情)", "表情": "头雕(表情)", "头": "头雕(表情)", "眼": "头雕(表情)", "脸": "头雕(表情)",
-    "脖子": "头雕(表情)",
+    "脖子": "头雕(表情)", "球头": "头雕(表情)", "头发球头": "头雕(表情)", "头发球头位": "头雕(表情)",
     "植发": "植发", "头发": "植发", "发": "植发", "马海毛": "头雕(表情)", "毛到货": "头雕(表情)",
     "素体": "素体", "胸皮": "素体", "透明胸皮": "素体", "穿衣素体": "素体",
     "胸": "素体", "内构": "素体", "腿": "素体", "胳膊": "素体", "肉胳膊": "素体", "手臂": "素体",
@@ -890,15 +890,16 @@ DEFAULT_COMPONENT_KEYWORDS = {
     "衣": "服装", "服": "服装", "服装": "服装", "鞋": "服装", "鞋子": "服装", "靴": "服装", "靴子": "服装",
     "包": "包装", "盒": "包装", "包装": "包装",
     "地台": "地台",
-    "扣": "配件", "扣子": "配件", "桩位": "配件", "卡位": "配件", "法杖": "配件", "杯": "配件", "剑": "配件", "配件": "配件",
-    "墨镜": "配件", "眼镜": "配件", "饮料": "配件", "小狗": "配件", "枪械": "配件", "拳套": "配件",
+    "扣": "配件", "扣子": "配件", "桩位": "配件", "卡位": "配件", "法杖": "配件", "杯": "配件", "水杯": "配件", "剑": "配件", "配件": "配件",
+    "墨镜": "配件", "眼镜": "配件", "饮料": "配件", "小狗": "配件", "枪": "配件", "枪械": "配件", "拳套": "配件",
 }
 DEFAULT_STAGE_KEYWORDS = {
     "定价": "立项", "评估": "立项", "开定": "立项",
     "打印": "建模(含打印/签样)", "模型": "建模(含打印/签样)", "缩放": "建模(含打印/签样)",
     "修": "建模(含打印/签样)", "建模": "建模(含打印/签样)", "打样": "建模(含打印/签样)",
-    "涂": "涂装", "色": "涂装",
+    "涂": "涂装", "涂装": "涂装", "补漆": "涂装", "重新涂": "涂装", "上色": "涂装", "色": "涂装",
     "设计": "设计", "原画": "设计", "补纹": "设计",
+    "手板": "手板/结构板", "结构板": "手板/结构板",
     "拆件": "工程拆件", "交接工程": "工程拆件", "转交工程": "工程拆件", "给工程": "工程拆件", "过工程": "工程拆件", "转发工程": "工程拆件", "过FF": "工程拆件", "官图": "官图",
     "开模": "开模", "模具": "开模", "试模": "开模",
     "大货": "大货",
@@ -909,6 +910,9 @@ DEFAULT_COMPONENT_SPLIT_KEYWORDS = {
     "表情": "头雕(表情)",
     "脸": "头雕(表情)",
     "脖子": "头雕(表情)",
+    "球头": "头雕(表情)",
+    "头发球头": "头雕(表情)",
+    "头发球头位": "头雕(表情)",
     "马海毛": "头雕(表情)",
     "毛到货": "头雕(表情)",
     "植发": "植发",
@@ -926,9 +930,11 @@ DEFAULT_COMPONENT_SPLIT_KEYWORDS = {
     "扣子": "配件",
     "桩位": "配件",
     "配件": "配件",
+    "水杯": "配件",
     "墨镜": "配件",
     "饮料": "配件",
     "小狗": "配件",
+    "枪": "配件",
     "枪械": "配件",
 }
 DEFAULT_RECOGNITION_DICT = {
@@ -2509,6 +2515,20 @@ def ensure_project_component(proj_name, comp_name, default_stage=None):
     )
 
 
+def get_component_owner_text(project_name, component_name):
+    proj = str(project_name or "").strip()
+    comp = str(component_name or "").strip()
+    if comp == "🌐 全局进度 (Overall)":
+        comp = "全局进度"
+    if not comp:
+        comp = "全局进度"
+    pdata = db.get(proj, {}) if isinstance(db, dict) and isinstance(db.get(proj, {}), dict) else {}
+    comp_info = (pdata.get("部件列表", {}) or {}).get(comp, {})
+    if not isinstance(comp_info, dict):
+        comp_info = {}
+    return str(comp_info.get("负责人", "")).strip()
+
+
 def normalize_component_log_entry(log_entry, fallback_date=None, write_time=""):
     from core.project_ops import normalize_component_log_entry as _impl
 
@@ -3263,7 +3283,7 @@ def extract_dashboard_people_text(text):
         "修改", "处理", "跟进", "待", "回复", "项目",
     }
     patterns = [
-        r"待\s*([A-Za-z0-9_\-]{1,20}|[\u4e00-\u9fa5]{1,6})(?:拆件|接手|确认|反馈|修改|回复|处理|跟进|跟催|打印|收件|回件|过|补)",
+        r"待\s*([A-Za-z0-9_\-]{1,20}|[\u4e00-\u9fa5]{1,6})(?:拆件|接手|确认|反馈|修改|回复|处理|跟进|跟催|打印|收件|回件|过|补|涂|涂装|补漆|重新涂)",
         r"待\s*([A-Za-z0-9_\-]{1,20}|[\u4e00-\u9fa5]{1,6})\s*(?:接手确认|接手处理)",
         r"(?:已)?(?:转交|交给|发给|给)\s*([A-Za-z0-9_\-]{1,20}|[\u4e00-\u9fa5]{1,6})",
         r"待([A-Za-z0-9_\-]{1,20}|[\u4e00-\u9fa5]{1,6})打样",
@@ -3287,6 +3307,39 @@ def extract_dashboard_todo_segments(text, project_name="", ref_date=None):
         return []
 
     ref = ref_date or datetime.date.today()
+    shared_due_dt = None
+    working_raw_text = raw_text
+
+    trailing_due_match = re.search(
+        r"((?:CP|DDL)\s*(?:20\d{2}[-/年.]?)?\d{1,2}(?:[-/月.]\d{1,2})?)\s*$",
+        working_raw_text,
+        flags=re.I,
+    )
+    if trailing_due_match:
+        due_token = str(trailing_due_match.group(1) or "").strip()
+        date_token_only = re.sub(r"(?i)^(?:CP|DDL)\s*", "", due_token).strip()
+        parsed_due, parsed_body = extract_event_date_and_body(date_token_only, ref_date=ref, prefer_past=False)
+        if not isinstance(parsed_due, datetime.date):
+            planned_extractor = globals().get("extract_planned_compact_date_and_body")
+            parsed_due, parsed_body = planned_extractor(date_token_only, ref_date=ref) if callable(planned_extractor) else (None, date_token_only)
+        parsed_body_clean = re.sub(r"(?i)^(?:CP|DDL)\s*", "", str(parsed_body or "").strip()).strip()
+        if isinstance(parsed_due, datetime.date) and (
+            (not parsed_body_clean)
+            or parsed_body_clean == date_token_only
+        ):
+            shared_due_dt = parsed_due
+            working_raw_text = working_raw_text[: trailing_due_match.start()].strip(" ，,;；|")
+
+    shared_scope_hint = ""
+    scope_match = re.match(
+        r"^\s*((?:待)?(?:拍)?官图|官图|拍图|拍摄)\s*[：:]\s*(.+)$",
+        working_raw_text,
+        flags=re.I,
+    )
+    if scope_match:
+        shared_scope_hint = str(scope_match.group(1) or "").strip()
+        working_raw_text = str(scope_match.group(2) or "").strip()
+
     proj = str(project_name or "").strip()
     proj_comps = list(db.get(proj, {}).get("部件列表", {}).keys()) if proj in db else []
     std_components = globals().get("STD_COMPONENTS", ["头雕(表情)", "素体", "手型", "服装", "配件", "地台", "包装"])
@@ -3376,9 +3429,13 @@ def extract_dashboard_todo_segments(text, project_name="", ref_date=None):
                 return stage_txt
         return ""
 
-    segments = [x.strip() for x in re.split(r"[;；\n]+", raw_text) if x.strip()]
+    segments = [
+        re.sub(r"^[【\[]\s*新\s*[】\]]\s*", "", x.strip()).strip()
+        for x in re.split(r"[;；\n]+", working_raw_text)
+        if x.strip()
+    ]
     if not segments:
-        segments = [raw_text]
+        segments = [working_raw_text]
 
     out = []
     for seg in segments:
@@ -3405,6 +3462,8 @@ def extract_dashboard_todo_segments(text, project_name="", ref_date=None):
                 _marker_dt, marker_body, marker_hit = prefix_stripper(body_text, ref_date=ref) if callable(prefix_stripper) else (None, body_text, False)
                 if marker_hit:
                     body_text = marker_body
+        if shared_scope_hint:
+            hint_text = " ".join([shared_scope_hint, hint_text]).strip()
 
         route_probe = " ".join([body_text, hint_text]).strip()
         route_info = classify_temporal_event_route(route_probe, ref_date=ref, prefer_past=False)
@@ -3421,6 +3480,8 @@ def extract_dashboard_todo_segments(text, project_name="", ref_date=None):
                 due_dt = planned_dt
                 body_without_date = planned_body
                 planned_due_from_body = True
+        if due_dt is None and isinstance(shared_due_dt, datetime.date):
+            due_dt = shared_due_dt
         task_seed = body_without_date or body_text
         followup_picker = globals().get("extract_followup_todo_clause")
         followup_clause = followup_picker(task_seed, route_hint=route) if callable(followup_picker) else ""
@@ -3433,7 +3494,7 @@ def extract_dashboard_todo_segments(text, project_name="", ref_date=None):
             task_seed = follow_body_without_date or followup_clause
             if isinstance(follow_due_dt, datetime.date):
                 due_dt = follow_due_dt
-            elif route == "past":
+            elif route == "past" and not isinstance(shared_due_dt, datetime.date):
                 due_dt = None
             route = "todo"
         elif explicit_history_date_marker and any(tok in task_seed for tok in ["待", "需", "需要", "跟进", "跟催"]):
@@ -3559,6 +3620,23 @@ def expand_dashboard_dynamic_history_entries(text, project_name="", ref_date=Non
     if not raw_text:
         return []
 
+    working_raw_text = raw_text
+    working_raw_text = re.sub(
+        r"(?:CP|DDL)\s*(?:20\d{2}[-/年.]?)?\d{1,2}(?:[-/月.]\d{1,2})?\s*$",
+        "",
+        working_raw_text,
+        flags=re.I,
+    ).strip(" ，,;；|")
+    shared_scope_hint = ""
+    scope_match = re.match(
+        r"^\s*((?:待)?(?:拍)?官图|官图|拍图|拍摄)\s*[：:]\s*(.+)$",
+        working_raw_text,
+        flags=re.I,
+    )
+    if scope_match:
+        shared_scope_hint = str(scope_match.group(1) or "").strip()
+        working_raw_text = str(scope_match.group(2) or "").strip()
+
     proj = str(project_name or "").strip()
     proj_comps = list(db.get(proj, {}).get("部件列表", {}).keys()) if proj in db else []
     comp_kw_getter = globals().get("get_component_keyword_map")
@@ -3566,12 +3644,16 @@ def expand_dashboard_dynamic_history_entries(text, project_name="", ref_date=Non
     comp_kw = comp_kw_getter() if callable(comp_kw_getter) else {}
     stage_kw_map = stage_kw_getter() if callable(stage_kw_getter) else {}
 
-    segments = [x.strip() for x in re.split(r"[;；\n]+", raw_text) if x.strip()]
+    segments = [
+        re.sub(r"^[【\[]\s*新\s*[】\]]\s*", "", x.strip()).strip()
+        for x in re.split(r"[;；\n]+", working_raw_text)
+        if x.strip()
+    ]
     if not segments:
-        segments = [raw_text]
+        segments = [working_raw_text]
 
     hint_rows = extract_todo_segment_hints(
-        raw_text,
+        working_raw_text,
         project_components=proj_comps,
         comp_kw=comp_kw,
         stage_kw_map=stage_kw_map,
@@ -3593,7 +3675,7 @@ def expand_dashboard_dynamic_history_entries(text, project_name="", ref_date=Non
             seg_comps = [x for x in seg_comps if x != "全局进度"]
         if not seg_comps:
             seg_comps = [fallback_comp]
-        seg_stage = str(hint.get("stage", "")).strip() or fallback_stage_name
+        seg_stage = str(hint.get("stage", "")).strip() or ("官图" if "官图" in shared_scope_hint else "") or fallback_stage_name
         for comp_name in list(dict.fromkeys(seg_comps)):
             out.append({
                 "text": seg,
@@ -6442,6 +6524,22 @@ def should_promote_todo_explanation(current_explanation, todo_explanation):
 
     if same_event_match_score(current, todo_exp) >= 3:
         return True
+
+    todo_action = str(todo_exp.get("动作", "") or todo_exp.get("提醒动作", "")).strip()
+    todo_intent = str(todo_exp.get("意图", "")).strip()
+    pending_todo_actions = {"待办提醒", "待办新建", "待办更新", "待办重开"}
+    if todo_action in pending_todo_actions or todo_intent == "todo":
+        current_dt = clamp_timeline_date(parse_date_safe(current.get("日期", "")))
+        todo_due_dt = parse_date_safe(todo_exp.get("提醒日期", "") or todo_exp.get("日期", ""))
+        today = datetime.date.today()
+        if isinstance(current_dt, datetime.date) and current_dt >= today:
+            return False
+        if isinstance(todo_due_dt, datetime.date) and todo_due_dt >= today:
+            return True
+        if isinstance(current_dt, datetime.date) and (today - current_dt).days >= 7:
+            return True
+        if not isinstance(current_dt, datetime.date) and todo_text:
+            return True
     return False
 
 
@@ -6877,13 +6975,57 @@ def build_dashboard_dynamic_display(project_name, explanation=None, pm_view=None
         limit = max(16, int(segment_char_limit or 34))
         if len(text) <= limit:
             return text
-        m = re.match(r"^(\[[^\]]+\]\s*)(.+)$", text)
+        m = re.match(r"^((?:\[[^\]]+\]\s*)+)(.+)$", text)
         if m:
             prefix = str(m.group(1) or "")
             body = str(m.group(2) or "")
             keep = max(8, limit - len(prefix) - 1)
             return f"{prefix}{body[:keep].rstrip()}…"
         return text[: limit - 1].rstrip() + "…"
+
+    def _merge_group_rows_for_display(rows):
+        groups = []
+        index_by_key = {}
+        for idx, row in enumerate(rows or []):
+            row_text = str((row or {}).get("text", "")).strip()
+            if not row_text:
+                continue
+            normalizer = globals().get("norm_text")
+            key = normalizer(row_text) if callable(normalizer) else re.sub(r"\s+", "", row_text).lower()
+            key = key or row_text
+            row_comp = str((row or {}).get("component", "")).strip() or "全局进度"
+            row_attention = int(event_attention_priority(
+                content_text=row_text,
+                action_type=str((row or {}).get("action", "")).strip(),
+                source_module=source_name or "全局大盘",
+            ))
+            if key not in index_by_key:
+                index_by_key[key] = len(groups)
+                groups.append({
+                    "text": row_text,
+                    "components": [],
+                    "attention": row_attention,
+                    "order": idx,
+                })
+            group = groups[index_by_key[key]]
+            if row_comp not in group["components"]:
+                group["components"].append(row_comp)
+            group["attention"] = max(int(group.get("attention", 0) or 0), row_attention)
+            group["order"] = min(int(group.get("order", idx) or idx), idx)
+
+        items = []
+        for group in groups:
+            comps = [str(x).strip() for x in (group.get("components", []) or []) if str(x).strip()]
+            if "全局进度" in comps and len(comps) > 1:
+                comps = [x for x in comps if x != "全局进度"]
+            comps = sorted(list(dict.fromkeys(comps)), key=lambda comp: (_component_rank(comp), comp))
+            label = "".join([f"[{comp}]" for comp in comps]) or "[全局进度]"
+            items.append({
+                "line": f"{label} {str(group.get('text', '')).strip()}".strip(),
+                "attention": int(group.get("attention", 0) or 0),
+                "order": int(group.get("order", 0) or 0),
+            })
+        return items
 
     if source_name in ["全局大盘", "项目日志"]:
         group_rows = collect_latest_dashboard_dynamic_group_logs(proj)
@@ -6902,18 +7044,7 @@ def build_dashboard_dynamic_display(project_name, explanation=None, pm_view=None
                     int(row.get("log_index", 0) or 0),
                 ),
             )
-            display_items.extend([
-                {
-                    "line": f"[{str(row.get('component', '')).strip() or '全局进度'}] {str(row.get('text', '')).strip()}".strip(),
-                    "attention": int(event_attention_priority(
-                        content_text=str(row.get("text", "")).strip(),
-                        action_type=str(row.get("action", "")).strip(),
-                        source_module=source_name or "全局大盘",
-                    )),
-                    "order": idx,
-                }
-                for idx, row in enumerate(sorted_group_rows)
-            ])
+            display_items.extend(_merge_group_rows_for_display(sorted_group_rows))
 
     if not display_items:
         display_items = [{
@@ -8222,6 +8353,7 @@ def render_pm_todo_manager(valid_projs, current_pm):
 
     with st.container():
         st.markdown("##### 快速新增（直接加到下方表格）")
+        st.caption("可直接按你的日常写法录入：`待拍官图：头待VJ重新涂；地台待补漆；CP4/28`。尾部 CP/DDL 会自动套给前面分句，最后统一保存。")
         queued_draft_count = len([td for td in todo_pending_drafts if isinstance(td, dict)])
         if queued_draft_count:
             st.caption(f"当前有 {queued_draft_count} 条待新增草稿，已进入下方表格，等你最后统一保存。")
@@ -14061,6 +14193,7 @@ elif menu == MENU_DASHBOARD:
         st.caption("直接修改基础字段和【最新全盘动态】；日期优先，未来日期转待办，过去日期写回历史，勾选【改写历史】时覆盖当前最新动态。")
         with st.expander("📝 大盘动态识别说明", expanded=False):
             st.caption("多动作请用 `；` 分开。系统会按每句分别识别待办、部件和阶段，并同步拆到项目历史；如 `4/20马海毛到货开始植发；地台贴需修改、彩盒需修改烫色，已转交立宇待打样`。")
+            st.caption("同一句如果命中多个部件且内容相同，大盘会合并展示成 `[头雕(表情)][配件] 同一条内容`；尾部 `CP4/28` 会作为前面分句的共同 DDL。")
 
         def _preview_project_names(name_list, limit=6):
             names = [str(x).strip() for x in (name_list or []) if str(x).strip()]
@@ -15298,7 +15431,7 @@ elif menu == MENU_PROJECTS:
                                     str(wb_text).strip(),
                                     forced_due_dt=temporal_date,
                                     forced_task_body=temporal_body,
-                                    people_text=str(comp_data.get("负责人", "")).strip(),
+                                    people_text=get_component_owner_text(sel_proj, actual_c),
                                     actor=current_pm if current_pm != "所有人" else "系统",
                                     prefer_existing_pending=True,
                                     return_payload=True,
