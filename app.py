@@ -14251,6 +14251,27 @@ elif menu == MENU_DASHBOARD:
                 [str((db.get(str(p).strip(), {}) or {}).get("负责人", "")).strip() for p in editable_df["项目"].tolist()],
             )
 
+        dashboard_visible_projects = list(
+            dict.fromkeys([str(x).strip() for x in editable_df["项目"].tolist() if str(x).strip()])
+        )
+        jump_col1, jump_col2 = st.columns([3.8, 1.2])
+        with jump_col1:
+            dashboard_jump_proj = st.selectbox(
+                "📁 快速进入项目空间（当前表内项目）",
+                [""] + dashboard_visible_projects,
+                key=f"dashboard_project_jump_select_{str(current_pm or 'all').strip()}",
+                help="不影响下方编辑表；先选项目，再直接跳去项目空间。",
+            )
+        with jump_col2:
+            st.write("")
+            if st.button(
+                "进入项目空间",
+                key=f"dashboard_project_jump_btn_{str(current_pm or 'all').strip()}",
+                use_container_width=True,
+                disabled=not dashboard_jump_proj,
+            ):
+                switch_main_menu(MENU_PROJECTS, project_name=dashboard_jump_proj)
+
         dashboard_edit_snapshot = {}
         for rec in editable_df.to_dict("records"):
             proj_key = str(rec.get("项目", "")).strip()
