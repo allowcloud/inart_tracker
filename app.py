@@ -13100,23 +13100,42 @@ st.sidebar.caption("建议流程：先看今日视图，再看全局大盘与甘
 # 备份与恢复
 st.sidebar.divider()
 st.sidebar.markdown("### ⚙️ 数据备份与恢复")
-try:
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        json_bytes = json.dumps(st.session_state.db, ensure_ascii=False, indent=4).encode("utf-8")
-        zf.writestr("database.json", json_bytes)
-        for ref in iter_attachment_refs_in_db(st.session_state.db):
-            raw = read_binary_ref(ref)
-            if raw:
-                zf.writestr(attachment_backup_path(ref), raw)
-    zip_buffer.seek(0)
+backup_package_key = "sidebar_backup_package"
+if st.sidebar.button("📦 生成/刷新备份包", key="sidebar_prepare_full_backup", use_container_width=True):
+    try:
+        zip_buffer = io.BytesIO()
+        attachment_count = 0
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            json_bytes = json.dumps(st.session_state.db, ensure_ascii=False, indent=4).encode("utf-8")
+            zf.writestr("database.json", json_bytes)
+            for ref in iter_attachment_refs_in_db(st.session_state.db):
+                raw = read_binary_ref(ref)
+                if raw:
+                    attachment_count += 1
+                    zf.writestr(attachment_backup_path(ref), raw)
+        zip_buffer.seek(0)
+        st.session_state[backup_package_key] = {
+            "data": zip_buffer.getvalue(),
+            "filename": f"inart_pm_full_backup_{datetime.date.today()}.zip",
+            "created_at": datetime.datetime.now().strftime("%H:%M:%S"),
+            "attachment_count": attachment_count,
+        }
+        st.sidebar.success(f"备份已生成：{attachment_count} 个附件")
+    except Exception as e:
+        st.session_state.pop(backup_package_key, None)
+        st.sidebar.warning(f"备份生成失败: {e}")
+
+backup_package = st.session_state.get(backup_package_key)
+if isinstance(backup_package, dict) and backup_package.get("data"):
     st.sidebar.download_button(
-        "💾 下载全量备份 (数据+图片)", data=zip_buffer,
-        file_name=f"inart_pm_full_backup_{datetime.date.today()}.zip",
+        "💾 下载已生成备份",
+        data=backup_package.get("data", b""),
+        file_name=backup_package.get("filename") or f"inart_pm_full_backup_{datetime.date.today()}.zip",
         mime="application/zip"
     )
-except Exception as e:
-    st.sidebar.warning(f"备份生成失败: {e}")
+    st.sidebar.caption(f"上次生成：{backup_package.get('created_at', '-')}")
+else:
+    st.sidebar.caption("需要下载时再生成备份，日常操作不再自动打包。")
 
 restore_file = st.sidebar.file_uploader("📂 上传备份以恢复", type=["zip", "json"])
 if restore_file is not None and st.sidebar.button("⚠️ 确认覆盖恢复", type="primary"):
