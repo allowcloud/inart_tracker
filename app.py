@@ -1381,13 +1381,22 @@ def _get_cached_mongo_manager(uri, cache_buster=DB_MANAGER_CACHE_BUSTER):
 def _build_db_manager(force_local=False):
     from core.storage import build_storage_manager
 
-    return build_storage_manager(
-        force_local=force_local,
-        json_path=_get_local_data_file(),
-        mongo_uri=_get_mongo_uri(),
-        prefer_local=True,
-        attachment_dir=_get_local_attachment_dir() or None,
-    )
+    kwargs = {
+        "force_local": force_local,
+        "json_path": _get_local_data_file(),
+        "mongo_uri": _get_mongo_uri(),
+        "prefer_local": True,
+    }
+    attachment_dir = _get_local_attachment_dir()
+    if attachment_dir:
+        kwargs["attachment_dir"] = attachment_dir
+    try:
+        return build_storage_manager(**kwargs)
+    except TypeError as exc:
+        if "attachment_dir" not in kwargs or "attachment_dir" not in str(exc):
+            raise
+        kwargs.pop("attachment_dir", None)
+        return build_storage_manager(**kwargs)
 def _ensure_db_shape(db_obj):
     from core.storage import ensure_db_shape as _impl
 
