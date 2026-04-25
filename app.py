@@ -1358,6 +1358,18 @@ def _get_mongo_uri():
         return os.environ.get("MONGO_URI", "")
 
 
+def _get_local_data_file():
+    return (
+        os.environ.get("INART_DATA_FILE", "").strip()
+        or os.environ.get("INART_JSON_PATH", "").strip()
+        or "tracker_data_web_v20.json"
+    )
+
+
+def _get_local_attachment_dir():
+    return os.environ.get("INART_ATTACHMENT_DIR", "").strip()
+
+
 DB_MANAGER_CACHE_BUSTER = "20260309_bootfix_1"
 
 
@@ -1371,9 +1383,10 @@ def _build_db_manager(force_local=False):
 
     return build_storage_manager(
         force_local=force_local,
-        json_path="tracker_data_web_v20.json",
+        json_path=_get_local_data_file(),
         mongo_uri=_get_mongo_uri(),
         prefer_local=True,
+        attachment_dir=_get_local_attachment_dir() or None,
     )
 def _ensure_db_shape(db_obj):
     from core.storage import ensure_db_shape as _impl
@@ -1934,6 +1947,16 @@ def get_storage_backend_name():
 
 def get_storage_attachment_mode():
     return getattr(db_manager, "attachment_mode", "legacy")
+
+
+def get_storage_data_path_label():
+    raw_path = getattr(db_manager, "path", "") or ""
+    if not raw_path:
+        return ""
+    try:
+        return os.path.abspath(str(raw_path))
+    except Exception:
+        return str(raw_path)
 
 
 def derive_attachment_filename(ref):
@@ -13042,6 +13065,9 @@ attachment_mode = get_storage_attachment_mode()
 attachment_label = "GridFS 持久附件" if attachment_mode == "gridfs" else "本地文件引用"
 backend_icon = "🟢" if backend_name == "MongoDB" else "🟡"
 st.sidebar.caption(f"{backend_icon} 当前存储：{backend_name} | 附件：{attachment_label}")
+local_data_path = get_storage_data_path_label()
+if backend_name != "MongoDB" and local_data_path:
+    st.sidebar.caption(f"本地数据：{local_data_path}")
 
 db          = st.session_state.db
 valid_projs = get_visible_projects(db, current_pm)

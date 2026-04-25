@@ -287,35 +287,47 @@ def get_mongo_uri():
     return os.environ.get("MONGO_URI", "")
 
 
-def build_storage_manager(force_local=False, json_path="tracker_data_web_v20.json", mongo_uri=None, prefer_local=True):
+def build_storage_manager(
+    force_local=False,
+    json_path="tracker_data_web_v20.json",
+    mongo_uri=None,
+    prefer_local=True,
+    attachment_dir=None,
+):
     if os.environ.get("INART_ALLOW_MEMORY_DB", "").strip() == "1":
         return MemoryStorageManager()
 
-    data_path = Path(json_path)
+    env_json_path = (
+        os.environ.get("INART_DATA_FILE", "").strip()
+        or os.environ.get("INART_JSON_PATH", "").strip()
+    )
+    env_attachment_dir = os.environ.get("INART_ATTACHMENT_DIR", "").strip()
+    data_path = Path(env_json_path or json_path)
+    local_attachment_dir = attachment_dir or env_attachment_dir or None
     backend_pref = os.environ.get("INART_STORAGE_BACKEND", "").strip().lower()
     resolved_mongo_uri = mongo_uri or get_mongo_uri()
 
     if force_local or backend_pref in {"json", "local"}:
-        return LocalJsonStorageManager(path=data_path)
+        return LocalJsonStorageManager(path=data_path, attachment_dir=local_attachment_dir)
 
     if backend_pref == "mongo":
         mongo_manager = MongoStorageManager(resolved_mongo_uri)
         if mongo_manager.is_ready or not prefer_local:
             return mongo_manager
-        return LocalJsonStorageManager(path=data_path)
+        return LocalJsonStorageManager(path=data_path, attachment_dir=local_attachment_dir)
 
     if prefer_local and data_path.exists():
-        return LocalJsonStorageManager(path=data_path)
+        return LocalJsonStorageManager(path=data_path, attachment_dir=local_attachment_dir)
 
     if resolved_mongo_uri:
         mongo_manager = MongoStorageManager(resolved_mongo_uri)
         if mongo_manager.is_ready:
             return mongo_manager
         if prefer_local:
-            return LocalJsonStorageManager(path=data_path)
+            return LocalJsonStorageManager(path=data_path, attachment_dir=local_attachment_dir)
         return mongo_manager
 
-    return LocalJsonStorageManager(path=data_path)
+    return LocalJsonStorageManager(path=data_path, attachment_dir=local_attachment_dir)
 
 
 def ensure_db_shape(db_obj):
