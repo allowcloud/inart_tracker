@@ -6,3 +6,6 @@ __pycache__/
 _tmp/
 build/
 dist/
+.local_data/
+img_assets/
+.streamlit/secrets.toml

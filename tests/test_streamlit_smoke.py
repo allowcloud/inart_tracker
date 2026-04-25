@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tempfile
 import textwrap
 import unittest
 from pathlib import Path
@@ -13,6 +14,43 @@ APP_PATH = REPO_ROOT / "app.py"
 
 
 class StreamlitSmokeTest(unittest.TestCase):
+    def test_local_storage_env_paths_are_honored(self) -> None:
+        from core.storage import build_storage_manager
+
+        old_env = {
+            key: os.environ.get(key)
+            for key in [
+                "INART_ALLOW_MEMORY_DB",
+                "INART_STORAGE_BACKEND",
+                "INART_DATA_FILE",
+                "INART_JSON_PATH",
+                "INART_ATTACHMENT_DIR",
+            ]
+        }
+        try:
+            tmp_root = REPO_ROOT / "_tmp"
+            tmp_root.mkdir(exist_ok=True)
+            tmp = Path(tempfile.mkdtemp(dir=tmp_root))
+            data_file = tmp / "pm_data.json"
+            attachment_dir = tmp / "attachments"
+            os.environ.pop("INART_ALLOW_MEMORY_DB", None)
+            os.environ["INART_STORAGE_BACKEND"] = "local"
+            os.environ["INART_DATA_FILE"] = str(data_file)
+            os.environ.pop("INART_JSON_PATH", None)
+            os.environ["INART_ATTACHMENT_DIR"] = str(attachment_dir)
+
+            manager = build_storage_manager()
+
+            self.assertEqual(manager.backend_name, "Local JSON")
+            self.assertEqual(Path(manager.path), data_file)
+            self.assertEqual(Path(manager.attachment_dir), attachment_dir)
+        finally:
+            for key, value in old_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
     def test_project_space_renders_without_exceptions(self) -> None:
         script = textwrap.dedent(
             f"""

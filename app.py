@@ -1358,6 +1358,18 @@ def _get_mongo_uri():
         return os.environ.get("MONGO_URI", "")
 
 
+def _get_local_data_file():
+    return (
+        os.environ.get("INART_DATA_FILE", "").strip()
+        or os.environ.get("INART_JSON_PATH", "").strip()
+        or "tracker_data_web_v20.json"
+    )
+
+
+def _get_local_attachment_dir():
+    return os.environ.get("INART_ATTACHMENT_DIR", "").strip()
+
+
 DB_MANAGER_CACHE_BUSTER = "20260309_bootfix_1"
 
 
@@ -1371,9 +1383,10 @@ def _build_db_manager(force_local=False):
 
     return build_storage_manager(
         force_local=force_local,
-        json_path="tracker_data_web_v20.json",
+        json_path=_get_local_data_file(),
         mongo_uri=_get_mongo_uri(),
         prefer_local=True,
+        attachment_dir=_get_local_attachment_dir() or None,
     )
 def _ensure_db_shape(db_obj):
     from core.storage import ensure_db_shape as _impl
@@ -1934,6 +1947,16 @@ def get_storage_backend_name():
 
 def get_storage_attachment_mode():
     return getattr(db_manager, "attachment_mode", "legacy")
+
+
+def get_storage_data_path_label():
+    raw_path = getattr(db_manager, "path", "") or ""
+    if not raw_path:
+        return ""
+    try:
+        return os.path.abspath(str(raw_path))
+    except Exception:
+        return str(raw_path)
 
 
 def derive_attachment_filename(ref):
@@ -13042,6 +13065,9 @@ attachment_mode = get_storage_attachment_mode()
 attachment_label = "GridFS 持久附件" if attachment_mode == "gridfs" else "本地文件引用"
 backend_icon = "🟢" if backend_name == "MongoDB" else "🟡"
 st.sidebar.caption(f"{backend_icon} 当前存储：{backend_name} | 附件：{attachment_label}")
+local_data_path = get_storage_data_path_label()
+if backend_name != "MongoDB" and local_data_path:
+    st.sidebar.caption(f"本地数据：{local_data_path}")
 
 db          = st.session_state.db
 valid_projs = get_visible_projects(db, current_pm)
@@ -13074,23 +13100,42 @@ st.sidebar.caption("建议流程：先看今日视图，再看全局大盘与甘
 # 备份与恢复
 st.sidebar.divider()
 st.sidebar.markdown("### ⚙️ 数据备份与恢复")
-try:
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        json_bytes = json.dumps(st.session_state.db, ensure_ascii=False, indent=4).encode("utf-8")
-        zf.writestr("database.json", json_bytes)
-        for ref in iter_attachment_refs_in_db(st.session_state.db):
-            raw = read_binary_ref(ref)
-            if raw:
-                zf.writestr(attachment_backup_path(ref), raw)
-    zip_buffer.seek(0)
+backup_package_key = "sidebar_backup_package"
+if st.sidebar.button("📦 生成/刷新备份包", key="sidebar_prepare_full_backup", use_container_width=True):
+    try:
+        zip_buffer = io.BytesIO()
+        attachment_count = 0
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            json_bytes = json.dumps(st.session_state.db, ensure_ascii=False, indent=4).encode("utf-8")
+            zf.writestr("database.json", json_bytes)
+            for ref in iter_attachment_refs_in_db(st.session_state.db):
+                raw = read_binary_ref(ref)
+                if raw:
+                    attachment_count += 1
+                    zf.writestr(attachment_backup_path(ref), raw)
+        zip_buffer.seek(0)
+        st.session_state[backup_package_key] = {
+            "data": zip_buffer.getvalue(),
+            "filename": f"inart_pm_full_backup_{datetime.date.today()}.zip",
+            "created_at": datetime.datetime.now().strftime("%H:%M:%S"),
+            "attachment_count": attachment_count,
+        }
+        st.sidebar.success(f"备份已生成：{attachment_count} 个附件")
+    except Exception as e:
+        st.session_state.pop(backup_package_key, None)
+        st.sidebar.warning(f"备份生成失败: {e}")
+
+backup_package = st.session_state.get(backup_package_key)
+if isinstance(backup_package, dict) and backup_package.get("data"):
     st.sidebar.download_button(
-        "💾 下载全量备份 (数据+图片)", data=zip_buffer,
-        file_name=f"inart_pm_full_backup_{datetime.date.today()}.zip",
+        "💾 下载已生成备份",
+        data=backup_package.get("data", b""),
+        file_name=backup_package.get("filename") or f"inart_pm_full_backup_{datetime.date.today()}.zip",
         mime="application/zip"
     )
-except Exception as e:
-    st.sidebar.warning(f"备份生成失败: {e}")
+    st.sidebar.caption(f"上次生成：{backup_package.get('created_at', '-')}")
+else:
+    st.sidebar.caption("需要下载时再生成备份，日常操作不再自动打包。")
 
 restore_file = st.sidebar.file_uploader("📂 上传备份以恢复", type=["zip", "json"])
 if restore_file is not None and st.sidebar.button("⚠️ 确认覆盖恢复", type="primary"):
